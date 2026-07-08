@@ -1,0 +1,34 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v1",
+    "name": "RFsim",
+    "description": "S-parameter simulation of PCB structures with openEMS",
+    "description_full": "Select one or two pads in the PCB editor and simulate S-parameters (S11/S21, Smith chart, VSWR, group delay) with the openEMS FDTD solver. Board geometry and stackup are converted directly from KiCad data to CSXCAD primitives; results are saved as Touchstone files. Requires openEMS, scikit-rf, matplotlib and h5py installed into KiCad's Python (see README).",
+    "identifier": "com.github.nbalciunas.kicad-rfsim",
+    "type": "plugin",
+    "author": {
+        "name": "Nojus Balčiūnas",
+        "contact": {
+            "web": "https://nbalciunas.github.io/"
+        }
+    },
+    "license": "MIT",
+    "icon": "assets/icon.png",
+    "resources": {
+        "homepage": "https://github.com/NBalciunas/kicad-rfsim"
+    },
+    "tags": [
+        "rf",
+        "simulation",
+        "toolkit"
+    ],
+    "versions": [
+        {
+            "version": "1.0.0",
+            "status": "stable",
+            "kicad_version": "8.0.8",
+            "platforms": [
+                "windows"
+            ]
+        }
+    ]
+}
