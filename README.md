@@ -23,6 +23,10 @@ primitives — no gerbers, no rasterizing.
   panel: main lobe magnitude/direction, 3 dB angular width, side lobe
   level. Dmax and radiation efficiency are in `farfield.json` and the
   solver log.
+- **Farfield 3D**: rotatable CST-style directivity balloon (full sphere,
+  5° grid, radius/color = dBi over a 30 dB range, +z = board normal). The
+  balloon is semi-transparent with the PCB drawn as a reference plate at
+  the centre (F.Cu red / B.Cu blue / ports green, oriented as the layout).
 - Substrate (εr, tanδ, height h, copper thickness hm) set in the dialog
   (defaults: 1.6 mm FR4, 35 µm copper); copper modeled as lossy conducting
   sheets, vias as cylinders.
@@ -184,6 +188,14 @@ Verified working (headless, real openEMS runs on this machine):
       implementation)
 - [x] First-show canvas clipping fixed (x-axis label was invisible until a
       manual resize; see wx traps below)
+- [x] Farfield 3D balloon: third NF2FF pass on a 5° full-sphere grid ->
+      `grid3d` in farfield.json; `_plot_farfield3d` renders plot_surface
+      with jet facecolors + dBi colorbar; mouse-rotatable in the wx canvas
+- [x] 3D balloon made transparent (facecolor alpha 0.3) with the PCB drawn
+      as a reference plate via `Poly3DCollection` (B.Cu/F.Cu/ports at
+      z=∓dz, centred, scaled so max board dim ~= half the balloon radius —
+      the dB-unit radius has no physical scale vs mm, so board size is a
+      display choice / orientation marker only)
 
 Not yet verified:
 

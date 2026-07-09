@@ -236,6 +236,10 @@ def _farfield(outdir, ff, sim_path, port1, freq, S):
     res = ff.CalcNF2FF(sim_path, f_ff, theta, [0.0, 90.0], center=center)
     res_az = ff.CalcNF2FF(sim_path, f_ff, [90.0], phi_az.tolist(),
                           center=center, outfile="nf2ff_az.h5")
+    theta3 = np.arange(0.0, 180.1, 5.0)   # full sphere, 5 deg: 3D balloon
+    phi3 = np.arange(0.0, 360.1, 5.0)
+    res3 = ff.CalcNF2FF(sim_path, f_ff, theta3.tolist(), phi3.tolist(),
+                        center=center, outfile="nf2ff_3d.h5")
 
     def d_dbi(r):
         En = np.maximum(r.E_norm[0] / np.max(r.E_norm[0]), 1e-6)
@@ -259,6 +263,9 @@ def _farfield(outdir, ff, sim_path, port1, freq, S):
                 "Theta=90": {"angle_deg": phi_az.tolist(),
                              "D_dBi": D_az.tolist()},
             },
+            "grid3d": {"theta_deg": theta3.tolist(),
+                       "phi_deg": phi3.tolist(),
+                       "D_dBi": d_dbi(res3).tolist()},
             "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
             "P_in_W": P_in, "efficiency_pct": eff,
         }, fh, indent=1)

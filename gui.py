@@ -336,6 +336,9 @@ class ResultsFrame(wx.Frame):
                     for cut in self._ff["cuts"]:
                         plots.append("Farfield (f=%g GHz) (%s)"
                                      % (self._ff["f_hz"] / 1e9, cut))
+                    if "grid3d" in self._ff:
+                        plots.append("Farfield (f=%g GHz)"
+                                     % (self._ff["f_hz"] / 1e9))
                 except Exception:
                     pass
         self.choice = wx.Choice(self, choices=plots)
@@ -376,7 +379,11 @@ class ResultsFrame(wx.Frame):
             self._plot_field(ax, sel[0])
         elif sel.startswith("Farfield"):
             ax.remove()
-            self._plot_farfield(sel[sel.rfind("(") + 1:-1])
+            tag = sel[sel.rfind("(") + 1:-1]
+            if tag in self._ff["cuts"]:      # "(Phi=0)" etc. -> 2D cut
+                self._plot_farfield(tag)
+            else:                            # bare "(f=xx GHz)" -> 3D balloon
+                self._plot_farfield3d()
         elif sel.startswith("S-Parameters"):
             for j in range(net.nports):
                 for k in range(net.nports):
@@ -489,6 +496,67 @@ class ResultsFrame(wx.Frame):
         self._anim = FuncAnimation(self.figure, step, frames=frames,
                                    interval=60, blit=False,
                                    cache_frame_data=False)
+
+    def _plot_farfield3d(self):
+        """Transparent 3D directivity balloon with the PCB as a reference plate.
+
+        radius/color = dBi over a 30 dB range, +z = board normal.
+        """
+        import numpy as np
+        from matplotlib import cm, colors
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+        g = self._ff["grid3d"]
+        th = np.radians(np.asarray(g["theta_deg"], float))[:, None]
+        ph = np.radians(np.asarray(g["phi_deg"], float))[None, :]
+        D = np.asarray(g["D_dBi"], float)
+        rmin = float(D.max()) - 30.0
+        R = np.maximum(D - rmin, 0.0)
+        X = R * np.sin(th) * np.cos(ph)
+        Y = R * np.sin(th) * np.sin(ph)
+        Z = R * np.cos(th)
+
+        ax = self.figure.add_subplot(111, projection="3d")
+        norm = colors.Normalize(vmin=rmin, vmax=float(D.max()))
+        fc = cm.jet(norm(D))
+        fc[..., 3] = 0.3  # transparent balloon so the board shows through
+        ax.plot_surface(X, Y, Z, facecolors=fc, rstride=1, cstride=1,
+                        linewidth=0, antialiased=False, shade=False)
+        m = float(R.max()) or 1.0
+
+        # PCB reference plate at the origin, oriented as in Board layout
+        # (+z = board normal). Scale is a display choice: the far field is
+        # notionally infinitely far, so the board is a size-less orientation
+        # marker -> largest board dim ~= half the balloon radius.
+        br = self.model["board_rect"]
+        cx, cy = 0.5 * (br["x0"] + br["x1"]), 0.5 * (br["y0"] + br["y1"])
+        span = max(br["x1"] - br["x0"], br["y1"] - br["y0"], 1e-6)
+        sc = 0.5 * m / span
+        dz = 0.02 * m
+
+        def plate(poly, z):
+            return [((px - cx) * sc, (py - cy) * sc, z) for px, py in poly]
+
+        for name, col, z in (("B.Cu", "tab:blue", -dz), ("F.Cu", "tab:red", dz)):
+            polys = [plate(p, z) for p in self.model["polygons"].get(name, [])]
+            if polys:
+                ax.add_collection3d(Poly3DCollection(
+                    polys, facecolor=col, edgecolor="none"))
+        for p in self.model["ports"]:
+            hw, hl = p["width"] / 2.0, p["length"] / 2.0
+            corners = [(p["x"] - hl, p["y"] - hw), (p["x"] + hl, p["y"] - hw),
+                       (p["x"] + hl, p["y"] + hw), (p["x"] - hl, p["y"] + hw)]
+            ax.add_collection3d(Poly3DCollection(
+                [plate(corners, 1.5 * dz)], facecolor="lime", edgecolor="none"))
+
+        ax.set_xlim(-m, m)
+        ax.set_ylim(-m, m)
+        ax.set_zlim(-m, m)
+        ax.set_box_aspect((1, 1, 1))
+        ax.set_axis_off()
+        ax.set_title("Farfield (f=%g GHz)" % (self._ff["f_hz"] / 1e9))
+        sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
+        sm.set_array([])
+        self.figure.colorbar(sm, ax=ax, shrink=0.65, label="dBi")
 
     def _plot_farfield(self, cut):
         """One polar directivity cut in absolute dBi (CST-style)."""
