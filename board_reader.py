@@ -99,22 +99,28 @@ def _stackup_from_file(path):
     return items or None
 
 
-def _default_stackup(board, cu_names):
-    """Uniform FR4 stackup from board thickness when no stackup is saved."""
-    total = pcbnew.ToMM(board.GetDesignSettings().GetBoardThickness()) or 1.6
+def _uniform_stackup(cu_names, diel_total, eps, tand, cu_t):
+    """n copper sheets separated by equal dielectric layers (total diel_total)."""
     n = len(cu_names)
-    diel_t = max(total - n * DEF_CU_T, 0.1) / (n - 1)
+    diel_t = max(diel_total, 0.1) / (n - 1)
     items = []
     for k, name in enumerate(cu_names):
-        items.append({"kind": "copper", "name": name, "thickness": DEF_CU_T})
+        items.append({"kind": "copper", "name": name, "thickness": cu_t})
         if k < n - 1:
             items.append({"kind": "dielectric", "name": "dielectric %d" % (k + 1),
-                          "thickness": diel_t, "epsilon": DEF_EPSILON,
-                          "loss_tangent": DEF_LOSS_TAN})
+                          "thickness": diel_t, "epsilon": eps,
+                          "loss_tangent": tand})
     return items
 
 
-def _stackup(board):
+def _default_stackup(board, cu_names):
+    """Uniform FR4 stackup from board thickness when no stackup is saved."""
+    total = pcbnew.ToMM(board.GetDesignSettings().GetBoardThickness()) or 1.6
+    return _uniform_stackup(cu_names, total - len(cu_names) * DEF_CU_T,
+                            DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T)
+
+
+def _stackup(board, substrate=None):
     """Physical stackup, top to bottom. Returns (copper_layers, dielectric_layers).
 
     Copper is treated as a zero-thickness sheet sitting on dielectric
@@ -126,13 +132,17 @@ def _stackup(board):
     cu_names = [_lname(lid) for lid in cu_ids]
     id_of = dict(zip(cu_names, cu_ids))
 
-    items = _stackup_from_file(board.GetFileName())
-    if items:
-        file_cu = [it["name"] for it in items if it["kind"] == "copper"]
-        if file_cu != cu_names:  # stale/odd file -> defaults
-            items = None
-    if not items:
-        items = _default_stackup(board, cu_names)
+    if substrate:  # explicit user values win over the board file
+        items = _uniform_stackup(cu_names, substrate["h"], substrate["er"],
+                                 substrate["tand"], substrate["cu_t"])
+    else:
+        items = _stackup_from_file(board.GetFileName())
+        if items:
+            file_cu = [it["name"] for it in items if it["kind"] == "copper"]
+            if file_cu != cu_names:  # stale/odd file -> defaults
+                items = None
+        if not items:
+            items = _default_stackup(board, cu_names)
 
     z = sum(it["thickness"] for it in items if it["kind"] == "dielectric")
     copper, diel = [], []
@@ -154,7 +164,7 @@ def _stackup(board):
 
 # KiCad 8 SWIG only exposes TransformShapeToPolygon usably for PAD (the
 # other overloads demand an unwrapped ERROR_LOC enum), so tracks/arcs/via
-# rings are polygonized with plain math below.
+# rings and graphic shapes are polygonized with plain math below.
 
 def _add_outline(ps, pts):
     ps.NewOutline()
@@ -182,28 +192,102 @@ def _stadium_pts(ax, ay, bx, by, w, n=8):
     return pts
 
 
+def _add_arc(ps, c, r, a0, sweep, width):
+    n = max(2, int(abs(sweep) / math.radians(10)))
+    pts = [(c.x + r * math.cos(a0 + sweep * i / n),
+            c.y + r * math.sin(a0 + sweep * i / n)) for i in range(n + 1)]
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        _add_outline(ps, _stadium_pts(ax, ay, bx, by, width))
+
+
 def _add_track(ps, t):
     if isinstance(t, pcbnew.PCB_ARC):
-        c, r = t.GetCenter(), t.GetRadius()
+        c = t.GetCenter()
         a0 = math.atan2(t.GetStart().y - c.y, t.GetStart().x - c.x)
-        sweep = math.radians(t.GetArcAngle().AsDegrees())
-        n = max(2, int(abs(sweep) / math.radians(10)))
-        pts = [(c.x + r * math.cos(a0 + sweep * i / n),
-                c.y + r * math.sin(a0 + sweep * i / n)) for i in range(n + 1)]
-        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-            _add_outline(ps, _stadium_pts(ax, ay, bx, by, t.GetWidth()))
+        _add_arc(ps, c, t.GetRadius(), a0,
+                 math.radians(t.GetArcAngle().AsDegrees()), t.GetWidth())
     else:
         a, b = t.GetStart(), t.GetEnd()
         _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, t.GetWidth()))
 
 
+def _stroke(ps, pts, width):
+    """Closed stroked outline as a chain of stadium polygons."""
+    for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]):
+        _add_outline(ps, _stadium_pts(ax, ay, bx, by, width))
+
+
+def _add_shape(ps, s):
+    """Graphic shape drawn on a copper layer (antennas, logos, ...)."""
+    t = s.GetShape()
+    if t == pcbnew.SHAPE_T_POLY:
+        poly = s.GetPolyShape()
+        if s.IsFilled():
+            # ponytail: ignores the outline stroke width around a filled
+            # poly; add it back if a fab-matched simulation ever needs it
+            ps.BooleanAdd(poly, PM_FAST)
+        else:
+            for i in range(poly.OutlineCount()):
+                ol = poly.Outline(i)
+                _stroke(ps, [(ol.CPoint(j).x, ol.CPoint(j).y)
+                             for j in range(ol.PointCount())], s.GetWidth())
+    elif t == pcbnew.SHAPE_T_RECT:
+        pts = [(c.x, c.y) for c in s.GetRectCorners()]
+        if s.IsFilled():
+            _add_outline(ps, pts)
+        else:
+            _stroke(ps, pts, s.GetWidth())
+    elif t == pcbnew.SHAPE_T_CIRCLE:
+        c, r, w = s.GetCenter(), s.GetRadius(), s.GetWidth()
+        if s.IsFilled():
+            _add_outline(ps, _circle_pts(c.x, c.y, r + w / 2.0))
+        else:  # ring
+            ring = pcbnew.SHAPE_POLY_SET()
+            _add_outline(ring, _circle_pts(c.x, c.y, r + w / 2.0))
+            hole = pcbnew.SHAPE_POLY_SET()
+            _add_outline(hole, _circle_pts(c.x, c.y, max(r - w / 2.0, 0)))
+            ring.BooleanSubtract(hole, PM_FAST)
+            ps.BooleanAdd(ring, PM_FAST)
+    elif t == pcbnew.SHAPE_T_SEGMENT:
+        a, b = s.GetStart(), s.GetEnd()
+        _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, s.GetWidth()))
+    elif t == pcbnew.SHAPE_T_ARC:
+        c = s.GetCenter()
+        a0 = math.atan2(s.GetStart().y - c.y, s.GetStart().x - c.x)
+        _add_arc(ps, c, s.GetRadius(), a0,
+                 math.radians(s.GetArcAngle().AsDegrees()), s.GetWidth())
+    elif t == pcbnew.SHAPE_T_BEZIER:
+        s.RebuildBezierToSegmentsPointsList(5000)  # 5 um max error
+        pts = [(p.x, p.y) for p in s.GetBezierPoints()]
+        if len(pts) >= 3 and s.IsFilled():
+            _add_outline(ps, pts)
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            _add_outline(ps, _stadium_pts(ax, ay, bx, by, s.GetWidth()))
+    # text: no safe polygonization in KiCad 8 SWIG -> warned in extract()
+
+
 def _copper_polys(board, layer_id, region, max_err):
-    """All copper on one layer inside `region`, as simple (fractured) polygons."""
+    """Copper on one layer inside `region` -> (fractured polygons, n_clipped).
+
+    n_clipped counts non-zone items sticking out past the region boundary:
+    their cut ends terminate into the absorber like a matched load, which
+    silently fakes good S-parameters if the cut copper was the structure
+    under test (seen live with a meander antenna at default margin).
+    """
+    n_clipped = 0
+
+    def crosses(bb):
+        return not (bb.GetLeft() >= region.GetLeft()
+                    and bb.GetRight() <= region.GetRight()
+                    and bb.GetTop() >= region.GetTop()
+                    and bb.GetBottom() <= region.GetBottom())
+
     ps = pcbnew.SHAPE_POLY_SET()
     for t in board.GetTracks():
         if not (t.IsOnLayer(layer_id)
                 and t.GetBoundingBox().Intersects(region)):
             continue
+        n_clipped += crosses(t.GetBoundingBox())
         if isinstance(t, pcbnew.PCB_VIA):
             try:
                 flashed = t.FlashLayer(int(layer_id))
@@ -214,10 +298,21 @@ def _copper_polys(board, layer_id, region, max_err):
                 _add_outline(ps, _circle_pts(pos.x, pos.y, t.GetWidth() / 2.0))
         else:
             _add_track(ps, t)
+    for d in board.GetDrawings():
+        if (isinstance(d, pcbnew.PCB_SHAPE) and d.IsOnLayer(layer_id)
+                and d.GetBoundingBox().Intersects(region)):
+            n_clipped += crosses(d.GetBoundingBox())
+            _add_shape(ps, d)
     for fp in board.GetFootprints():
         for pad in fp.Pads():
             if pad.IsOnLayer(layer_id) and pad.GetBoundingBox().Intersects(region):
+                n_clipped += crosses(pad.GetBoundingBox())
                 pad.TransformShapeToPolygon(ps, layer_id, 0, max_err)
+        for it in fp.GraphicalItems():
+            if (isinstance(it, pcbnew.PCB_SHAPE) and it.IsOnLayer(layer_id)
+                    and it.GetBoundingBox().Intersects(region)):
+                n_clipped += crosses(it.GetBoundingBox())
+                _add_shape(ps, it)
     for zn in board.Zones():
         if zn.GetIsRuleArea() or not zn.IsOnLayer(layer_id) or not zn.IsFilled():
             continue
@@ -241,7 +336,7 @@ def _copper_polys(board, layer_id, region, max_err):
                for j in range(ol.PointCount())]
         if len(pts) >= 3:
             polys.append(pts)
-    return polys
+    return polys, n_clipped
 
 
 def _feed_direction(board, pad):
@@ -308,19 +403,27 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm):
+def extract(board, pads, margin_mm, substrate=None):
     """Board -> plain dict: stackup, copper polygons, vias, ports.
 
     Geometry is cropped to the bounding box of the port pads inflated by
     margin_mm. Coordinates in mm, y flipped, z=0 at board bottom.
+    substrate overrides the board stackup with a uniform one:
+    {"er", "tand", "h" (total dielectric mm), "cu_t" (mm)}.
     """
-    copper_layers, diel_layers = _stackup(board)
+    copper_layers, diel_layers = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
 
     first = pads[0].GetBoundingBox()
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
     for p in pads[1:]:
         region.Merge(p.GetBoundingBox())
+    # Auto-fit the whole board (Edge.Cuts): antennas kept getting cropped by
+    # pads-bbox-sized domains. ponytail: whole-board domain; bring back
+    # selection-bbox cropping if huge boards ever make this too slow.
+    brd = board.GetBoardEdgesBoundingBox()
+    if brd.GetWidth() > 0 and brd.GetHeight() > 0:
+        region.Merge(brd)
     # 2x margin: inner band = clear air, outer band = PML absorber. Copper is
     # cropped at the outer edge so cut planes/traces run through the PML and
     # terminate quasi-matched instead of reflecting off an open end.
@@ -336,10 +439,35 @@ def extract(board, pads, margin_mm):
                 "y0": -_mm(b.GetBottom()), "y1": -_mm(b.GetTop())}
 
     polygons = {}
+    clipped = {}
     for c in copper_layers:
-        polys = _copper_polys(board, c["id"], region, max_err)
+        polys, n_clip = _copper_polys(board, c["id"], region, max_err)
         if polys:
             polygons[c["name"]] = polys
+        if n_clip:
+            clipped[c["name"]] = n_clip
+
+    # Text on copper cannot be polygonized through KiCad 8's SWIG (every
+    # route needs the unwrapped ERROR_LOC enum or crashes) -> warn instead
+    # of silently dropping copper.
+    warnings = []
+    if clipped:
+        warnings.append(
+            "Copper on %s extends beyond the simulation domain and is cut "
+            "at the boundary. If it's part of the structure under test, "
+            "increase the domain margin." % "/".join(clipped))
+    cu_ids = {c["id"] for c in copper_layers}
+    texts = list(board.GetDrawings())
+    for fp in board.GetFootprints():
+        texts += list(fp.GraphicalItems()) + [fp.Reference(), fp.Value()]
+    for it in texts:
+        if (isinstance(it, pcbnew.PCB_TEXT) and it.IsVisible()
+                and it.GetLayer() in cu_ids
+                and it.GetBoundingBox().Intersects(region)):
+            warnings.append(
+                "text \"%s\" on %s is inside the simulated area but NOT "
+                "modeled (KiCad 8 API cannot convert text to copper)"
+                % (it.GetShownText(True), _lname(it.GetLayer())))
 
     z_of = {c["name"]: c["z"] for c in copper_layers}
     vias = []
@@ -355,6 +483,32 @@ def extract(board, pads, margin_mm):
                 "z1": z_of.get(top, copper_layers[0]["z"]),
             })
 
+    ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    # A port needs a ground return: ref-layer copper overlapping any part of
+    # the pad (antenna feeds sit at the ground pour edge, so demanding the
+    # pad *center* is too strict). ponytail: bbox overlap test, upgrade to
+    # point-in-polygon if odd-shaped pours false-positive.
+    for p, pad in zip(ports, pads):
+        bb = pad.GetBoundingBox()
+        px0, px1 = _mm(bb.GetLeft()), _mm(bb.GetRight())
+        py0, py1 = -_mm(bb.GetBottom()), -_mm(bb.GetTop())
+        for poly in polygons.get(p["ref_layer"], []):
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            if (min(xs) <= px1 and max(xs) >= px0
+                    and min(ys) <= py1 and max(ys) >= py0):
+                break
+        else:
+            raise ValueError(
+                "Port %d (%s): no copper on reference layer %s under the "
+                "pad.\nThe port drives the pad against %s, so a ground "
+                "plane/pour on %s must reach at least the edge of the pad "
+                "(for PCB antennas the pour edge typically sits right at "
+                "the feed pad). Add/extend a filled zone there, refill "
+                "zones, then re-run." % (p["number"], p["label"],
+                                         p["ref_layer"], p["ref_layer"],
+                                         p["ref_layer"]))
+
     for c in copper_layers:
         c.pop("id")
     return {
@@ -364,6 +518,6 @@ def extract(board, pads, margin_mm):
         "board_rect": rect_mm(diel_box),
         "polygons": polygons,
         "vias": vias,
-        "ports": [_port(board, p, i + 1, copper_layers)
-                  for i, p in enumerate(pads)],
+        "ports": ports,
+        "warnings": warnings,
     }

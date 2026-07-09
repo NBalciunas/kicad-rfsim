@@ -36,6 +36,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
     def Run(self):
         try:
             self._run()
+        except ValueError as e:  # setup problems: readable message, no traceback
+            wx.MessageBox(str(e), "RFsim", wx.ICON_ERROR)
         except Exception:
             import traceback
             wx.MessageBox(traceback.format_exc(), "RFsim error", wx.ICON_ERROR)
@@ -54,8 +56,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         pads = board_reader.selected_pads(board)
         if not 1 <= len(pads) <= 2:
             wx.MessageBox(
-                "Select one or two pads first (click / shift-click in the "
-                "PCB editor), then run RFsim.\nSelected pads: %d" % len(pads),
+                "You must select one or two pads to run a simulation.",
                 "RFsim", wx.ICON_INFORMATION)
             return
 
@@ -74,8 +75,13 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             pads.reverse()
         port_types = settings.pop("port_types")
         outdir = settings.pop("outdir")
+        substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
 
-        model = board_reader.extract(board, pads, settings["margin_mm"])
+        model = board_reader.extract(board, pads, settings["margin_mm"],
+                                     substrate)
+        if model["warnings"]:
+            wx.MessageBox("\n\n".join(model["warnings"]),
+                          "RFsim", wx.ICON_WARNING)
         for p, t in zip(model["ports"], port_types):
             p["type"] = t
         model["settings"] = settings

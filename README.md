@@ -11,9 +11,24 @@ primitives — no gerbers, no rasterizing.
 
 - Select one or two pads, run, get S11/S21 plots, Smith chart, VSWR and
   group delay, plus a Touchstone (`.s1p`/`.s2p`) file.
-- Stackup (dielectric thickness, εr, tanδ, copper thickness) read from the
-  board; copper modeled as lossy conducting sheets, vias as cylinders.
+- **Board layout view**: rendered top view of exactly what was simulated —
+  B.Cu blue, F.Cu red, ports green, board edge and domain outlines.
+- **E/H-field animations**: traveling-wave views on the substrate mid-plane
+  at the dialog's "Define at" frequency, port 1 excited — signed E_z and
+  the dominant in-plane H component (both red/blue); shows how the signal
+  propagates and where energy couples away.
+- **Far-field pattern**: NF2FF polar directivity cuts (φ = 0°/90°, θ = 0 is
+  the board normal) at the "Define at" frequency, with Dmax (dBi) and
+  radiation efficiency in the title.
+- Substrate (εr, tanδ, height h, copper thickness hm) set in the dialog
+  (defaults: 1.6 mm FR4, 35 µm copper); copper modeled as lossy conducting
+  sheets, vias as cylinders.
+- Copper geometry includes pads, tracks, arcs, vias, filled zones **and
+  graphic shapes on copper layers** (drawn polygons/rects/circles/arcs —
+  e.g. antenna patches), from both board drawings and footprint graphics.
 - Lumped or deembedded microstrip (MSL) ports, selectable per port.
+- Sanity guard: refuses to run a port with no copper on its reference
+  layer under the pad (no ground return = meaningless total reflection).
 - Coarse / medium / fine mesh presets, PML_8 absorbing boundaries.
 - The solver runs as a separate process: a crash never takes KiCad down,
   and the same runner works headless (`python runner.py model.json outdir`).
@@ -50,7 +65,10 @@ primitives — no gerbers, no rasterizing.
 
 1. Open your board, click a pad (port 1), shift-click a second pad (port 2).
 2. Tools → External Plugins → RFsim.
-3. Set frequency range, port impedance, port types, margin, mesh preset.
+3. Fill in the dialog: sweep range and "Define at" (the frequency used for
+   the field animations and far-field), port impedance and per-port type,
+   substrate (presets: FR-4 / Rogers RO4350B / Custom — editing εr or tanδ
+   flips to Custom), mesh preset, domain margin, output directory.
    - **Lumped** port: vertical excitation across the substrate under the
      pad. Works everywhere; reference plane is the pad itself.
    - **Microstrip (MSL)** port: deembedded transmission-line port. Needs a
@@ -59,20 +77,35 @@ primitives — no gerbers, no rasterizing.
 4. Run Simulation. Results open in a plot window; `results.s2p` and
    `model.json` land in the output directory.
 
-**Save the board first** — the stackup (Board Setup → Physical Stackup) is
-read from the saved file because KiCad 8's Python API doesn't expose it.
-Boards without a customized stackup get a default: FR4, εr 4.5, tanδ 0.02,
-35 µm copper.
+The dialog's substrate values always win: GUI runs build a uniform stackup
+from them (multi-layer boards split h evenly between dielectric layers).
+The board file's `(stackup ...)` section is only used by headless runs
+without an override — KiCad 8's Python API doesn't expose the stackup, so
+that path needs a saved board.
+
+A port needs a ground return: copper on the reference layer (the adjacent
+copper layer in the stackup) reaching at least the edge of the pad — a
+filled zone, plane, or drawn shape. Without it the plugin refuses to run;
+results would be |S11| = 1 with only stray pad-to-pad coupling. For PCB
+antennas, keep the usual layout rule: ground pour up to the antenna
+keepout, feed pad at the pour edge. The domain auto-fits the whole board
+(Edge.Cuts), so the margin is air around the PCB — for antennas give the
+radiator breathing room before the absorber: margin ≥ 15 mm (~λ/8 at
+2.4 GHz) instead of the 4 mm default.
 
 ## Scope / limitations (v1)
 
 - Max two ports, no far-field/antenna post-processing.
-- Simulated area = bounding box of the selected pads + 2× margin; copper
-  crossing that boundary is cut and terminates into the absorber.
+- Simulated area = the whole board (Edge.Cuts bbox, merged with the
+  selected pads' bbox; pads-only if the board has no outline) + 2× margin.
+  Copper crossing that boundary is cut and terminates into the absorber.
 - The reference layer for a port is the adjacent copper layer in the
   stackup (e.g. F.Cu → the first inner/bottom layer).
-- Copper graphics (text/shapes on copper layers) are ignored; pads, tracks,
-  arcs, vias and filled zones are included.
+- Everything on a copper layer is simulated — pads, tracks, arcs, vias,
+  filled zones, and graphic shapes including beziers — **except text**,
+  which KiCad 8's Python API cannot convert to polygons. Text inside the
+  simulated area triggers a warning dialog instead of being silently
+  dropped.
 
 ## Validation
 
@@ -91,7 +124,7 @@ Expected: S11 < −10 dB, S21 > −0.5 dB across 1–6 GHz, `PASS`.
 
 Everything below is for picking up development later, not for users.
 
-## Status (2026-07-08)
+## Status (2026-07-09, third session)
 
 Verified working (headless, real openEMS runs on this machine):
 
@@ -101,15 +134,49 @@ Verified working (headless, real openEMS runs on this machine):
 - [x] 1-port → `.s1p` (cut trace terminates into PML, S11 ≈ −21 dB as expected)
 - [x] Package imports the way KiCad loads it (`__import__("rfsim-dev")`)
 - [x] skrf reads the hand-written Touchstone files
+- [x] **Live GUI click-through in pcbnew** (user-tested on a real board):
+      SettingsDialog → RunDialog streaming → ResultsFrame plots all work
+- [x] Substrate override from the dialog (er/tanδ/h/cu_t → uniform stackup)
+- [x] Graphic-shape copper: poly patch, rect ground, stroked circle ring,
+      segment — extracted and accepted by the ground-return guard
+- [x] Ground-return guard fires on a plane-less board, silent on a good one
+- [x] Clipped-copper warning (structure cut at region edge -> fake matched
+      S11; found via TI meander antenna at default margin)
+- [x] Board-layout + E/H-field animation views (FD dumps `Ef.h5`/`Hf.h5`
+      in exc1/, one plane at substrate mid, one frequency f0; loader
+      `gui._load_field` handles the (3, Nz, Ny, Nx) float32 layout, mesh
+      stored in meters). All 8 ResultsFrame views render headless via
+      wx.App(False) + savefig
+- [x] Far-field via NF2FF: `openEMS.nf2ff.nf2ff(csx, name, start, stop,
+      frequency=[...])` box in the clear-air band (region inset by
+      1.5×margin), FD recording at `settings["f_field"]` (the dialog's
+      "Define at" frequency; falls back to band center for old models —
+      same frequency drives the Ef/Hf dumps). Writes `farfield.json`
+      (D_dBi[phi][theta], Dmax_dBi, efficiency). `CalcNF2FF` center must
+      be passed in METERS and lie inside the box (default [0,0,0] is
+      outside for real board coordinates -> "invalid center" class errors).
+      Thru-line sanity: Dmax 5.6 dBi, 0.7% radiated
+- [x] Whole-board auto-fit domain (Edge.Cuts bbox merged into the region;
+      margin = air around the PCB) after a patch antenna got cropped twice
+- [x] Settings dialog redesign: "RFsim v1.0" header + icon, sections
+      Frequency / Port / Substrate / Simulation, units after each field,
+      substrate presets (FR-4, Rogers RO4350B, Custom), "Define at"
+      frequency, centered Run button. Logic + screenshot verified headless
+      (wx.App(False), ScreenDC blit)
+- [x] "Define at" f_field drives Ef/Hf dumps and NF2FF — verified 2 GHz
+      end-to-end (dump attrs + farfield.json)
+- [x] H-field view restyled to match E (dominant in-plane component,
+      signed red/blue); clip warning consolidated to one message, titles
+      cleaned up per user wording
 
-Not yet verified — **do this first next session**:
+Not yet verified:
 
-- [ ] Live click-through in the KiCad GUI: pad selection → SettingsDialog →
-      RunDialog log streaming/cancel → ResultsFrame plots. All dialogs are
-      import-tested only; nobody has clicked them in a running pcbnew yet.
 - [ ] A board with vias / inner layers / zones with holes (fractured-slit
       polygons and `AddCylinder` vias are untested against a real solver run)
 - [ ] Boards with a customized (non-default) stackup section in the file
+      (now a headless-only code path — GUI always overrides)
+- [ ] A real antenna simulation end-to-end (the graphic-shape support was
+      added for one; extraction is tested, a solver run on it is not)
 
 ## Architecture / data flow
 
@@ -154,10 +221,34 @@ bottom, copper = zero-thickness sheets at dielectric boundaries):
   `GetBoardThickness()` + copper count. Hence "save the board first".
 - The `ERROR_LOC` enum values exist nowhere in the bindings. Only
   `PAD.TransformShapeToPolygon(ps, layer, clearance, maxErr)` works (its
-  wrapper has a C++ default for the enum). Tracks/arcs/via annulars are
-  polygonized with plain math (`_stadium_pts`/`_circle_pts`).
+  wrapper has a C++ default for the enum); `PCB_SHAPE`'s overload demands
+  the enum → unusable. Tracks/arcs/via annulars use plain math
+  (`_stadium_pts`/`_circle_pts`); graphic shapes use `GetPolyShape()` /
+  `GetRectCorners()` / center+radius + the same math (`_add_shape`).
+  Footprint graphics are `PCB_SHAPE` in board coordinates in KiCad 8 —
+  no footprint transform needed. Beziers: `RebuildBezierToSegmentsPointsList`
+  + `GetBezierPoints` works fine.
+- **Text is unreachable, don't retry**: `TransformTextToPolySet` needs the
+  unwrapped `ERROR_LOC`; `GetEffectiveTextShape()` subshapes are opaque
+  `SHAPE` wrappers whose `Format()`, `Clone()` and `Cast()` all **hard-crash
+  the interpreter** (access violations, tested 2026-07-08). Text on copper
+  inside the region → collected into `model["warnings"]`, shown as a wx
+  warning dialog (GUI) and printed by the runner.
 - `pcbnew.BOX2I()` default-constructs at origin (0,0) — `Merge` then wrongly
   includes the origin. Always init from the first pad's bbox.
+
+**KiCad-bundled wxPython/matplotlib traps** (both hit in the results window):
+
+- KiCad 8's bundled wxPython ships `wx/svg/` **without the compiled
+  `_nanosvg` extension** (only .pyx/.c sources), so `import wx.svg` always
+  fails. matplotlib's wx backend does `import wx.svg  # noqa: F401` purely
+  as a side effect and never uses it → before importing
+  `backend_wxagg`, try the import and on failure stub
+  `sys.modules["wx.svg"]` with an empty module (`gui.ResultsFrame`).
+- Don't write `import wx.svg` inside a function that also uses `wx` — the
+  statement binds the name `wx` as a *local*, and when the import raises,
+  every later `wx.*` in that function dies with UnboundLocalError. Probe
+  with `importlib.import_module("wx.svg")` instead, which binds nothing.
 
 **openEMS/CSXCAD landmines**:
 
@@ -181,10 +272,49 @@ bottom, copper = zero-thickness sheets at dielectric boundaries):
   `start[2]`, and ≥5 mesh lines along propagation **before** the port is
   created — hence mesh is built before `AddMSLPort` in `build()`.
 
+**Debugging playbook — S11 smooth −20…−30 dB, no resonance anywhere**:
+suspiciously *good* broadband match = the structure under test was CUT at
+the region boundary and its stump terminates into the PML like a matched
+load. Seen live: TI SWRA117D meander antenna (~26 mm) at the default 4 mm
+margin (18.8 mm region). Two defenses now: (1) the domain auto-fits the
+whole board via `GetBoardEdgesBoundingBox()` merged into the region, and
+(2) extract() counts non-zone copper crossing the region edge into
+`model["warnings"]` (shown after the settings dialog; zones are exempt
+because pours are *supposed* to be cut — the warning now mostly matters
+for boards without an Edge.Cuts outline).
+
+**Debugging playbook — S11 ≈ 0 dB flat, S21 −40…−55 dB rising with f**:
+that's two floating pads coupling capacitively, i.e. the ports have no
+ground return (or the copper between them never reached the model). It is
+*correct physics for a broken setup*, not a solver bug. Seen live on a
+board with netless pads and no B.Cu plane; that incident produced the
+ground-return guard in `extract()` and the graphic-shape support. Compare
+against `validation/` first — if the microstrip board passes, the pipeline
+is fine and the input board is the problem.
+
+**wx dialog traps**:
+
+- Substrate presets: apply values with `TextCtrl.ChangeValue()` (no
+  EVT_TEXT), not `SetValue()` — the er/tanδ fields have an EVT_TEXT handler
+  that flips the preset dropdown to "Custom" on user edits, and SetValue
+  would fire it during preset application too.
+- Headless GUI testing works fine on Windows: `wx.App(False)`, build the
+  dialog/frame, exercise logic, `ScreenDC` blit after `Show()` + a few
+  `wx.Yield()`/`Update()` rounds for a screenshot (one Yield is not enough,
+  the first capture came back unpainted).
+
 **Modeling choices** (fine to revisit):
 
-- Copper loss via `AddConductingSheet` (5.8e7 S/m, real thickness);
+- Copper loss via `AddConductingSheet` (5.8e7 S/m, real thickness, floored
+  at 0.1 µm so thin user-entered copper isn't silently clamped);
   dielectric loss as kappa at center frequency.
+- GUI substrate values (er/tanδ/h/cu_t) always override the board file's
+  stackup — simpler than merging, and the dialog shows exactly what will
+  be simulated. File stackup parsing survives for headless use.
+- Ground-return guard = bbox overlap between the pad and any ref-layer
+  polygon (overlap, not center containment — antenna feed pads sit at the
+  ground pour *edge*, e.g. TI SWRA117D IFA). Upgrade to point-in-polygon
+  if odd-shaped pours false-positive.
 - Mesh presets = λ_min/{10,20,40} + fixed lines at polygon bbox edges, port
   edges/centers, layer planes, ≥4 cells per dielectric. No 1/3-2/3 rule.
 - Full S-matrix = one run per excited port (2 ports → 2 runs). No
@@ -210,15 +340,20 @@ involvement.
 
 ## Backlog (rough priority)
 
-1. Manual GUI test in KiCad (see Status); fix whatever falls out.
-2. Validation board #2 with vias + zone holes (e.g. CPWG segment or stub
+1. Validation board #2 with vias + zone holes (e.g. CPWG segment or stub
    filter) to exercise the untested geometry paths.
-3. Expose max timesteps / end criteria in the dialog for high-Q structures
+2. Antenna validation: compare a full antenna run (S11 dip frequency, Dmax,
+   pattern shape) against a published reference, e.g. TI SWRA117D.
+3. Prefill the dialog's substrate fields from the board stackup when the
+   file has one (currently static FR4 defaults).
+4. Expose max timesteps / end criteria in the dialog for high-Q structures
    (currently fixed 300k / 1e-4 in `gui.get_settings`).
-4. Copper-layer graphics (PCB_SHAPE/text on copper) are ignored — add if a
-   real board needs it.
 5. PCM packaging (zip layout with `plugins/` subfolder) if this should ship
    through the Plugin and Content Manager.
+
+Done previously: live GUI click-through (works, incl. two GUI-only crashes
+fixed: wx.svg stub + UnboundLocalError — see traps above); graphic shapes
+on copper (poly/rect/circle/segment/arc, board + footprint).
 
 ## License
 

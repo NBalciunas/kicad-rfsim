@@ -1,4 +1,5 @@
 """wxPython dialogs: simulation settings, solver log, results plots."""
+import json
 import os
 import subprocess
 import threading
@@ -7,68 +8,146 @@ import wx
 
 PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
+SUBSTRATE_PRESETS = [("FR-4", 4.5, 0.02),
+                     ("Rogers RO4350B", 3.48, 0.0037),
+                     ("Custom", None, None)]
 
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir):
-        wx.Dialog.__init__(self, parent, title="RFsim - openEMS simulation")
+        wx.Dialog.__init__(self, parent, title="RFsim")
         self._build(ports, default_outdir)
 
     def _build(self, ports, default_outdir):
-        grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
-        grid.AddGrowableCol(1)
+        top = wx.BoxSizer(wx.VERTICAL)
 
-        def row(label, ctrl):
-            grid.Add(wx.StaticText(self, label=label),
-                     0, wx.ALIGN_CENTER_VERTICAL)
-            grid.Add(ctrl, 0, wx.EXPAND)
+        title = wx.StaticText(self, label="RFsim v1.0")
+        title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
+                              wx.FONTWEIGHT_BOLD))
+        top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
+        icon = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
+        if os.path.isfile(icon):
+            top.Add(wx.StaticBitmap(self, bitmap=wx.Bitmap(icon)),
+                    0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 4)
+
+        def section(label):
+            box = wx.StaticBoxSizer(wx.VERTICAL, self, label)
+            top.Add(box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+            return box
+
+        def grid_in(box):
+            g = wx.FlexGridSizer(cols=2, vgap=4, hgap=8)
+            g.AddGrowableCol(1)
+            box.Add(g, 0, wx.ALL | wx.EXPAND, 6)
+            return g
+
+        def row(g, label, ctrl, unit=None):
+            g.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            if unit:
+                h = wx.BoxSizer(wx.HORIZONTAL)
+                h.Add(ctrl, 1, wx.EXPAND)
+                h.Add(wx.StaticText(self, label=unit), 0,
+                      wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+                g.Add(h, 0, wx.EXPAND)
+            else:
+                g.Add(ctrl, 0, wx.EXPAND)
             return ctrl
 
-        self.f_start = row("Start frequency (GHz)", wx.TextCtrl(self, value="1.0"))
-        self.f_stop = row("Stop frequency (GHz)", wx.TextCtrl(self, value="6.0"))
-        self.z0 = row("Port impedance (ohm)", wx.TextCtrl(self, value="50"))
-        self.margin = row("Domain margin (mm)", wx.SpinCtrlDouble(
-            self, min=2.0, max=25.0, initial=4.0, inc=0.5))
-        self.mesh = row("Mesh resolution", wx.Choice(self, choices=MESH_LEVELS))
-        self.mesh.SetSelection(1)
+        fbox = section("Frequency")
+        fs = wx.BoxSizer(wx.HORIZONTAL)
+        fs.Add(wx.StaticText(self, label="Start:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.f_start = wx.TextCtrl(self, value="1.0", size=(60, -1))
+        fs.Add(self.f_start, 1, wx.LEFT, 4)
+        fs.Add(wx.StaticText(self, label="GHz"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        fs.Add(wx.StaticText(self, label="Stop:"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+        self.f_stop = wx.TextCtrl(self, value="6.0", size=(60, -1))
+        fs.Add(self.f_stop, 1, wx.LEFT, 4)
+        fs.Add(wx.StaticText(self, label="GHz"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        fbox.Add(fs, 0, wx.ALL | wx.EXPAND, 6)
+        fg = grid_in(fbox)
+        # field dumps (E/H animation) + far-field are computed at this freq
+        self.f_field = row(fg, "Define at:",
+                           wx.TextCtrl(self, value="2.45"), "GHz")
 
+        pbox = section("Port")
+        pg = grid_in(pbox)
+        self.z0 = row(pg, "Port impedance:",
+                      wx.TextCtrl(self, value="50"), "ohm")
         self.port_choices = []
         for p in ports:
-            note = "" if p["direction"] else "  [no track found: lumped only]"
-            ch = row("Port %d: %s%s" % (p["number"], p["label"], note),
+            note = "" if p["direction"] else "  [no track: lumped only]"
+            ch = row(pg, "Port %d: %s%s" % (p["number"], p["label"], note),
                      wx.Choice(self, choices=[t[0] for t in PORT_TYPES]))
             ch.SetSelection(0)
             ch.Enable(bool(p["direction"]))
             self.port_choices.append(ch)
-
         self.swap = None
         if len(ports) == 2:
             self.swap = wx.CheckBox(self, label="Swap port order")
-            grid.Add(wx.StaticText(self, label=""))
-            grid.Add(self.swap)
+            pg.Add(wx.StaticText(self, label=""))
+            pg.Add(self.swap)
 
-        self.outdir = row("Output directory", wx.DirPickerCtrl(
+        sbox = section("Substrate")
+        sg = grid_in(sbox)
+        self.preset = row(sg, "Presets:", wx.Choice(
+            self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
+        self.preset.SetSelection(0)
+        # defaults: 1.6 mm FR4, 35 um (1 oz) copper
+        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
+        self.tand = row(sg, "Loss tangent:", wx.TextCtrl(self, value="0.02"))
+        self.h = row(sg, "Substrate thickness:",
+                     wx.TextCtrl(self, value="1.6"), "mm")
+        self.cu_t = row(sg, "Copper thickness:",
+                        wx.TextCtrl(self, value="0.035"), "mm")
+        self.preset.Bind(wx.EVT_CHOICE, self._on_preset)
+        for c in (self.er, self.tand):
+            c.Bind(wx.EVT_TEXT, self._on_substrate_edit)
+
+        rbox = section("Simulation")
+        rg = grid_in(rbox)
+        self.mesh = row(rg, "Mesh resolution:",
+                        wx.Choice(self, choices=MESH_LEVELS))
+        self.mesh.SetSelection(1)
+        self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
+            self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+        self.outdir = row(rg, "Output directory:", wx.DirPickerCtrl(
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
-        top = wx.BoxSizer(wx.VERTICAL)
-        top.Add(grid, 1, wx.ALL | wx.EXPAND, 12)
-        btns = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
-        self.FindWindowById(wx.ID_OK).SetLabel("Run Simulation")
-        top.Add(btns, 0, wx.ALL | wx.ALIGN_RIGHT, 12)
+        run = wx.Button(self, wx.ID_OK, "Run Simulation")
+        top.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
         self.SetSizerAndFit(top)
         self.SetMinSize((520, -1))
         self.Fit()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
 
+    def _on_preset(self, evt):
+        _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
+        if er is not None:  # ChangeValue: no EVT_TEXT, stays on the preset
+            self.er.ChangeValue(str(er))
+            self.tand.ChangeValue(str(tand))
+
+    def _on_substrate_edit(self, evt):
+        self.preset.SetSelection(len(SUBSTRATE_PRESETS) - 1)  # Custom
+        evt.Skip()
+
     def _on_ok(self, evt):
         try:
             fa, fb = float(self.f_start.GetValue()), float(self.f_stop.GetValue())
+            fd = float(self.f_field.GetValue())
             z0 = float(self.z0.GetValue())
-            if not (0 < fa < fb) or z0 <= 0:
+            er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
+            h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
+            if (not (0 < fa < fb) or not (fa <= fd <= fb) or z0 <= 0
+                    or er < 1 or tand < 0 or h <= 0 or cu_t <= 0):
                 raise ValueError
         except ValueError:
-            wx.MessageBox("Check frequency range / impedance values.",
-                          "RFsim", wx.ICON_ERROR)
+            wx.MessageBox(
+                "Check frequency / impedance / substrate values.\n"
+                "('Define at' must lie inside the sweep range.)",
+                "RFsim", wx.ICON_ERROR)
             return
         evt.Skip()
 
@@ -76,7 +155,12 @@ class SettingsDialog(wx.Dialog):
         return {
             "f_start": float(self.f_start.GetValue()) * 1e9,
             "f_stop": float(self.f_stop.GetValue()) * 1e9,
+            "f_field": float(self.f_field.GetValue()) * 1e9,
             "z0": float(self.z0.GetValue()),
+            "er": float(self.er.GetValue()),
+            "tand": float(self.tand.GetValue()),
+            "h": float(self.h.GetValue()),
+            "cu_t": float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
             "port_types": [PORT_TYPES[c.GetSelection()][1]
@@ -141,12 +225,42 @@ class RunDialog(wx.Dialog):
         evt.Skip()
 
 
+def _load_field(h5_path):
+    """openEMS FD dump -> (x_mm, y_mm, complex F[y, x, 3], f_hz). No wx needed."""
+    import h5py
+    import numpy as np
+    with h5py.File(h5_path, "r") as f:
+        mesh = f["Mesh"]
+        x, y = np.asarray(mesh["x"]), np.asarray(mesh["y"])
+        fd = f["FieldData"]["FD"]
+        f_hz = float(fd.attrs["frequency"][0])
+        F = np.asarray(fd["f0_real"]) + 1j * np.asarray(fd["f0_imag"])
+    if float(x.max() - x.min()) < 1.0:  # meters -> mm (domains are > 1 mm)
+        x, y = x * 1e3, y * 1e3
+    F = np.squeeze(F)                   # drop the length-1 z-plane axis
+    if F.shape[0] == 3:                 # component axis first -> last
+        F = np.moveaxis(F, 0, -1)
+    if F.shape[:2] == (len(x), len(y)):
+        F = np.swapaxes(F, 0, 1)
+    return x, y, F, f_hz
+
+
 class ResultsFrame(wx.Frame):
     """Plot viewer for the produced Touchstone file (needs skrf+matplotlib)."""
 
     def __init__(self, parent, touchstone_path):
         import matplotlib
         matplotlib.use("WXAgg", force=False)
+        # KiCad's bundled wxPython lacks the compiled wx.svg._nanosvg
+        # extension; matplotlib's wx backend imports wx.svg but never uses
+        # it, so stub it out when the real module is broken.
+        try:
+            import importlib
+            importlib.import_module("wx.svg")
+        except ImportError:
+            import sys
+            import types
+            sys.modules["wx.svg"] = types.ModuleType("wx.svg")
         from matplotlib.backends.backend_wxagg import (
             FigureCanvasWxAgg, NavigationToolbar2WxAgg)
         from matplotlib.figure import Figure
@@ -160,6 +274,26 @@ class ResultsFrame(wx.Frame):
             plots += ["Smith chart (S11)", "VSWR (port 1)"]
         if self.net.nports == 2:
             plots += ["Group delay (S21)"]
+
+        self.outdir = os.path.dirname(os.path.abspath(touchstone_path))
+        try:
+            with open(os.path.join(self.outdir, "model.json")) as fh:
+                self.model = json.load(fh)
+        except Exception:
+            self.model = None
+        self.field_h5s = {k: os.path.join(self.outdir, "exc1", k[0] + "f.h5")
+                          for k in ("E", "H")}
+        self.ff_json = os.path.join(self.outdir, "farfield.json")
+        self._field = {}
+        self._ff = None
+        self._anim = None
+        if self.model:
+            plots.append("Board layout")
+            for k in ("E", "H"):
+                if os.path.isfile(self.field_h5s[k]):
+                    plots.append("%s-field animation (port 1)" % k)
+            if os.path.isfile(self.ff_json):
+                plots.append("Far-field pattern")
         self.choice = wx.Choice(self, choices=plots)
         self.choice.SetSelection(0)
         self.figure = Figure(figsize=(8, 5.5))
@@ -177,12 +311,23 @@ class ResultsFrame(wx.Frame):
 
     def _plot(self):
         import numpy as np
+        if self._anim:
+            self._anim.event_source.stop()
+            self._anim = None
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         net, f_ghz = self.net, self.net.f / 1e9
         sel = self.choice.GetStringSelection()
 
-        if sel.startswith("S-parameters"):
+        if sel.startswith("Board layout"):
+            self._plot_board(ax)
+        elif sel.startswith(("E-field", "H-field")):
+            self._plot_field(ax, sel[0])
+        elif sel.startswith("Far-field"):
+            ax.remove()
+            ax = self.figure.add_subplot(111, projection="polar")
+            self._plot_farfield(ax)
+        elif sel.startswith("S-parameters"):
             for j in range(net.nports):
                 for k in range(net.nports):
                     ax.plot(f_ghz, net.s_db[:, j, k],
@@ -202,8 +347,113 @@ class ResultsFrame(wx.Frame):
             ax.plot(f_ghz, gd)
             ax.set_ylabel("Group delay (ns)")
 
-        if not sel.startswith("Smith"):
+        if not sel.startswith(("Smith", "Board", "E-field", "H-field",
+                               "Far-field")):
             ax.set_xlabel("Frequency (GHz)")
             ax.grid(True, alpha=0.4)
         self.figure.tight_layout()
         self.canvas.draw()
+
+    def _plot_board(self, ax):
+        """Top view of the simulated model: B.Cu blue, F.Cu red, ports green."""
+        from matplotlib.patches import Patch
+        m = self.model
+        colors = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
+        handles = []
+        for c in reversed(m["copper_layers"]):  # bottom first, F.Cu on top
+            name = c["name"]
+            col, alpha = colors.get(name, ("0.5", 0.5))
+            polys = m["polygons"].get(name, [])
+            for poly in polys:
+                ax.fill([p[0] for p in poly], [p[1] for p in poly],
+                        color=col, alpha=alpha, linewidth=0)
+            if polys:
+                handles.append(Patch(color=col, alpha=alpha, label=name))
+        for v in m["vias"]:
+            ax.plot(v["x"], v["y"], "o", color="k", ms=3)
+        br, rg = m["board_rect"], m["region"]
+        ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
+                [br["y0"], br["y0"], br["y1"], br["y1"], br["y0"]],
+                color="0.25", lw=1.2)
+        ax.plot([rg["x0"], rg["x1"], rg["x1"], rg["x0"], rg["x0"]],
+                [rg["y0"], rg["y0"], rg["y1"], rg["y1"], rg["y0"]],
+                "--", color="0.6", lw=0.8)
+        for p in m["ports"]:
+            hw, hl = p["width"] / 2.0, p["length"] / 2.0
+            ax.fill([p["x"] - hl, p["x"] + hl, p["x"] + hl, p["x"] - hl],
+                    [p["y"] - hw, p["y"] - hw, p["y"] + hw, p["y"] + hw],
+                    color="lime")
+            ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
+                        ha="center", va="bottom", xytext=(0, 5),
+                        textcoords="offset points", fontsize=9,
+                        fontweight="bold", color="darkgreen")
+        handles.append(Patch(color="lime", label="ports"))
+        ax.legend(handles=handles, loc="upper right", fontsize=8)
+        ax.set_xlabel("x (mm)")
+        ax.set_ylabel("y (mm)")
+        ax.set_title("simulated region (solid: board edge, dashed: domain)")
+        ax.set_aspect("equal")
+
+    def _plot_field(self, ax, kind):
+        """Traveling-wave animation on the substrate mid-plane.
+
+        Same signed red/blue view for both fields: E shows E_z, H shows the
+        dominant in-plane H component (H loops around the trace, so its
+        vertical part is ~zero on this plane).
+        """
+        import numpy as np
+        from matplotlib.animation import FuncAnimation
+        if kind not in self._field:
+            self._field[kind] = _load_field(self.field_h5s[kind])
+        x, y, F, f_hz = self._field[kind]
+        frames = 24
+
+        if kind == "E":
+            comp, label = F[..., 2], "E_z"
+        else:
+            hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
+            comp, label = ((F[..., 0], "H_x") if hx >= hy
+                           else (F[..., 1], "H_y"))
+        lim = float(np.percentile(np.abs(comp), 99)) or 1.0
+        mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
+                             vmin=-lim, vmax=lim, shading="gouraud")
+
+        top = self.model["ports"][0]["layer"]
+        for poly in self.model["polygons"].get(top, []):
+            ax.plot([p[0] for p in poly] + [poly[0][0]],
+                    [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
+        ax.set_xlabel("x (mm)")
+        ax.set_ylabel("y (mm)")
+        ax.set_title("%s at %.2f GHz, port 1 excited" % (label, f_hz / 1e9))
+        ax.set_aspect("equal")
+
+        def step(i):
+            ph = np.exp(2j * np.pi * i / frames)
+            mesh.set_array(np.real(comp * ph).ravel())
+            return (mesh,)
+
+        self._anim = FuncAnimation(self.figure, step, frames=frames,
+                                   interval=60, blit=False,
+                                   cache_frame_data=False)
+
+    def _plot_farfield(self, ax):
+        """Polar directivity cuts (dBi) at phi = 0/90, theta 0 = board normal."""
+        import numpy as np
+        if self._ff is None:
+            with open(self.ff_json) as fh:
+                self._ff = json.load(fh)
+        ff = self._ff
+        th = np.radians(ff["theta_deg"])
+        rmax = ff["Dmax_dBi"]
+        rmin = rmax - 40.0
+        for D, ph in zip(ff["D_dBi"], ff["phi_deg"]):
+            ax.plot(th, np.maximum(D, rmin), label="phi = %g deg" % ph)
+        ax.set_theta_zero_location("N")
+        ax.set_rlim(rmin, rmax + 3)
+        ax.set_title(
+            "directivity (dBi) at %.2f GHz   Dmax %.1f dBi%s"
+            % (ff["f_hz"] / 1e9, ff["Dmax_dBi"],
+               ("   rad. eff. %.0f%%" % ff["efficiency_pct"])
+               if ff.get("efficiency_pct") is not None else ""),
+            fontsize=10)
+        ax.legend(loc="lower right", fontsize=8)

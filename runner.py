@@ -159,7 +159,7 @@ def build(model, excite_idx, res):
     copper_prop = {}
     for c in model["copper_layers"]:
         prop = csx.AddConductingSheet("cu_" + c["name"], conductivity=5.8e7,
-                                      thickness=max(c["thickness"], 0.005) * 1e-3)
+                                      thickness=max(c["thickness"], 1e-4) * 1e-3)
         copper_prop[c["name"]] = prop
         for poly in model["polygons"].get(c["name"], []):
             pts = np.array(poly).T  # shape (2, N)
@@ -190,9 +190,63 @@ def build(model, excite_idx, res):
             "dir " + g.get("prop_dir", "-") if g["type"] == "msl" else ""),
             flush=True)
 
+    ff = None
+    if excite_idx == 0:
+        # FD E/H-field dumps on the substrate mid-plane under port 1, at the
+        # user's "Define at" frequency (center frequency for old models):
+        # small files, enough for the GUI's traveling-wave animations.
+        f_dump = s.get("f_field") or f0
+        g0 = ports_geo[0]
+        z_cut = 0.5 * (g0["z_top"] + g0["z_ref"])
+        r = model["region"]
+        for name, dt in (("Ef", 10), ("Hf", 11)):
+            dump = csx.AddDump(name, dump_type=dt, file_type=1,
+                               frequency=[f_dump])
+            dump.AddBox([r["x0"], r["y0"], z_cut], [r["x1"], r["y1"], z_cut])
+
+        # NF2FF recording box in the clear-air band between structure and
+        # PML (domain edge + 1.5*margin), recorded at the same frequency.
+        from openEMS.nf2ff import nf2ff
+        margin = s["margin_mm"]
+        board_top = model["copper_layers"][0]["z"]
+        inset = 1.5 * margin
+        ff = nf2ff(csx, "nf2ff",
+                   [r["x0"] + inset, r["y0"] + inset, -2.0 * margin + inset],
+                   [r["x1"] - inset, r["y1"] - inset,
+                    board_top + 2.0 * margin - inset],
+                   frequency=[f_dump])
+
     print("[rfsim] mesh: %d x %d x %d lines" % tuple(
         grid.GetQtyLines(a) for a in "xyz"), flush=True)
-    return fdtd, ports
+    return fdtd, ports, ff
+
+
+def _farfield(outdir, ff, sim_path, port1, freq, S):
+    """NF2FF at the recorded ('Define at') frequency -> farfield.json."""
+    f_ff = ff.freq[0]
+    print("[rfsim] NF2FF at %.3f GHz..." % (f_ff / 1e9), flush=True)
+    theta = np.arange(-180.0, 180.1, 2.0)
+    phi = [0.0, 90.0]
+    center = [0.5 * (a + b) * 1e-3 for a, b in zip(ff.start, ff.stop)]
+    res = ff.CalcNF2FF(sim_path, f_ff, theta, phi, center=center)
+
+    Dmax = float(res.Dmax[0])
+    En = res.E_norm[0] / np.max(res.E_norm[0])          # (Ntheta, Nphi)
+    D_dBi = 20.0 * np.log10(np.maximum(En, 1e-6)) + 10.0 * np.log10(Dmax)
+    Prad = float(res.Prad[0])
+    i_f = int(np.argmin(np.abs(freq - f_ff)))
+    P_in = float(0.5 * np.real(port1.uf_tot[i_f] * np.conj(port1.if_tot[i_f])))
+    eff = 100.0 * Prad / P_in if P_in > 0 else None
+    with open(os.path.join(outdir, "farfield.json"), "w") as fh:
+        json.dump({
+            "f_hz": f_ff, "theta_deg": theta.tolist(), "phi_deg": phi,
+            "D_dBi": D_dBi.T.tolist(),                  # [phi][theta]
+            "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
+            "P_in_W": P_in, "efficiency_pct": eff,
+            "recorded_f_hz": list(ff.freq),
+        }, fh, indent=1)
+    print("[rfsim] far-field: Dmax %.1f dBi, radiated %.1f%% of input power"
+          % (10.0 * np.log10(Dmax), eff if eff is not None else -1), flush=True)
 
 
 def write_touchstone(path, freq, S, z0):
@@ -211,6 +265,8 @@ def write_touchstone(path, freq, S, z0):
 def main(model_path, outdir):
     with open(model_path) as fh:
         model = json.load(fh)
+    for w in model.get("warnings", []):
+        print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]
     n = len(model["ports"])
     if not 1 <= n <= 2:
@@ -223,18 +279,27 @@ def main(model_path, outdir):
 
     freq = np.linspace(s["f_start"], s["f_stop"], s.get("n_freq", 401))
     S = np.zeros((len(freq), n, n), dtype=complex)
+    ff_box = ff_path = port1 = None
     for k in range(n):
         sim_path = os.path.join(outdir, "exc%d" % (k + 1))
         print("[rfsim] === excitation %d/%d ===" % (k + 1, n), flush=True)
-        fdtd, ports = build(model, k, res)
+        fdtd, ports, ff = build(model, k, res)
         fdtd.Run(sim_path, cleanup=True)
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
         for j in range(n):
             S[:, j, k] = ports[j].uf_ref / ports[k].uf_inc
+        if k == 0:
+            ff_box, ff_path, port1 = ff, sim_path, ports[0]
 
     out = os.path.join(outdir, "results.s%dp" % n)
     write_touchstone(out, freq, S, s["z0"])
+    if ff_box is not None:
+        try:
+            _farfield(outdir, ff_box, ff_path, port1, freq, S)
+        except Exception as e:
+            print("[rfsim] WARNING: far-field calculation failed: %s" % e,
+                  flush=True)
     s11 = 20 * np.log10(np.maximum(np.abs(S[:, 0, 0]), 1e-12))
     print("[rfsim] S11: %.1f .. %.1f dB" % (s11.min(), s11.max()), flush=True)
     if n == 2:
