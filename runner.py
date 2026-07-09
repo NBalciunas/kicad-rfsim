@@ -222,28 +222,45 @@ def build(model, excite_idx, res):
 
 
 def _farfield(outdir, ff, sim_path, port1, freq, S):
-    """NF2FF at the recorded ('Define at') frequency -> farfield.json."""
+    """NF2FF at the recorded ('Define at') frequency -> farfield.json.
+
+    Three cuts, CST-style: theta sweeps at phi=0/90 and an azimuth sweep
+    at theta=90. Each cut is in absolute dBi (its own slice peak = the
+    engine's Dmax for that angle grid).
+    """
     f_ff = ff.freq[0]
     print("[rfsim] NF2FF at %.3f GHz..." % (f_ff / 1e9), flush=True)
     theta = np.arange(-180.0, 180.1, 2.0)
-    phi = [0.0, 90.0]
+    phi_az = np.arange(0.0, 360.1, 2.0)
     center = [0.5 * (a + b) * 1e-3 for a, b in zip(ff.start, ff.stop)]
-    res = ff.CalcNF2FF(sim_path, f_ff, theta, phi, center=center)
+    res = ff.CalcNF2FF(sim_path, f_ff, theta, [0.0, 90.0], center=center)
+    res_az = ff.CalcNF2FF(sim_path, f_ff, [90.0], phi_az.tolist(),
+                          center=center, outfile="nf2ff_az.h5")
 
+    def d_dbi(r):
+        En = np.maximum(r.E_norm[0] / np.max(r.E_norm[0]), 1e-6)
+        return 20.0 * np.log10(En) + 10.0 * np.log10(float(r.Dmax[0]))
+
+    D = d_dbi(res)                                      # (Ntheta, 2)
+    D_az = d_dbi(res_az)[0]                             # (Nphi,)
     Dmax = float(res.Dmax[0])
-    En = res.E_norm[0] / np.max(res.E_norm[0])          # (Ntheta, Nphi)
-    D_dBi = 20.0 * np.log10(np.maximum(En, 1e-6)) + 10.0 * np.log10(Dmax)
     Prad = float(res.Prad[0])
     i_f = int(np.argmin(np.abs(freq - f_ff)))
     P_in = float(0.5 * np.real(port1.uf_tot[i_f] * np.conj(port1.if_tot[i_f])))
     eff = 100.0 * Prad / P_in if P_in > 0 else None
     with open(os.path.join(outdir, "farfield.json"), "w") as fh:
         json.dump({
-            "f_hz": f_ff, "theta_deg": theta.tolist(), "phi_deg": phi,
-            "D_dBi": D_dBi.T.tolist(),                  # [phi][theta]
+            "f_hz": f_ff,
+            "cuts": {
+                "Phi=0": {"angle_deg": theta.tolist(),
+                          "D_dBi": D[:, 0].tolist()},
+                "Phi=90": {"angle_deg": theta.tolist(),
+                           "D_dBi": D[:, 1].tolist()},
+                "Theta=90": {"angle_deg": phi_az.tolist(),
+                             "D_dBi": D_az.tolist()},
+            },
             "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
             "P_in_W": P_in, "efficiency_pct": eff,
-            "recorded_f_hz": list(ff.freq),
         }, fh, indent=1)
     print("[rfsim] far-field: Dmax %.1f dBi, radiated %.1f%% of input power"
           % (10.0 * np.log10(Dmax), eff if eff is not None else -1), flush=True)

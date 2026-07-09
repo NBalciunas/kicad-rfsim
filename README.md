@@ -17,9 +17,12 @@ primitives — no gerbers, no rasterizing.
   at the dialog's "Define at" frequency, port 1 excited — signed E_z and
   the dominant in-plane H component (both red/blue); shows how the signal
   propagates and where energy couples away.
-- **Far-field pattern**: NF2FF polar directivity cuts (φ = 0°/90°, θ = 0 is
-  the board normal) at the "Define at" frequency, with Dmax (dBi) and
-  radiation efficiency in the title.
+- **Far-field patterns**: three NF2FF polar directivity cuts in absolute
+  dBi at the "Define at" frequency — Phi=0, Phi=90 (θ sweeps, θ = 0 is the
+  board normal) and Theta=90 (azimuth) — CST-style, each with a stats
+  panel: main lobe magnitude/direction, 3 dB angular width, side lobe
+  level. Dmax and radiation efficiency are in `farfield.json` and the
+  solver log.
 - Substrate (εr, tanδ, height h, copper thickness hm) set in the dialog
   (defaults: 1.6 mm FR4, 35 µm copper); copper modeled as lossy conducting
   sheets, vias as cylinders.
@@ -168,6 +171,19 @@ Verified working (headless, real openEMS runs on this machine):
 - [x] H-field view restyled to match E (dominant in-plane component,
       signed red/blue); clip warning consolidated to one message, titles
       cleaned up per user wording
+- [x] Results-window polish pass (user-driven, CST as the reference look):
+      window/dropdown renames (S-Parameters, Smith Chart, VSWR), titles
+      "S-Parameters [Magnitude]" / "[Impedance View]" / "Voltage Standing
+      Wave Ratio (VSWR)", axes "dB" & "Frequency / GHz", Smith grid
+      numbers via skrf `draw_labels=True`, E/H/Farfield dropdown entries
+      carry "(f=xx GHz)". Farfield cuts: title "Farfield Directivity Abs
+      (cut)", bottom caption "Theta|Phi / ° vs dBi", bare angle numbers,
+      dBi labels at `set_rlabel_position(270)` with 10 dB rings, and a
+      right-hand stats panel from `gui._lobe_stats` (main lobe
+      magnitude/direction, 3 dB width, side-lobe level, circular-walk
+      implementation)
+- [x] First-show canvas clipping fixed (x-axis label was invisible until a
+      manual resize; see wx traps below)
 
 Not yet verified:
 
@@ -301,7 +317,16 @@ is fine and the input board is the problem.
 - Headless GUI testing works fine on Windows: `wx.App(False)`, build the
   dialog/frame, exercise logic, `ScreenDC` blit after `Show()` + a few
   `wx.Yield()`/`Update()` rounds for a screenshot (one Yield is not enough,
-  the first capture came back unpainted).
+  the first capture came back unpainted). Beware: ScreenDC blit coords can
+  be off with display scaling/multi-monitor — `figure.savefig` after the
+  size settles is the reliable way to check what the canvas really shows.
+- `FigureCanvasWxAgg` reports the figure's native pixel size (800×550 for
+  an 8×5.5 in figure) as its wx **minimum size**, so sizers CLIP it at the
+  bottom instead of shrinking it — the x-axis label is invisible until the
+  user resizes. Fix trio: `canvas.SetMinSize((320, 240))`,
+  `wx.CallAfter(self.SendSizeEvent)` at the end of `__init__` (no size
+  event fires on first Show), and `Figure(layout="constrained")` instead
+  of a one-shot `tight_layout()` so labels survive every later resize.
 
 **Modeling choices** (fine to revisit):
 

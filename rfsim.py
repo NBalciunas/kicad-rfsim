@@ -25,7 +25,7 @@ def _python_exe():
 
 class RFSimPlugin(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "RFsim: S-parameters (openEMS)"
+        self.name = "RFsim"
         self.category = "RF tools"
         self.description = ("Simulate S-parameters of the selected pad(s) "
                             "with openEMS")

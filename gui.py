@@ -8,7 +8,7 @@ import wx
 
 PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
-SUBSTRATE_PRESETS = [("FR-4", 4.5, 0.02),
+SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
                      ("Custom", None, None)]
 
@@ -70,7 +70,7 @@ class SettingsDialog(wx.Dialog):
         fg = grid_in(fbox)
         # field dumps (E/H animation) + far-field are computed at this freq
         self.f_field = row(fg, "Define at:",
-                           wx.TextCtrl(self, value="2.45"), "GHz")
+                           wx.TextCtrl(self, value="2.4"), "GHz")
 
         pbox = section("Port")
         pg = grid_in(pbox)
@@ -96,7 +96,7 @@ class SettingsDialog(wx.Dialog):
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
         self.preset.SetSelection(0)
         # defaults: 1.6 mm FR4, 35 um (1 oz) copper
-        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
+        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.2"))
         self.tand = row(sg, "Loss tangent:", wx.TextCtrl(self, value="0.02"))
         self.h = row(sg, "Substrate thickness:",
                      wx.TextCtrl(self, value="1.6"), "mm")
@@ -108,8 +108,8 @@ class SettingsDialog(wx.Dialog):
 
         rbox = section("Simulation")
         rg = grid_in(rbox)
-        self.mesh = row(rg, "Mesh resolution:",
-                        wx.Choice(self, choices=MESH_LEVELS))
+        self.mesh = row(rg, "Mesh resolution:", wx.Choice(
+            self, choices=[m.capitalize() for m in MESH_LEVELS]))
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
@@ -177,7 +177,7 @@ class RunDialog(wx.Dialog):
     """Runs the solver subprocess, streaming its output into a log window."""
 
     def __init__(self, parent, cmd):
-        wx.Dialog.__init__(self, parent, title="RFsim - solver running",
+        wx.Dialog.__init__(self, parent, title="RFsim",
                            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY,
                                size=(700, 400))
@@ -245,6 +245,40 @@ def _load_field(h5_path):
     return x, y, F, f_hz
 
 
+def _lobe_stats(ang_deg, D):
+    """Main-lobe direction, 3 dB width and side-lobe level of a closed cut."""
+    import numpy as np
+    ang = np.asarray(ang_deg, float)
+    d = np.asarray(D, float)
+    if abs((ang[-1] - ang[0]) - 360.0) < 1e-6:  # closed cut: drop dup endpoint
+        ang, d = ang[:-1], d[:-1]
+    n = len(d)
+    step = abs(ang[1] - ang[0])
+    i0 = int(np.argmax(d))
+    peak = float(d[i0])
+    li = 0
+    while li < n - 1 and d[(i0 - li - 1) % n] >= peak - 3.0:
+        li += 1
+    ri = 0
+    while ri < n - 1 and d[(i0 + ri + 1) % n] >= peak - 3.0:
+        ri += 1
+    width = min((li + ri) * step, 360.0)
+    # main lobe = walk to the first local minimum on each side; the rest of
+    # the pattern holds the side lobes
+    lm = 0
+    while lm < n - 1 and d[(i0 - lm - 1) % n] <= d[(i0 - lm) % n]:
+        lm += 1
+    rm = 0
+    while rm < n - 1 and d[(i0 + rm + 1) % n] <= d[(i0 + rm) % n]:
+        rm += 1
+    mask = np.zeros(n, bool)
+    for k in range(-lm, rm + 1):
+        mask[(i0 + k) % n] = True
+    sll = float(d[~mask].max() - peak) if not mask.all() else None
+    return {"peak": peak, "dir": float(ang[i0]),
+            "width": float(width), "sll": sll}
+
+
 class ResultsFrame(wx.Frame):
     """Plot viewer for the produced Touchstone file (needs skrf+matplotlib)."""
 
@@ -266,12 +300,11 @@ class ResultsFrame(wx.Frame):
         from matplotlib.figure import Figure
         import skrf
 
-        wx.Frame.__init__(self, parent, title="RFsim results - %s"
-                          % os.path.basename(touchstone_path), size=(820, 620))
+        wx.Frame.__init__(self, parent, title="RFsim", size=(820, 620))
         self.net = skrf.Network(touchstone_path)
-        plots = ["S-parameters (dB)"]
+        plots = ["S-Parameters"]
         if self.net.nports >= 1:
-            plots += ["Smith chart (S11)", "VSWR (port 1)"]
+            plots += ["Smith Chart", "VSWR"]
         if self.net.nports == 2:
             plots += ["Group delay (S21)"]
 
@@ -288,16 +321,30 @@ class ResultsFrame(wx.Frame):
         self._ff = None
         self._anim = None
         if self.model:
+            s = self.model.get("settings", {})
+            f_hz = s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
+                                        if "f_start" in s else None)
+            ftag = " (f=%g GHz)" % (f_hz / 1e9) if f_hz else ""
             plots.append("Board layout")
             for k in ("E", "H"):
                 if os.path.isfile(self.field_h5s[k]):
-                    plots.append("%s-field animation (port 1)" % k)
+                    plots.append("%s-Field%s" % (k, ftag))
             if os.path.isfile(self.ff_json):
-                plots.append("Far-field pattern")
+                try:
+                    with open(self.ff_json) as fh:
+                        self._ff = json.load(fh)
+                    for cut in self._ff["cuts"]:
+                        plots.append("Farfield (f=%g GHz) (%s)"
+                                     % (self._ff["f_hz"] / 1e9, cut))
+                except Exception:
+                    pass
         self.choice = wx.Choice(self, choices=plots)
         self.choice.SetSelection(0)
-        self.figure = Figure(figsize=(8, 5.5))
+        self.figure = Figure(figsize=(8, 5.5), layout="constrained")
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
+        # default min size = figure's native 800x550: the sizer then can't
+        # shrink the canvas and the bottom axis gets clipped instead
+        self.canvas.SetMinSize((320, 240))
         toolbar = NavigationToolbar2WxAgg(self.canvas)
         toolbar.Realize()
 
@@ -308,6 +355,10 @@ class ResultsFrame(wx.Frame):
         self.SetSizer(s)
         self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
         self._plot()
+        # the canvas only adopts its sizer-given size after a size event;
+        # without this the figure paints at its native size and the bottom
+        # axis label is clipped until the user resizes the window
+        wx.CallAfter(self.SendSizeEvent)
 
     def _plot(self):
         import numpy as np
@@ -321,25 +372,26 @@ class ResultsFrame(wx.Frame):
 
         if sel.startswith("Board layout"):
             self._plot_board(ax)
-        elif sel.startswith(("E-field", "H-field")):
+        elif sel.startswith(("E-Field", "H-Field")):
             self._plot_field(ax, sel[0])
-        elif sel.startswith("Far-field"):
+        elif sel.startswith("Farfield"):
             ax.remove()
-            ax = self.figure.add_subplot(111, projection="polar")
-            self._plot_farfield(ax)
-        elif sel.startswith("S-parameters"):
+            self._plot_farfield(sel[sel.rfind("(") + 1:-1])
+        elif sel.startswith("S-Parameters"):
             for j in range(net.nports):
                 for k in range(net.nports):
                     ax.plot(f_ghz, net.s_db[:, j, k],
                             label="S%d%d" % (j + 1, k + 1))
-            ax.set_ylabel("|S| (dB)")
+            ax.set_title("S-Parameters [Magnitude]")
+            ax.set_ylabel("dB")
             ax.legend()
         elif sel.startswith("Smith"):
-            net.plot_s_smith(m=0, n=0, ax=ax)
+            net.plot_s_smith(m=0, n=0, ax=ax, draw_labels=True)
+            ax.set_title("S-Parameters [Impedance View]")
         elif sel.startswith("VSWR"):
             mag = np.clip(np.abs(net.s[:, 0, 0]), 0, 0.999999)
             ax.plot(f_ghz, (1 + mag) / (1 - mag))
-            ax.set_ylabel("VSWR")
+            ax.set_title("Voltage Standing Wave Ratio (VSWR)")
             ax.set_ylim(1, min(20, ax.get_ylim()[1]))
         else:  # group delay
             phase = np.unwrap(np.angle(net.s[:, 1, 0]))
@@ -347,11 +399,10 @@ class ResultsFrame(wx.Frame):
             ax.plot(f_ghz, gd)
             ax.set_ylabel("Group delay (ns)")
 
-        if not sel.startswith(("Smith", "Board", "E-field", "H-field",
-                               "Far-field")):
-            ax.set_xlabel("Frequency (GHz)")
+        if not sel.startswith(("Smith", "Board", "E-Field", "H-Field",
+                               "Farfield")):
+            ax.set_xlabel("Frequency / GHz")
             ax.grid(True, alpha=0.4)
-        self.figure.tight_layout()
         self.canvas.draw()
 
     def _plot_board(self, ax):
@@ -388,10 +439,14 @@ class ResultsFrame(wx.Frame):
                         textcoords="offset points", fontsize=9,
                         fontweight="bold", color="darkgreen")
         handles.append(Patch(color="lime", label="ports"))
+        from matplotlib.lines import Line2D
+        handles.append(Line2D([], [], color="0.25", lw=1.2,
+                              label="Board edge"))
+        handles.append(Line2D([], [], ls="--", color="0.6", label="Domain"))
         ax.legend(handles=handles, loc="upper right", fontsize=8)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("simulated region (solid: board edge, dashed: domain)")
+        ax.set_title("Board layout")
         ax.set_aspect("equal")
 
     def _plot_field(self, ax, kind):
@@ -409,11 +464,10 @@ class ResultsFrame(wx.Frame):
         frames = 24
 
         if kind == "E":
-            comp, label = F[..., 2], "E_z"
+            comp = F[..., 2]                 # vertical E under the trace
         else:
             hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
-            comp, label = ((F[..., 0], "H_x") if hx >= hy
-                           else (F[..., 1], "H_y"))
+            comp = F[..., 0] if hx >= hy else F[..., 1]  # dominant in-plane H
         lim = float(np.percentile(np.abs(comp), 99)) or 1.0
         mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
                              vmin=-lim, vmax=lim, shading="gouraud")
@@ -424,7 +478,7 @@ class ResultsFrame(wx.Frame):
                     [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s at %.2f GHz, port 1 excited" % (label, f_hz / 1e9))
+        ax.set_title("%s-Field (f=%g GHz)" % (kind, f_hz / 1e9))
         ax.set_aspect("equal")
 
         def step(i):
@@ -436,24 +490,39 @@ class ResultsFrame(wx.Frame):
                                    interval=60, blit=False,
                                    cache_frame_data=False)
 
-    def _plot_farfield(self, ax):
-        """Polar directivity cuts (dBi) at phi = 0/90, theta 0 = board normal."""
+    def _plot_farfield(self, cut):
+        """One polar directivity cut in absolute dBi (CST-style)."""
         import numpy as np
-        if self._ff is None:
-            with open(self.ff_json) as fh:
-                self._ff = json.load(fh)
-        ff = self._ff
-        th = np.radians(ff["theta_deg"])
-        rmax = ff["Dmax_dBi"]
-        rmin = rmax - 40.0
-        for D, ph in zip(ff["D_dBi"], ff["phi_deg"]):
-            ax.plot(th, np.maximum(D, rmin), label="phi = %g deg" % ph)
+        c = self._ff["cuts"][cut]
+        ang_deg = np.asarray(c["angle_deg"], float)
+        D = np.asarray(c["D_dBi"], float)
+        phi_cut = cut.startswith("Phi")
+
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[2.4, 1.0])
+        ax = self.figure.add_subplot(gs[0], projection="polar")
+        info_ax = self.figure.add_subplot(gs[1])
+        info_ax.axis("off")
+
+        peak = float(D.max())
+        rmin = peak - 40.0
+        ax.plot(np.radians(ang_deg), np.maximum(D, rmin), color="tab:red")
         ax.set_theta_zero_location("N")
-        ax.set_rlim(rmin, rmax + 3)
-        ax.set_title(
-            "directivity (dBi) at %.2f GHz   Dmax %.1f dBi%s"
-            % (ff["f_hz"] / 1e9, ff["Dmax_dBi"],
-               ("   rad. eff. %.0f%%" % ff["efficiency_pct"])
-               if ff.get("efficiency_pct") is not None else ""),
-            fontsize=10)
-        ax.legend(loc="lower right", fontsize=8)
+        ax.set_thetagrids(range(0, 360, 30),
+                          labels=[str(a) for a in range(0, 360, 30)])
+        ax.set_rlabel_position(270)  # dBi numbers along the right, CST-style
+        ax.set_rlim(rmin, peak + 3)
+        ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
+                                peak + 3, 10.0))
+        ax.set_title("Farfield Directivity Abs (%s)" % cut)
+        ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
+                      % ("Theta" if phi_cut else "Phi"))
+
+        st = _lobe_stats(ang_deg, D)
+        lines = ["Frequency = %g GHz" % (self._ff["f_hz"] / 1e9),
+                 "Main lobe magnitude = %.2f dBi" % st["peak"],
+                 "Main lobe direction = %.1f deg." % st["dir"],
+                 "Angular width (3 dB) = %.1f deg." % st["width"]]
+        if st["sll"] is not None:
+            lines.append("Side lobe level = %.1f dB" % st["sll"])
+        info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
+                     va="center", ha="left", linespacing=1.8)
