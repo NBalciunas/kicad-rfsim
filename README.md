@@ -2,15 +2,15 @@
 
 # RFsim
 
-KiCad 8 action plugin: simulate S-parameters of a two-port RF structure
-directly from the PCB editor with [openEMS](https://openems.de) (FDTD).
-Geometry goes straight from KiCad's native board objects to CSXCAD
-primitives — no gerbers, no rasterizing.
+KiCad 8 action plugin: simulate S-parameters of an RF structure directly
+from the PCB editor with [openEMS](https://openems.de) (FDTD). Geometry
+goes straight from KiCad's native board objects to CSXCAD primitives —
+no gerbers, no rasterizing.
 
 ## Features
 
-- Select one or two pads, run, get S11/S21 plots, Smith chart, VSWR and
-  group delay, plus a Touchstone (`.s1p`/`.s2p`) file.
+- Select one or more pads, run, get S-parameter magnitude + phase plots,
+  Smith chart, VSWR and group delay, plus a Touchstone (`.sNp`) file.
 - **Board layout view**: rendered top view of exactly what was simulated —
   B.Cu blue, F.Cu red, ports green, lumped R/L/C parts dark green, board
   edge and domain outlines.
@@ -86,16 +86,22 @@ primitives — no gerbers, no rasterizing.
    more ports.
 2. Tools → External Plugins → RFsim.
 3. Fill in the dialog: sweep range and "Define at" (the frequency used for
-   the field animations and far-field), port impedance and per-port type,
-   substrate (presets: FR-4 / Rogers RO4350B / Custom — editing εr or tanδ
-   flips to Custom), mesh preset, domain margin, output directory.
+   the field animations and far-field), port impedance, per-pad port
+   number / type / Excite checkbox, substrate (presets: FR-4 / Rogers
+   RO4350B / Custom — editing εr or tanδ flips to Custom), mesh preset,
+   domain margin, output directory.
+   - **Port number**: KiCad doesn't expose click order, so pads are
+     numbered by footprint reference by default — reassign with the
+     dropdown. Port 1 drives the field/far-field views.
+   - **Excite**: each excited port costs one full FDTD run; uncheck ports
+     whose S-columns you don't need.
    - **Lumped** port: vertical excitation across the substrate under the
      pad. Works everywhere; reference plane is the pad itself.
    - **Microstrip (MSL)** port: deembedded transmission-line port. Needs a
      track leaving the pad roughly along the x or y axis; the reference
      plane sits a few mm down the line.
-4. Run Simulation. Results open in a plot window; `results.s2p` and
-   `model.json` land in the output directory.
+4. Run Simulation. Results open in a plot window; `results.sNp`,
+   `model.json` and `farfield_pN.json` land in the output directory.
 
 The dialog's substrate values always win: GUI runs build a uniform stackup
 from them (multi-layer boards split h evenly between dielectric layers).
@@ -144,6 +150,11 @@ headless end-to-end check:
 
 Expected: S11 < −10 dB, S21 > −0.5 dB across 1–6 GHz, `PASS`.
 
+`validation\run_lumped.py` checks the lumped-element path: a series 50 Ω
+resistor in a 50 Ω line must read S11 ≈ −9.5 dB / S21 ≈ −3.5 dB (the
+ideal resistive divider), which cleanly separates "element simulated"
+from "gap left open".
+
 ---
 
 # Development notes
@@ -152,73 +163,73 @@ Everything below is for picking up development later, not for users.
 
 ## Status (2026-07-10, fourth session)
 
-New this session (all verified against real solver runs):
+All verified against real solver runs / headless GUI renders.
 
-- [x] **Lumped elements**: `board_reader._lumped_elements` detects 2-pad
-      R*/L*/C* footprints in the region, parses values (RKM notation, SI
-      prefixes, DNP variants — self-check: `python board_reader.py`),
-      emits `model["lumped_elements"]` boxes bridging the pad gap along
-      the nearest axis; `runner.build` maps them to
-      `csx.AddLumpedElement(ny=..., caps=True, R|L|C=value)` (R=0 → metal
-      short). GUI checkbox lists detected refs; footprints carrying a port
-      pad are skipped. End-to-end: `validation/run_lumped.py coarse` —
-      series 50 Ω in a 50 Ω line reads S11 −10.7 dB / S21 −4.5 dB at
-      2 GHz (ideal −9.5/−3.5, gap-as-open would be ~0/−20+) → PASS
-- [x] N-port support: runner loops any port count, hand-written Touchstone
-      does N≥3 row-major wrapping (round-trip vs skrf for n=1..5:
-      `validation/test_touchstone.py`), rfsim.py allows ≥1 selected pads
-- [x] Excite subset: dialog "Excite" checkbox per port → `settings.excite`;
-      un-excited S-columns stay zero, GUI skips plotting them, field
-      dumps/NF2FF follow the first excited port (not hardcoded exc1)
-- [x] MSL regression re-run after the runner refactor: `run_headless.py
-      coarse` PASS (S11 ≤ −10.3 dB, S21 ≥ −0.3 dB)
-- [x] Swap checkbox replaced by a per-pad port-number dropdown (selection
-      order isn't exposed by KiCad's API, so numbering must be explicit):
-      dialog validates the numbers form a permutation, rfsim.py reorders
-      pads *and* port_types by it. Excite checkboxes kept (removed
-      briefly, restored on request); `settings.excite` now carries FINAL
-      port numbers (after renumbering) so both features compose. Verified
-      headless: defaults, renumber, duplicate rejection, excite-after-
-      renumber mapping, 1-port disabled dropdown
-- [x] Review fixes (2026-07-10): swap+excite remap (swap renumbers ports
-      after the dialog -> excite list now remapped in rfsim.py); mesh
-      lines pinned at lumped-element box edges (sub-mm parts no longer
-      rely on cell snapping; run_lumped coarse re-PASSed, values within
-      0.02 dB); Smith/VSWR plot every *computed* S_ii (S11+S22, legend
-      "Port n") and skip un-excited ports instead of showing a fake
-      perfect match; runner deletes stale exc*/farfield.json from the
-      outdir before running (GUI picked up leftovers when re-running
-      with a different excite set); lumped elements require SMD pads
-      (2-pad THT parts warned + skipped, barrel isn't modeled); Smith
-      legend labels stripped to bare "S11"; group delay generalized from
-      2-port-only/S21-hardcoded to a single "Group delay" view plotting
-      every computed S_jk pair (title "Group delay", axis
-      "Group delay / ns", legend per pair); new "S-Parameters [Phase]"
-      view (wrapped phase in degrees, same computed-pairs loop as the
-      magnitude view); E/H dumps + NF2FF now recorded for EVERY excited
-      port (was: first only) -> per-port farfield_pN.json and excN dumps,
-      GUI adds one dropdown entry per port with "(Port x)" suffixed to
-      entries/titles when there's more than one (plain farfield.json
-      still read as legacy, no suffix for single-port outputs)
-- [x] Inductor guard: openEMS v0.0.36's `Calc_LumpedElements` only reads
-      R and C — a pure-L element logs "Lumped Element R or C not
-      specified! skipping" and is DROPPED (open circuit, wrong results;
-      found live via a 20 nH L1). `runner.main` now aborts with a clear
-      error when lumped modeling is on and an L part is present.
-      Upgrade path (investigated 2026-07-10): lumped RLC (series/parallel,
-      incl. L) merged upstream Nov 2023 (openEMS PR #121), fixed through
-      May 2026; newest build v0.37.0-rc1 ships wheels for **cp313/cp314
-      only** — KiCad 8 is Python 3.11, so the solver would need to run
-      under a standalone Python 3.13 (runner.py never imports pcbnew, so
-      a configurable solver interpreter is enough). New API:
-      `AddLumpedElement(..., L=..., LEtype=1)` (1 = series topology).
-      Verified: L model aborts with the message, R model passes the guard
-- [x] Board layout view draws lumped elements green ("green" vs lime
-      ports): pad-to-pad line with dots (the gap box alone is sub-mm,
-      invisible at board zoom — element dicts now carry "pads" centers),
-      ref label + "R/L/C" legend entry; hidden when the dialog's lumped
-      checkbox was off (`settings.lumped`). Verified headless
-      (wx.App(False) + savefig on out_lumped_coarse)
+**Lumped elements** (new feature):
+
+- [x] Detection in `board_reader._lumped_elements`: 2-pad SMD R*/L*/C*
+      footprints in the region, both pads on one copper layer in the
+      stackup; THT parts warned + skipped (barrel isn't modeled). Values
+      parsed from the Value field — RKM notation, SI prefixes, DNP
+      variants (self-check: `python board_reader.py`, 21 cases).
+      Element = box bridging the pad gap along the nearest axis, pad
+      centers stored in `"pads"`; port-carrying footprints skipped.
+- [x] Solver side: `AddLumpedElement(ny=..., caps=True, R|C=value)`,
+      R=0 → metal short; mesh lines pinned at element box edges (sub-mm
+      parts must not rely on cell snapping). End-to-end
+      `validation/run_lumped.py coarse`: series 50 Ω in a 50 Ω line →
+      S11 −10.7 / S21 −4.5 dB at 2 GHz (ideal −9.5/−3.5; a gap left open
+      would read ~0/−20+) PASS
+- [x] **Inductor guard**: openEMS ≤ v0.0.36 implements only R and C
+      lumped elements — pure L logs "Lumped Element R or C not
+      specified! skipping" and is silently DROPPED (open circuit; found
+      live via a 20 nH L1) → `runner.main` aborts with a clear error
+      instead. Upgrade path investigated: lumped RLC incl. L merged
+      upstream Nov 2023 (openEMS PR #121, `LEtype=1` = series topology),
+      but v0.37.0-rc1 ships cp313/cp314 wheels only and KiCad 8 is
+      Python 3.11 → needs a configurable solver interpreter (runner.py
+      never imports pcbnew). See backlog #1.
+- [x] Board layout view: element drawn as green pad-to-pad line with
+      dots + gap box + ref label + "R/L/C" legend (the gap box alone is
+      sub-mm, invisible at board zoom); hidden when `settings.lumped`
+      is off.
+
+**Multi-port**:
+
+- [x] Any port count: runner loops N excitations, Touchstone N≥3
+      row-major wrapping (round-trip vs skrf for n=1..5:
+      `validation/test_touchstone.py`); rfsim.py accepts ≥1 pads.
+- [x] Dialog: per-pad port-number dropdown (replaces the swap checkbox —
+      KiCad doesn't expose click order, so numbering must be explicit;
+      permutation validated) + per-pad Excite checkbox
+      (`settings.excite` stores FINAL port numbers so renumbering and
+      excitation compose; ≥1 excited enforced). rfsim.py reorders pads
+      *and* port_types by the chosen numbers.
+- [x] Per-port results: E/H dumps + NF2FF recorded for EVERY excited
+      port → `excN/[EH]f.h5` + `farfield_pN.json`; GUI adds one dropdown
+      entry per port, "(Port x)" suffixed to entries and titles when
+      more than one (plain `farfield.json` still read as legacy).
+
+**Results window**:
+
+- [x] "S-Parameters [Magnitude]" + new "S-Parameters [Phase]" (wrapped
+      phase, axis "°"); Smith chart + VSWR plot every *computed* S_ii
+      (un-excited ports skipped — a zero column used to render as a fake
+      perfect match); Smith legend labels bare "S11"; "Group delay"
+      plots every computed S_jk pair in one graph (axis
+      "Group delay / ns").
+- [x] Field dumps node-interpolated (`dump_mode=1`): the default raw
+      staggered-Yee values plotted at node positions drew H half a cell
+      off the copper (user-visible on a patch). Alignment verified:
+      E/H centroid on the validation trace = −10.000 mm exactly.
+
+**Robustness**:
+
+- [x] Runner deletes stale `exc*`/`farfield*.json` from the outdir
+      before running (GUI picked up leftovers when re-running into the
+      same folder with a different excite set).
+- [x] MSL regression re-run after all refactors: `run_headless.py
+      coarse` PASS (S11 ≤ −10.3 dB, S21 ≥ −0.3 dB).
 
 ## Status (2026-07-09, third session)
 
@@ -316,17 +327,26 @@ the JSON-able model dict (all mm, y flipped to right-handed, z=0 at board
 bottom, copper = zero-thickness sheets at dielectric boundaries):
 
 ```
-{ settings: {f_start, f_stop, z0, margin_mm, mesh, n_freq,
-             max_timesteps, end_criteria},
+{ settings: {f_start, f_stop, f_field, z0, margin_mm, mesh, n_freq,
+             max_timesteps, end_criteria,
+             excite: [port numbers],    # omitted/None = excite all
+             lumped: bool},             # model R/L/C parts?
   copper_layers:     [{name, z, thickness}]          # top→bottom
   dielectric_layers: [{name, z_top, z_bottom, epsilon, loss_tangent}],
   region:     {x0,y0,x1,y1},   # crop rect = pads bbox + 2*margin
   board_rect: {x0,y0,x1,y1},   # region ∩ board edges (dielectric extent)
   polygons:   {"F.Cu": [[[x,y],...], ...], ...},     # fractured, no holes
   vias:  [{x, y, r, z0, z1}],
+  lumped_elements: [{ref, type: "R"|"L"|"C", value,  # SI (ohm/H/F)
+                     ny: "x"|"y", layer, start, stop,
+                     pads: [[x,y],[x,y]]}],
   ports: [{number, label, x, y, layer, ref_layer, width, length,
            direction: [±1,0]|[0,±1]|null, track_width, type}] }
 ```
+
+Outputs per run: `results.sNp`, `excN/` per excited port (field dumps
+`Ef.h5`/`Hf.h5` + NF2FF recordings) and `farfield_pN.json` per excited
+port.
 
 ## Decisions that weren't obvious (with the bugs that forced them)
 
@@ -478,15 +498,26 @@ involvement.
 
 ## Backlog (rough priority)
 
-1. Validation board #2 with vias + zone holes (e.g. CPWG segment or stub
+1. openEMS ≥ v0.37 upgrade to unlock lumped inductors: run `runner.py`
+   under a standalone Python 3.13 with the new cp313 wheels (configurable
+   solver interpreter — runner.py never imports pcbnew), send inductors
+   as `AddLumpedElement(..., L=..., LEtype=1)`, delete the L guard,
+   re-run the whole validation suite against the new engine.
+2. Package parasitics for lumped parts once series RLC is available:
+   a real 0402 capacitor has ~0.3–0.5 nH ESL, putting its self-resonance
+   inside typical sweep ranges — ideal elements mispredict GHz matching
+   networks. Per-package-size defaults + optional override.
+3. Validation board #2 with vias + zone holes (e.g. CPWG segment or stub
    filter) to exercise the untested geometry paths.
-2. Antenna validation: compare a full antenna run (S11 dip frequency, Dmax,
+4. Antenna validation: compare a full antenna run (S11 dip frequency, Dmax,
    pattern shape) against a published reference, e.g. TI SWRA117D.
-3. Prefill the dialog's substrate fields from the board stackup when the
+5. Prefill the dialog's substrate fields from the board stackup when the
    file has one (currently static FR4 defaults).
-4. Expose max timesteps / end criteria in the dialog for high-Q structures
+6. Expose max timesteps / end criteria in the dialog for high-Q structures
    (currently fixed 300k / 1e-4 in `gui.get_settings`).
-5. PCM packaging (zip layout with `plugins/` subfolder) if this should ship
+7. `model.json` version field — compat handling is accumulating as
+   scattered `.get(key, default)` calls (excite, lumped, pads, …).
+8. PCM packaging (zip layout with `plugins/` subfolder) if this should ship
    through the Plugin and Content Manager.
 
 Done previously: live GUI click-through (works, incl. two GUI-only crashes
