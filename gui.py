@@ -1,6 +1,8 @@
 """wxPython dialogs: simulation settings, solver log, results plots."""
+import glob
 import json
 import os
+import re
 import subprocess
 import threading
 
@@ -14,11 +16,11 @@ SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
 
 
 class SettingsDialog(wx.Dialog):
-    def __init__(self, parent, ports, default_outdir):
+    def __init__(self, parent, ports, default_outdir, lumped=()):
         wx.Dialog.__init__(self, parent, title="RFsim")
-        self._build(ports, default_outdir)
+        self._build(ports, default_outdir, lumped)
 
-    def _build(self, ports, default_outdir):
+    def _build(self, ports, default_outdir, lumped):
         top = wx.BoxSizer(wx.VERTICAL)
 
         title = wx.StaticText(self, label="RFsim v1.0")
@@ -77,18 +79,45 @@ class SettingsDialog(wx.Dialog):
         self.z0 = row(pg, "Port impedance:",
                       wx.TextCtrl(self, value="50"), "ohm")
         self.port_choices = []
-        for p in ports:
+        self.port_order = []
+        self.port_excite = []
+        nums = [str(i + 1) for i in range(len(ports))]
+        for i, p in enumerate(ports):
             note = "" if p["direction"] else "  [no track: lumped only]"
-            ch = row(pg, "Port %d: %s%s" % (p["number"], p["label"], note),
-                     wx.Choice(self, choices=[t[0] for t in PORT_TYPES]))
+            num = wx.Choice(self, choices=nums)
+            num.SetSelection(i)
+            num.Enable(len(ports) > 1)
+            ch = wx.Choice(self, choices=[t[0] for t in PORT_TYPES])
             ch.SetSelection(0)
             ch.Enable(bool(p["direction"]))
+            exc = wx.CheckBox(self, label="Excite")
+            exc.SetValue(True)
+            h = wx.BoxSizer(wx.HORIZONTAL)
+            h.Add(num, 0, wx.RIGHT, 8)
+            h.Add(ch, 1, wx.EXPAND)
+            h.Add(exc, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+            pg.Add(wx.StaticText(self, label="%s%s" % (p["label"], note)),
+                   0, wx.ALIGN_CENTER_VERTICAL)
+            pg.Add(h, 0, wx.EXPAND)
             self.port_choices.append(ch)
-        self.swap = None
-        if len(ports) == 2:
-            self.swap = wx.CheckBox(self, label="Swap port order")
-            pg.Add(wx.StaticText(self, label=""))
-            pg.Add(self.swap)
+            self.port_order.append(num)
+            self.port_excite.append(exc)
+        if len(ports) > 1:
+            pbox.Add(wx.StaticText(
+                self, label="The number assigns the port (excited in that "
+                "order; port 1 drives the field/far-field views). Excite = "
+                "drive this port (one FDTD run each); uncheck ports whose "
+                "S-columns you don't need."),
+                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+        self.lumped = None
+        if lumped:
+            refs = ", ".join(e["ref"] for e in lumped)
+            self.lumped = wx.CheckBox(
+                self, label="Model SMD R/L/C parts as lumped elements "
+                "(%d found: %s)" % (len(lumped), refs))
+            self.lumped.SetValue(True)
+            pbox.Add(self.lumped, 0, wx.ALL, 6)
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -149,6 +178,15 @@ class SettingsDialog(wx.Dialog):
                 "('Define at' must lie inside the sweep range.)",
                 "RFsim", wx.ICON_ERROR)
             return
+        order = [c.GetSelection() for c in self.port_order]
+        if sorted(order) != list(range(len(order))):
+            wx.MessageBox("Each pad needs a unique port number.",
+                          "RFsim", wx.ICON_ERROR)
+            return
+        if not any(cb.GetValue() for cb in self.port_excite):
+            wx.MessageBox("Select at least one port to excite.",
+                          "RFsim", wx.ICON_ERROR)
+            return
         evt.Skip()
 
     def get_settings(self):
@@ -165,7 +203,14 @@ class SettingsDialog(wx.Dialog):
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
             "port_types": [PORT_TYPES[c.GetSelection()][1]
                            for c in self.port_choices],
-            "swap": bool(self.swap and self.swap.GetValue()),
+            "order": [c.GetSelection() + 1 for c in self.port_order],
+            # excite carries FINAL port numbers (after renumbering), which is
+            # what the runner matches against
+            "excite": sorted(num.GetSelection() + 1
+                             for num, cb in zip(self.port_order,
+                                                self.port_excite)
+                             if cb.GetValue()),
+            "lumped": bool(self.lumped and self.lumped.GetValue()),
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             "max_timesteps": 300000,  # ponytail: fixed cap; expose if high-Q
@@ -302,11 +347,14 @@ class ResultsFrame(wx.Frame):
 
         wx.Frame.__init__(self, parent, title="RFsim", size=(820, 620))
         self.net = skrf.Network(touchstone_path)
-        plots = ["S-Parameters"]
+        import numpy as np
+        plots = ["S-Parameters [Magnitude]", "S-Parameters [Phase]"]
         if self.net.nports >= 1:
             plots += ["Smith Chart", "VSWR"]
-        if self.net.nports == 2:
-            plots += ["Group delay (S21)"]
+        if any(np.any(np.abs(self.net.s[:, j, k]) > 1e-9)
+               for k in range(self.net.nports)
+               for j in range(self.net.nports) if j != k):
+            plots += ["Group delay"]
 
         self.outdir = os.path.dirname(os.path.abspath(touchstone_path))
         try:
@@ -314,11 +362,23 @@ class ResultsFrame(wx.Frame):
                 self.model = json.load(fh)
         except Exception:
             self.model = None
-        self.field_h5s = {k: os.path.join(self.outdir, "exc1", k[0] + "f.h5")
-                          for k in ("E", "H")}
-        self.ff_json = os.path.join(self.outdir, "farfield.json")
+        # per-excitation outputs: excN/[EH]f.h5 + farfield_pN.json for every
+        # excited port N; plain farfield.json = legacy single-farfield runs
+        self.field_h5s = {}  # (kind, port) -> h5 path
+        for k in ("E", "H"):
+            for hit in glob.glob(os.path.join(self.outdir, "exc*",
+                                              k + "f.h5")):
+                p = int(re.search(r"exc(\d+)", hit).group(1))
+                self.field_h5s[(k, p)] = hit
+        self._ff = {}  # port (0 = legacy/unknown) -> farfield dict
+        for path in glob.glob(os.path.join(self.outdir, "farfield*.json")):
+            m = re.search(r"farfield_p(\d+)", os.path.basename(path))
+            try:
+                with open(path) as fh:
+                    self._ff[int(m.group(1)) if m else 0] = json.load(fh)
+            except Exception:
+                pass
         self._field = {}
-        self._ff = None
         self._anim = None
         if self.model:
             s = self.model.get("settings", {})
@@ -326,21 +386,22 @@ class ResultsFrame(wx.Frame):
                                         if "f_start" in s else None)
             ftag = " (f=%g GHz)" % (f_hz / 1e9) if f_hz else ""
             plots.append("Board layout")
+            fports = sorted({p for _, p in self.field_h5s})
             for k in ("E", "H"):
-                if os.path.isfile(self.field_h5s[k]):
-                    plots.append("%s-Field%s" % (k, ftag))
-            if os.path.isfile(self.ff_json):
-                try:
-                    with open(self.ff_json) as fh:
-                        self._ff = json.load(fh)
-                    for cut in self._ff["cuts"]:
-                        plots.append("Farfield (f=%g GHz) (%s)"
-                                     % (self._ff["f_hz"] / 1e9, cut))
-                    if "grid3d" in self._ff:
-                        plots.append("Farfield (f=%g GHz)"
-                                     % (self._ff["f_hz"] / 1e9))
-                except Exception:
-                    pass
+                for p in fports:
+                    if (k, p) in self.field_h5s:
+                        plots.append("%s-Field%s%s" % (
+                            k, ftag,
+                            " (Port %d)" % p if len(fports) > 1 else ""))
+            for p in sorted(self._ff):
+                ff = self._ff[p]
+                ptag = " (Port %d)" % p if len(self._ff) > 1 else ""
+                for cut in ff.get("cuts", {}):
+                    plots.append("Farfield (f=%g GHz) (%s)%s"
+                                 % (ff["f_hz"] / 1e9, cut, ptag))
+                if "grid3d" in ff:
+                    plots.append("Farfield (f=%g GHz)%s"
+                                 % (ff["f_hz"] / 1e9, ptag))
         self.choice = wx.Choice(self, choices=plots)
         self.choice.SetSelection(0)
         self.figure = Figure(figsize=(8, 5.5), layout="constrained")
@@ -373,38 +434,69 @@ class ResultsFrame(wx.Frame):
         net, f_ghz = self.net, self.net.f / 1e9
         sel = self.choice.GetStringSelection()
 
+        m = re.search(r" \(Port (\d+)\)$", sel)
+        pnum, base = (int(m.group(1)), sel[:m.start()]) if m else (None, sel)
+
         if sel.startswith("Board layout"):
             self._plot_board(ax)
         elif sel.startswith(("E-Field", "H-Field")):
-            self._plot_field(ax, sel[0])
+            self._plot_field(ax, sel[0], pnum)
         elif sel.startswith("Farfield"):
             ax.remove()
-            tag = sel[sel.rfind("(") + 1:-1]
-            if tag in self._ff["cuts"]:      # "(Phi=0)" etc. -> 2D cut
-                self._plot_farfield(tag)
+            ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
+            ptag = " (Port %d)" % pnum if pnum else ""
+            tag = base[base.rfind("(") + 1:-1]
+            if tag in ff.get("cuts", {}):    # "(Phi=0)" etc. -> 2D cut
+                self._plot_farfield(ff, tag, ptag)
             else:                            # bare "(f=xx GHz)" -> 3D balloon
-                self._plot_farfield3d()
+                self._plot_farfield3d(ff, ptag)
         elif sel.startswith("S-Parameters"):
+            phase = sel.endswith("[Phase]")
             for j in range(net.nports):
                 for k in range(net.nports):
-                    ax.plot(f_ghz, net.s_db[:, j, k],
-                            label="S%d%d" % (j + 1, k + 1))
-            ax.set_title("S-Parameters [Magnitude]")
-            ax.set_ylabel("dB")
+                    if not np.any(np.abs(net.s[:, j, k]) > 1e-9):
+                        continue  # port k not excited -> column not computed
+                    v = (np.degrees(np.angle(net.s[:, j, k])) if phase
+                         else net.s_db[:, j, k])
+                    ax.plot(f_ghz, v, label="S%d%d" % (j + 1, k + 1))
+            ax.set_title("S-Parameters [Phase]" if phase
+                         else "S-Parameters [Magnitude]")
+            ax.set_ylabel("°" if phase else "dB")
             ax.legend()
         elif sel.startswith("Smith"):
-            net.plot_s_smith(m=0, n=0, ax=ax, draw_labels=True)
+            grid = True
+            for i in range(net.nports):
+                if not np.any(np.abs(net.s[:, i, i]) > 1e-9):
+                    continue  # port i not excited -> S_ii not computed
+                net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid)
+                grid = False
+            for ln in ax.get_lines():  # skrf labels "name, S11" -> "S11"
+                if ", S" in ln.get_label():
+                    ln.set_label(ln.get_label().split(", ")[-1])
+            ax.legend()
             ax.set_title("S-Parameters [Impedance View]")
         elif sel.startswith("VSWR"):
-            mag = np.clip(np.abs(net.s[:, 0, 0]), 0, 0.999999)
-            ax.plot(f_ghz, (1 + mag) / (1 - mag))
+            for i in range(net.nports):
+                s_ii = net.s[:, i, i]
+                if not np.any(np.abs(s_ii) > 1e-9):
+                    continue
+                mag = np.clip(np.abs(s_ii), 0, 0.999999)
+                ax.plot(f_ghz, (1 + mag) / (1 - mag),
+                        label="Port %d" % (i + 1))
             ax.set_title("Voltage Standing Wave Ratio (VSWR)")
             ax.set_ylim(1, min(20, ax.get_ylim()[1]))
-        else:  # group delay
-            phase = np.unwrap(np.angle(net.s[:, 1, 0]))
-            gd = -np.gradient(phase, 2 * np.pi * net.f) * 1e9
-            ax.plot(f_ghz, gd)
-            ax.set_ylabel("Group delay (ns)")
+            ax.legend()
+        else:  # group delay: all computed transmission pairs in one graph
+            for k in range(net.nports):
+                for j in range(net.nports):
+                    if j == k or not np.any(np.abs(net.s[:, j, k]) > 1e-9):
+                        continue
+                    phase = np.unwrap(np.angle(net.s[:, j, k]))
+                    gd = -np.gradient(phase, 2 * np.pi * net.f) * 1e9
+                    ax.plot(f_ghz, gd, label="S%d%d" % (j + 1, k + 1))
+            ax.set_title("Group delay")
+            ax.set_ylabel("Group delay / ns")
+            ax.legend()
 
         if not sel.startswith(("Smith", "Board", "E-Field", "H-Field",
                                "Farfield")):
@@ -446,6 +538,26 @@ class ResultsFrame(wx.Frame):
                         textcoords="offset points", fontsize=9,
                         fontweight="bold", color="darkgreen")
         handles.append(Patch(color="lime", label="ports"))
+        les = (m.get("lumped_elements", [])
+               if m["settings"].get("lumped", True) else [])
+        for e in les:
+            (x0, y0), (x1, y1) = e["start"][:2], e["stop"][:2]
+            ax.fill([x0, x1, x1, x0], [y0, y0, y1, y1], color="green",
+                    zorder=5)
+            # pad-to-pad line: the gap box alone is sub-mm, invisible at
+            # board zoom — the line shows what the element connects
+            (px0, py0), (px1, py1) = e.get(
+                "pads", (e["start"][:2], e["stop"][:2]))
+            ax.plot([px0, px1], [py0, py1], "-o", color="green", lw=2,
+                    ms=5, zorder=5)
+            ax.annotate(e["ref"], (0.5 * (px0 + px1), 0.5 * (py0 + py1)),
+                        ha="center", va="bottom", xytext=(0, 6),
+                        textcoords="offset points", fontsize=9,
+                        fontweight="bold", color="darkgreen", zorder=6)
+        if les:
+            from matplotlib.lines import Line2D
+            handles.append(Line2D([], [], color="green", lw=2, marker="o",
+                                  ms=5, label="R/L/C"))
         from matplotlib.lines import Line2D
         handles.append(Line2D([], [], color="0.25", lw=1.2,
                               label="Board edge"))
@@ -456,7 +568,7 @@ class ResultsFrame(wx.Frame):
         ax.set_title("Board layout")
         ax.set_aspect("equal")
 
-    def _plot_field(self, ax, kind):
+    def _plot_field(self, ax, kind, port=None):
         """Traveling-wave animation on the substrate mid-plane.
 
         Same signed red/blue view for both fields: E shows E_z, H shows the
@@ -465,9 +577,13 @@ class ResultsFrame(wx.Frame):
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation
-        if kind not in self._field:
-            self._field[kind] = _load_field(self.field_h5s[kind])
-        x, y, F, f_hz = self._field[kind]
+        ports = sorted(p for k2, p in self.field_h5s if k2 == kind)
+        if port is None:
+            port = ports[0]
+        key = (kind, port)
+        if key not in self._field:
+            self._field[key] = _load_field(self.field_h5s[key])
+        x, y, F, f_hz = self._field[key]
         frames = 24
 
         if kind == "E":
@@ -485,7 +601,9 @@ class ResultsFrame(wx.Frame):
                     [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s-Field (f=%g GHz)" % (kind, f_hz / 1e9))
+        ax.set_title("%s-Field (f=%g GHz)%s" % (
+            kind, f_hz / 1e9,
+            " (Port %d)" % port if len(ports) > 1 else ""))
         ax.set_aspect("equal")
 
         def step(i):
@@ -497,7 +615,7 @@ class ResultsFrame(wx.Frame):
                                    interval=60, blit=False,
                                    cache_frame_data=False)
 
-    def _plot_farfield3d(self):
+    def _plot_farfield3d(self, ff, ptag=""):
         """Transparent 3D directivity balloon with the PCB as a reference plate.
 
         radius/color = dBi over a 30 dB range, +z = board normal.
@@ -505,7 +623,7 @@ class ResultsFrame(wx.Frame):
         import numpy as np
         from matplotlib import cm, colors
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-        g = self._ff["grid3d"]
+        g = ff["grid3d"]
         th = np.radians(np.asarray(g["theta_deg"], float))[:, None]
         ph = np.radians(np.asarray(g["phi_deg"], float))[None, :]
         D = np.asarray(g["D_dBi"], float)
@@ -553,15 +671,15 @@ class ResultsFrame(wx.Frame):
         ax.set_zlim(-m, m)
         ax.set_box_aspect((1, 1, 1))
         ax.set_axis_off()
-        ax.set_title("Farfield (f=%g GHz)" % (self._ff["f_hz"] / 1e9))
+        ax.set_title("Farfield (f=%g GHz)%s" % (ff["f_hz"] / 1e9, ptag))
         sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
         sm.set_array([])
         self.figure.colorbar(sm, ax=ax, shrink=0.65, label="dBi")
 
-    def _plot_farfield(self, cut):
+    def _plot_farfield(self, ff, cut, ptag=""):
         """One polar directivity cut in absolute dBi (CST-style)."""
         import numpy as np
-        c = self._ff["cuts"][cut]
+        c = ff["cuts"][cut]
         ang_deg = np.asarray(c["angle_deg"], float)
         D = np.asarray(c["D_dBi"], float)
         phi_cut = cut.startswith("Phi")
@@ -581,12 +699,12 @@ class ResultsFrame(wx.Frame):
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))
-        ax.set_title("Farfield Directivity Abs (%s)" % cut)
+        ax.set_title("Farfield Directivity Abs (%s)%s" % (cut, ptag))
         ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
                       % ("Theta" if phi_cut else "Phi"))
 
         st = _lobe_stats(ang_deg, D)
-        lines = ["Frequency = %g GHz" % (self._ff["f_hz"] / 1e9),
+        lines = ["Frequency = %g GHz" % (ff["f_hz"] / 1e9),
                  "Main lobe magnitude = %.2f dBi" % st["peak"],
                  "Main lobe direction = %.1f deg." % st["dir"],
                  "Angular width (3 dB) = %.1f deg." % st["width"]]

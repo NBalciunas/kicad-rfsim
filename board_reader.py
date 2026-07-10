@@ -16,6 +16,49 @@ PM_FAST = pcbnew.SHAPE_POLY_SET.PM_FAST
 # RF-sane defaults when the board has no explicit stackup: FR4.
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 
+# SI multipliers, case-sensitive (m=milli vs M=mega). 'r'/'R' = decimal marker.
+_SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
+       "r": 1.0, "R": 1.0, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+# which prefix letters are legal per part kind (avoids reading a cap's 'p'
+# as pico on a resistor, etc.)
+_PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
+_DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
+        "nopop", "no pop", "?"}
+
+
+def _parse_value(text, kind):
+    """'4k7'/'4.7k'/'100nF'/'3n3' -> float in SI (ohm/H/F), or None.
+
+    Handles the RKM 'letter as decimal point' convention (4R7 = 4.7 ohm,
+    3n3 = 3.3 nH/nF). kind is 'R', 'L' or 'C'. Unparseable/DNP -> None.
+    """
+    if not text:
+        return None
+    tok = text.strip().split()[0] if text.strip() else ""  # drop " 1%" etc.
+    tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
+    for u in ("ohm", "OHM", "Ohm"):
+        tok = tok.replace(u, "")
+    if tok.lower() in _DNP:
+        return None
+    if kind == "C" and tok[-1:].lower() == "f":
+        tok = tok[:-1]
+    elif kind == "L" and tok[-1:].lower() == "h":
+        tok = tok[:-1]
+    if not tok:
+        return None
+    for i, ch in enumerate(tok):
+        if ch in _PREFIX[kind]:
+            left, right = tok[:i], tok[i + 1:]
+            num = (left + "." + right) if right else (left or "0")
+            try:
+                return float(num) * _SI[ch]
+            except ValueError:
+                return None
+    try:
+        return float(tok)
+    except ValueError:
+        return None
+
 
 def _lname(layer_id):
     return pcbnew.BOARD.GetStandardLayerName(layer_id)
@@ -370,6 +413,70 @@ def _feed_direction(board, pad):
     return direction, _mm(width)
 
 
+def _lumped_elements(board, region, copper_layers, skip_refs):
+    """Detect 2-pad R/L/C parts in `region` -> (elements, warnings).
+
+    Each element is a box bridging the gap between its two pads, oriented
+    along the nearest Cartesian axis (openEMS conducts along one axis).
+    Values are parsed to SI. Parts in `skip_refs` (they carry a port pad)
+    and unparseable/off-layer parts are skipped with a warning.
+    """
+    z_of = {c["name"]: c["z"] for c in copper_layers}
+    elements, warnings = [], []
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        kind = ref[:1].upper()
+        if kind not in ("R", "L", "C") or ref in skip_refs:
+            continue
+        pads = list(fp.Pads())
+        if len(pads) != 2 or not fp.GetBoundingBox().Intersects(region):
+            continue
+        if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
+            warnings.append("%s: not an SMD part (THT barrel not modeled) "
+                            "-> not modeled" % ref)
+            continue
+        layer = _lname(pads[0].GetLayer())
+        if layer not in z_of or _lname(pads[1].GetLayer()) != layer:
+            warnings.append("%s: pads not both on one copper layer -> not "
+                            "modeled" % ref)
+            continue
+        val = _parse_value(fp.GetValue(), kind)
+        if val is None:
+            warnings.append("%s: value \"%s\" not understood -> not modeled"
+                            % (ref, fp.GetValue()))
+            continue
+        b1, b2 = pads[0].GetBoundingBox(), pads[1].GetBoundingBox()
+        c1 = (_mm(b1.Centre().x), -_mm(b1.Centre().y))
+        c2 = (_mm(b2.Centre().x), -_mm(b2.Centre().y))
+        dx, dy = abs(c2[0] - c1[0]), abs(c2[1] - c1[1])
+        z = z_of[layer]
+        if dx >= dy:  # element along x, spanning the gap between pad inner edges
+            ny = "x"
+            lo, hi = (b1, b2) if c1[0] <= c2[0] else (b2, b1)
+            g0, g1 = _mm(lo.GetRight()), _mm(hi.GetLeft())
+            c = 0.5 * (c1[1] + c2[1])
+            hw = 0.5 * min(_mm(b1.GetHeight()), _mm(b2.GetHeight()))
+            start, stop = [g0, c - hw, z], [g1, c + hw, z]
+        else:         # element along y (world y is flipped vs screen)
+            ny = "y"
+            lo, hi = (b1, b2) if c1[1] <= c2[1] else (b2, b1)
+            g0, g1 = -_mm(lo.GetTop()), -_mm(hi.GetBottom())
+            c = 0.5 * (c1[0] + c2[0])
+            hw = 0.5 * min(_mm(b1.GetWidth()), _mm(b2.GetWidth()))
+            start, stop = [c - hw, g0, z], [c + hw, g1, z]
+        if g1 - g0 <= 0:
+            warnings.append("%s: pads overlap (no gap to bridge) -> not "
+                            "modeled" % ref)
+            continue
+        if min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
+            warnings.append("%s is placed off-axis; approximated as a %s-axis "
+                            "element" % (ref, ny))
+        elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
+                         "layer": layer, "start": start, "stop": stop,
+                         "pads": [list(c1), list(c2)]})
+    return elements, warnings
+
+
 def _port(board, pad, number, copper_layers):
     layer_name = _lname(pad.GetLayer())
     names = [c["name"] for c in copper_layers]
@@ -509,6 +616,12 @@ def extract(board, pads, margin_mm, substrate=None):
                                          p["ref_layer"], p["ref_layer"],
                                          p["ref_layer"]))
 
+    # SMD R/L/C parts as lumped elements (a part carrying a port pad is the
+    # port, not a separate element -> skip its footprint).
+    port_refs = {pad.GetParentFootprint().GetReference() for pad in pads}
+    lumped, le_warn = _lumped_elements(board, region, copper_layers, port_refs)
+    warnings += le_warn
+
     for c in copper_layers:
         c.pop("id")
     return {
@@ -519,5 +632,24 @@ def extract(board, pads, margin_mm, substrate=None):
         "polygons": polygons,
         "vias": vias,
         "ports": ports,
+        "lumped_elements": lumped,
         "warnings": warnings,
     }
+
+
+if __name__ == "__main__":  # value-parser self-check: python board_reader.py
+    _CASES = [
+        ("10k", "R", 10e3), ("4R7", "R", 4.7), ("1k5", "R", 1500.0),
+        ("2.2k", "R", 2200.0), ("100", "R", 100.0), ("0", "R", 0.0),
+        ("1M", "R", 1e6), ("50", "R", 50.0), ("4.7 1%", "R", 4.7),
+        ("1.2pF", "C", 1.2e-12), ("100nF", "C", 100e-9), ("3n3", "C", 3.3e-9),
+        ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
+        ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
+        ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
+    ]
+    for _t, _k, _want in _CASES:
+        _got = _parse_value(_t, _k)
+        _ok = (_want is None and _got is None) or (
+            _got is not None and abs(_got - _want) <= 1e-15 + 1e-6 * abs(_want))
+        assert _ok, "%r/%s -> %r, want %r" % (_t, _k, _got, _want)
+    print("parser OK (%d cases)" % len(_CASES))

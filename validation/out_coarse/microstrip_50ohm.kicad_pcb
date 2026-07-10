@@ -84,12 +84,12 @@
 	(net 2 "GND")
 	(footprint ""
 		(layer "F.Cu")
-		(uuid "2a64b735-ea4a-4174-b7f2-13a6a78c160b")
+		(uuid "1a9d43b6-71e2-4115-b7b6-49443de9b3c8")
 		(at 35 10)
 		(property "Reference" "P2"
 			(at 0 0 0)
 			(layer "F.SilkS")
-			(uuid "eefdc7ba-a12d-4578-bfa5-3405e31aebae")
+			(uuid "75f3d457-e35d-4ce3-8243-765d30a31feb")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -100,7 +100,7 @@
 		(property "Value" ""
 			(at 0 0 0)
 			(layer "F.Fab")
-			(uuid "4115d541-534c-417b-b2ad-87b2147c5e8a")
+			(uuid "daac263c-c548-4b60-9bee-2bcc517560d4")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -112,7 +112,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "4c869238-72d0-45d5-b580-59b7d4f3cba9")
+			(uuid "dd9470cf-ceb1-4288-a586-4e36de27a9c3")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -124,7 +124,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "64b48082-14a5-436e-bbfa-20be4048f3a2")
+			(uuid "6078b926-d2aa-433b-b826-41cb66fa5f17")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -136,7 +136,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "4b086dda-204e-4bd6-bbcd-c8d303774bfb")
+			(uuid "4987589e-dff6-4730-a513-f2118b48138c")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -150,17 +150,17 @@
 			(layers "F.Cu" "F.Paste" "F.Mask")
 			(net 1 "RF")
 			(thermal_bridge_angle 45)
-			(uuid "41e16bbf-20c3-472b-8747-14de5811220d")
+			(uuid "b3b4629f-70cb-4bd3-bbe5-6f1fbdb48cd3")
 		)
 	)
 	(footprint ""
 		(layer "F.Cu")
-		(uuid "54342749-62db-4069-8816-e30664266927")
+		(uuid "497026d8-c09d-41d3-9e25-cb09d70a120c")
 		(at 5 10)
 		(property "Reference" "P1"
 			(at 0 0 0)
 			(layer "F.SilkS")
-			(uuid "4ebbb85d-0b15-4097-a974-e8e0603b165d")
+			(uuid "fd3237a1-2ecb-4ae7-8a93-d700620baffd")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -171,7 +171,7 @@
 		(property "Value" ""
 			(at 0 0 0)
 			(layer "F.Fab")
-			(uuid "0bd4b5fc-84d7-4324-873f-3a31c95bfec0")
+			(uuid "056d495f-26d4-4224-8615-12d48c07e989")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -183,7 +183,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "d2f45de0-5823-4be0-a1a5-d93bcc3c3e66")
+			(uuid "8510f6fd-0b89-4a2d-8a97-ace0b5419381")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -195,7 +195,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "807924f1-3f2a-4e50-9578-f25fe7823045")
+			(uuid "002fde4d-1cc8-4cab-96b6-0b7979f1751d")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -207,7 +207,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "ab980b54-217a-4565-a90c-37ecd21a359e")
+			(uuid "ab19594e-c7c1-47ba-9e0b-453dc918d96e")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -221,38 +221,8 @@
 			(layers "F.Cu" "F.Paste" "F.Mask")
 			(net 1 "RF")
 			(thermal_bridge_angle 45)
-			(uuid "7a8ef9e4-4657-4b27-a3fa-b17fe6c347f6")
+			(uuid "588567b2-82de-476e-a4a4-19d046f67f43")
 		)
-	)
-	(gr_line
-		(start 0 20)
-		(end 0 0)
-		(stroke
-			(width 0.1)
-			(type default)
-		)
-		(layer "Edge.Cuts")
-		(uuid "7d61e3c6-5d3c-4b4d-a039-eb442210a32b")
-	)
-	(gr_line
-		(start 40 20)
-		(end 0 20)
-		(stroke
-			(width 0.1)
-			(type default)
-		)
-		(layer "Edge.Cuts")
-		(uuid "bf459013-9cf2-4cbb-99ca-dec43d614507")
-	)
-	(gr_line
-		(start 40 0)
-		(end 40 20)
-		(stroke
-			(width 0.1)
-			(type default)
-		)
-		(layer "Edge.Cuts")
-		(uuid "e02b67f1-b438-495a-a5d1-25e6267db52b")
 	)
 	(gr_line
 		(start 0 0)
@@ -262,7 +232,37 @@
 			(type default)
 		)
 		(layer "Edge.Cuts")
-		(uuid "e16de4b9-3b96-486e-a239-8fed825e01b7")
+		(uuid "2f84ef3f-f0ce-4dc0-8fd6-3bae8bdb3e35")
+	)
+	(gr_line
+		(start 40 20)
+		(end 0 20)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(layer "Edge.Cuts")
+		(uuid "40810370-4fd2-4390-980f-a832c4b53852")
+	)
+	(gr_line
+		(start 40 0)
+		(end 40 20)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(layer "Edge.Cuts")
+		(uuid "8dec3be4-78c0-4934-af85-e8292857c93e")
+	)
+	(gr_line
+		(start 0 20)
+		(end 0 0)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(layer "Edge.Cuts")
+		(uuid "905e1cc8-c452-4827-a530-4079de054412")
 	)
 	(segment
 		(start 5 10)
@@ -270,13 +270,13 @@
 		(width 2.9)
 		(layer "F.Cu")
 		(net 1)
-		(uuid "e6808d0b-4522-4c13-9a96-ececc6377866")
+		(uuid "76404284-95f4-45a8-a4f8-387f7aaf53e3")
 	)
 	(zone
 		(net 2)
 		(net_name "GND")
 		(layer "B.Cu")
-		(uuid "4c81c152-3a39-4e02-ac6d-0e1b2ff95557")
+		(uuid "3656a147-5e3f-4a3b-a601-3d18b1f0512e")
 		(hatch edge 0.5)
 		(connect_pads
 			(clearance 0.5)

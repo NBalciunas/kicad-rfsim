@@ -7,8 +7,10 @@ tested headless. Imports only numpy/CSXCAD/openEMS — never pcbnew or wx.
 
 Excites each port in turn (N ports -> N runs) to fill the full S-matrix.
 """
+import glob
 import json
 import os
+import shutil
 import sys
 
 # The openEMS/CSXCAD python extensions need the openEMS binary DLLs on
@@ -110,6 +112,10 @@ def _mesh(model, ports, res):
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
+    for e in model.get("lumped_elements", []):
+        # pin the element box: sub-mm parts must not depend on cell snapping
+        xs.update((e["start"][0], e["stop"][0]))
+        ys.update((e["start"][1], e["stop"][1]))
 
     board_top = model["copper_layers"][0]["z"]
     zs = set(_pml_band(-2.0 * margin, board_top + 2.0 * margin, margin))
@@ -124,7 +130,7 @@ def _mesh(model, ports, res):
             _merge_close(zs, min(tol, 0.05)))
 
 
-def build(model, excite_idx, res):
+def build(model, excite_idx, res, want_ff=False):
     """Fresh FDTD + CSX model with port `excite_idx` excited."""
     from CSXCAD import ContinuousStructure
     from openEMS import openEMS
@@ -172,6 +178,21 @@ def build(model, excite_idx, res):
                                   [v["x"], v["y"], v["z1"]],
                                   v["r"], priority=10)
 
+    if s.get("lumped", True):
+        for e in model.get("lumped_elements", []):
+            if e["type"] == "R" and e["value"] == 0:  # 0-ohm jumper = short
+                csx.AddMetal("short_" + e["ref"]).AddBox(
+                    e["start"], e["stop"], priority=15)
+                unit = "ohm (short)"
+            else:
+                csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
+                                     **{e["type"]: e["value"]}).AddBox(
+                    e["start"], e["stop"], priority=15)
+                unit = {"R": "ohm", "L": "H", "C": "F"}[e["type"]]
+            print("[rfsim] lumped %s: %s=%g %s (%s-axis) at z=%.3f"
+                  % (e["ref"], e["type"], e["value"], unit, e["ny"],
+                     e["start"][2]), flush=True)
+
     ports = []
     for i, g in enumerate(ports_geo):
         excite = (i == excite_idx)
@@ -191,16 +212,18 @@ def build(model, excite_idx, res):
             flush=True)
 
     ff = None
-    if excite_idx == 0:
-        # FD E/H-field dumps on the substrate mid-plane under port 1, at the
-        # user's "Define at" frequency (center frequency for old models):
-        # small files, enough for the GUI's traveling-wave animations.
+    if want_ff:
+        # FD E/H-field dumps on the substrate mid-plane under the driven port,
+        # at the user's "Define at" frequency (center frequency for old
+        # models): small files, enough for the GUI's traveling-wave animations.
         f_dump = s.get("f_field") or f0
-        g0 = ports_geo[0]
+        g0 = ports_geo[excite_idx]
         z_cut = 0.5 * (g0["z_top"] + g0["z_ref"])
         r = model["region"]
         for name, dt in (("Ef", 10), ("Hf", 11)):
-            dump = csx.AddDump(name, dump_type=dt, file_type=1,
+            # dump_mode=1: interpolate to mesh nodes. The default (0) dumps
+            # raw staggered Yee values, drawing H half a cell off the copper
+            dump = csx.AddDump(name, dump_type=dt, dump_mode=1, file_type=1,
                                frequency=[f_dump])
             dump.AddBox([r["x0"], r["y0"], z_cut], [r["x1"], r["y1"], z_cut])
 
@@ -221,15 +244,15 @@ def build(model, excite_idx, res):
     return fdtd, ports, ff
 
 
-def _farfield(outdir, ff, sim_path, port1, freq, S):
-    """NF2FF at the recorded ('Define at') frequency -> farfield.json.
+def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
+    """NF2FF at the recorded ('Define at') frequency -> farfield{suffix}.json.
 
     Three cuts, CST-style: theta sweeps at phi=0/90 and an azimuth sweep
     at theta=90. Each cut is in absolute dBi (its own slice peak = the
     engine's Dmax for that angle grid).
     """
     f_ff = ff.freq[0]
-    print("[rfsim] NF2FF at %.3f GHz..." % (f_ff / 1e9), flush=True)
+    print("[rfsim] NF2FF%s at %.3f GHz..." % (suffix, f_ff / 1e9), flush=True)
     theta = np.arange(-180.0, 180.1, 2.0)
     phi_az = np.arange(0.0, 360.1, 2.0)
     center = [0.5 * (a + b) * 1e-3 for a, b in zip(ff.start, ff.stop)]
@@ -252,7 +275,7 @@ def _farfield(outdir, ff, sim_path, port1, freq, S):
     i_f = int(np.argmin(np.abs(freq - f_ff)))
     P_in = float(0.5 * np.real(port1.uf_tot[i_f] * np.conj(port1.if_tot[i_f])))
     eff = 100.0 * Prad / P_in if P_in > 0 else None
-    with open(os.path.join(outdir, "farfield.json"), "w") as fh:
+    with open(os.path.join(outdir, "farfield%s.json" % suffix), "w") as fh:
         json.dump({
             "f_hz": f_ff,
             "cuts": {
@@ -274,16 +297,28 @@ def _farfield(outdir, ff, sim_path, port1, freq, S):
 
 
 def write_touchstone(path, freq, S, z0):
+    """Touchstone v1. 1/2-port stay single-line (the 2-port column order is
+    the classic S11 S21 S12 S22); N>=3 is row-major, <=4 pairs per line."""
     n = S.shape[1]
     with open(path, "w") as fh:
         fh.write("! rfsim (KiCad + openEMS)\n# HZ S RI R %g\n" % z0)
         for i, f in enumerate(freq):
-            if n == 1:
-                vals = [S[i, 0, 0]]
-            else:  # .s2p column order: S11 S21 S12 S22
-                vals = [S[i, 0, 0], S[i, 1, 0], S[i, 0, 1], S[i, 1, 1]]
-            fh.write("%.6e %s\n" % (
-                f, " ".join("%.9e %.9e" % (v.real, v.imag) for v in vals)))
+            if n <= 2:
+                vals = ([S[i, 0, 0]] if n == 1 else
+                        [S[i, 0, 0], S[i, 1, 0], S[i, 0, 1], S[i, 1, 1]])
+                fh.write("%.6e %s\n" % (f, " ".join(
+                    "%.9e %.9e" % (v.real, v.imag) for v in vals)))
+                continue
+            fh.write("%.6e" % f)
+            for j in range(n):
+                if j:
+                    fh.write("\n           ")  # each matrix row on its own line
+                for k in range(n):
+                    if k and k % 4 == 0:
+                        fh.write("\n           ")  # wrap at 4 pairs/line
+                    v = S[i, j, k]
+                    fh.write(" %.9e %.9e" % (v.real, v.imag))
+            fh.write("\n")
 
 
 def main(model_path, outdir):
@@ -293,8 +328,32 @@ def main(model_path, outdir):
         print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]
     n = len(model["ports"])
-    if not 1 <= n <= 2:
-        raise SystemExit("expected 1 or 2 ports, got %d" % n)
+    if n < 1:
+        raise SystemExit("expected at least 1 port, got %d" % n)
+
+    # ponytail: hard stop until openEMS >= v0.37 is wired in; then send
+    # inductors as AddLumpedElement(..., L=..., LEtype=1) instead.
+    if s.get("lumped", True):
+        bad = [e["ref"] for e in model.get("lumped_elements", [])
+               if e["type"] == "L"]
+        if bad:
+            raise SystemExit(
+                "[rfsim] ERROR: %s: this openEMS (<= v0.0.36) cannot "
+                "simulate lumped inductors — it silently drops them, so "
+                "results would be wrong (open circuit at the part). Set "
+                "the value to DNP or remove the part, or upgrade openEMS "
+                "to >= v0.37 (lumped RLC support)." % ", ".join(bad))
+
+    # drop leftovers from a previous run into this outdir: an excN folder or
+    # farfield.json not rewritten below (different excite set / failed far
+    # field) would be picked up by the GUI as if it were current
+    for d in glob.glob(os.path.join(outdir, "exc*")):
+        shutil.rmtree(d, ignore_errors=True)
+    for fpath in glob.glob(os.path.join(outdir, "farfield*.json")):
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
 
     eps_max = max(d["epsilon"] for d in model["dielectric_layers"])
     lam_min = C0 / s["f_stop"] / np.sqrt(eps_max) * 1e3  # mm
@@ -303,32 +362,36 @@ def main(model_path, outdir):
 
     freq = np.linspace(s["f_start"], s["f_stop"], s.get("n_freq", 401))
     S = np.zeros((len(freq), n, n), dtype=complex)
-    ff_box = ff_path = port1 = None
-    for k in range(n):
+    # excite only the ports the user asked for (each is a full FDTD run);
+    # un-excited S-columns stay zero. Default/legacy models excite all.
+    nums = [p["number"] for p in model["ports"]]
+    want = set(s.get("excite") or nums)
+    exc = [i for i, num in enumerate(nums) if num in want] or [0]
+    for step, k in enumerate(exc):
         sim_path = os.path.join(outdir, "exc%d" % (k + 1))
-        print("[rfsim] === excitation %d/%d ===" % (k + 1, n), flush=True)
-        fdtd, ports, ff = build(model, k, res)
+        print("[rfsim] === excitation %d/%d (port %d) ==="
+              % (step + 1, len(exc), k + 1), flush=True)
+        fdtd, ports, ff = build(model, k, res, want_ff=True)
         fdtd.Run(sim_path, cleanup=True)
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
         for j in range(n):
             S[:, j, k] = ports[j].uf_ref / ports[k].uf_inc
-        if k == 0:
-            ff_box, ff_path, port1 = ff, sim_path, ports[0]
+        if ff is not None:
+            try:
+                _farfield(outdir, ff, sim_path, ports[k], freq,
+                          "_p%d" % (k + 1))
+            except Exception as e:
+                print("[rfsim] WARNING: far-field (port %d) failed: %s"
+                      % (k + 1, e), flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)
     write_touchstone(out, freq, S, s["z0"])
-    if ff_box is not None:
-        try:
-            _farfield(outdir, ff_box, ff_path, port1, freq, S)
-        except Exception as e:
-            print("[rfsim] WARNING: far-field calculation failed: %s" % e,
-                  flush=True)
-    s11 = 20 * np.log10(np.maximum(np.abs(S[:, 0, 0]), 1e-12))
-    print("[rfsim] S11: %.1f .. %.1f dB" % (s11.min(), s11.max()), flush=True)
-    if n == 2:
-        s21 = 20 * np.log10(np.maximum(np.abs(S[:, 1, 0]), 1e-12))
-        print("[rfsim] S21: %.1f .. %.1f dB" % (s21.min(), s21.max()), flush=True)
+    for k in exc:  # report only the columns actually computed
+        for j in range(n):
+            mag = 20 * np.log10(np.maximum(np.abs(S[:, j, k]), 1e-12))
+            print("[rfsim] S%d%d: %.1f .. %.1f dB"
+                  % (j + 1, k + 1, mag.min(), mag.max()), flush=True)
     print("[rfsim] wrote %s" % out, flush=True)
     return out
 

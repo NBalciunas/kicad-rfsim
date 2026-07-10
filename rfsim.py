@@ -54,9 +54,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
 
         board = pcbnew.GetBoard()
         pads = board_reader.selected_pads(board)
-        if not 1 <= len(pads) <= 2:
+        if len(pads) < 1:
             wx.MessageBox(
-                "You must select one or two pads to run a simulation.",
+                "Select at least one pad to run a simulation.",
                 "RFsim", wx.ICON_INFORMATION)
             return
 
@@ -64,16 +64,20 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         preview = board_reader.extract(board, pads, 1.0)
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
-        dlg = gui.SettingsDialog(None, preview["ports"], default_out)
+        dlg = gui.SettingsDialog(None, preview["ports"], default_out,
+                                 preview.get("lumped_elements", []))
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
         settings = dlg.get_settings()
         dlg.Destroy()
 
-        if settings.pop("swap"):
-            pads.reverse()
         port_types = settings.pop("port_types")
+        # dialog numbering -> pad i becomes port order[i] (types follow)
+        order = settings.pop("order")
+        pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
+        port_types = [t for _, t in
+                      sorted(zip(order, port_types), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
 

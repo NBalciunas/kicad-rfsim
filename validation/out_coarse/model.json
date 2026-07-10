@@ -173,6 +173,7 @@
    "type": "msl"
   }
  ],
+ "lumped_elements": [],
  "warnings": [],
  "settings": {
   "f_start": 1000000000.0,
@@ -182,7 +183,6 @@
   "mesh": "coarse",
   "n_freq": 401,
   "max_timesteps": 300000,
-  "end_criteria": 0.0001,
-  "f_field": 2000000000.0
+  "end_criteria": 0.0001
  }
 }
