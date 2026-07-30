@@ -3,8 +3,8 @@ microstrip. Ideal (Z0=50): S21 = 2*Z0/(2*Z0+R) = -3.5 dB, S11 = R/(R+2*Z0)
 = -9.5 dB. If the resistor were ignored, the gap would read as an open:
 S11 ~ 0 dB, S21 far lower -> the asserts below tell the two apart.
 
-Run with KiCad's python (has pcbnew + openEMS on the DLL path):
-    "C:\\Program Files\\KiCad\\8.0\\bin\\python.exe" run_lumped.py [coarse|medium|fine]
+Run with KiCad 10's python (needs pcbnew; spawns the solver itself):
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_lumped.py [coarse|medium|fine]
 """
 import json
 import os
@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import board_reader  # noqa: E402
+import solverenv  # noqa: E402
 
 TRACE_W = 2.9   # ~50 ohm on 1.6 mm FR4
 Y = 10.0
@@ -56,7 +57,8 @@ def _track(board, x0, x1, net):
     board.Add(t)
 
 
-def make(path):
+def make(path, ref="R1", val="50"):
+    """50-ohm microstrip broken by a 0.5 mm gap bridged by one R/L/C part."""
     board = pcbnew.NewBoard(path)
     rf1 = pcbnew.NETINFO_ITEM(board, "RF1")
     rf2 = pcbnew.NETINFO_ITEM(board, "RF2")
@@ -66,9 +68,9 @@ def make(path):
 
     pad1 = _pad(_fp(board, "P1"), "1", 5.0, Y, TRACE_W, TRACE_W, rf1)
     pad2 = _pad(_fp(board, "P2"), "1", 35.0, Y, TRACE_W, TRACE_W, rf2)
-    # series resistor: rect pads at [19,20] and [20.5,21.5] -> a clean 0.5 mm
+    # series part: rect pads at [19,20] and [20.5,21.5] -> a clean 0.5 mm
     # copper gap in [20, 20.5] that the lumped element must bridge
-    r = _fp(board, "R1", "50")
+    r = _fp(board, ref, val)
     _pad(r, "1", 19.5, Y, 1.0, TRACE_W, rf1)
     _pad(r, "2", 21.0, Y, 1.0, TRACE_W, rf2)
 
@@ -123,7 +125,9 @@ def main(mesh="medium"):
         json.dump(model, fh, indent=1)
 
     runner = os.path.join(os.path.dirname(HERE), "runner.py")
-    subprocess.check_call([sys.executable, runner, model_path, outdir])
+    solver_py = solverenv.solver_python() or sys.executable
+    print("solver python:", solver_py)
+    subprocess.check_call([solver_py, runner, model_path, outdir])
 
     import numpy as np
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))

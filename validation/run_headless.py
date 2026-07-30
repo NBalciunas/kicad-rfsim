@@ -1,7 +1,8 @@
 """End-to-end check without the KiCad GUI: board -> model.json -> openEMS -> .s2p.
 
-Run with KiCad's python:
-    "C:\\Program Files\\KiCad\\8.0\\bin\\python.exe" run_headless.py [coarse|medium|fine]
+Run with KiCad 10's python (per-user install; machine-wide installs are
+under "C:\\Program Files\\KiCad\\10.0\\bin" instead):
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_headless.py [coarse|medium|fine]
 
 A ~50-ohm microstrip thru line must show decent match and low insertion
 loss; the asserts are deliberately loose (FDTD + FR4 tolerances).
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import board_reader  # noqa: E402
 import make_test_board  # noqa: E402
+import solverenv  # noqa: E402
 
 
 def main(mesh="medium", port_type="msl"):
@@ -41,7 +43,9 @@ def main(mesh="medium", port_type="msl"):
         len(model["polygons"].get("B.Cu", [])), len(model["ports"])))
 
     runner = os.path.join(os.path.dirname(HERE), "runner.py")
-    subprocess.check_call([sys.executable, runner, model_path, outdir])
+    solver_py = solverenv.solver_python() or sys.executable
+    print("solver python:", solver_py)
+    subprocess.check_call([solver_py, runner, model_path, outdir])
 
     import numpy as np
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))

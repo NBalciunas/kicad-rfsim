@@ -2,15 +2,18 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 
 import pcbnew
 import wx
 
-from . import board_reader, gui
+from . import board_reader, gui, solverenv
+
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
-def _python_exe():
+def _kicad_python():
     """KiCad's bundled python.exe (sys.executable may be pcbnew.exe)."""
     exe = sys.executable or ""
     if os.path.basename(exe).lower().startswith("python") and os.path.isfile(exe):
@@ -21,6 +24,25 @@ def _python_exe():
         if os.path.isfile(c):
             return c
     return "python"
+
+
+def _solver_missing(exe):
+    """Modules runner.py needs that `exe` cannot provide.
+
+    Uses find_spec in a subprocess: it never imports the extensions, so a
+    missing openEMS DLL doesn't masquerade as a missing package.
+    """
+    code = ("import importlib.util as u\n"
+            "print(','.join(m for m in ('numpy', 'h5py', 'CSXCAD', 'openEMS')\n"
+            "               if u.find_spec(m) is None))")
+    try:
+        r = subprocess.run([exe, "-c", code], capture_output=True, text=True,
+                           timeout=60, creationflags=NO_WINDOW)
+    except Exception as e:
+        return ["(cannot run %s: %s)" % (exe, e)]
+    if r.returncode != 0:
+        return ["(probe failed: %s)" % (r.stderr or "").strip()[-200:]]
+    return [m for m in r.stdout.strip().split(",") if m]
 
 
 class RFSimPlugin(pcbnew.ActionPlugin):
@@ -43,13 +65,24 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(traceback.format_exc(), "RFsim error", wx.ICON_ERROR)
 
     def _run(self):
-        missing = [m for m in ("openEMS", "CSXCAD", "skrf", "matplotlib", "h5py")
-                   if importlib.util.find_spec(m) is None]
-        if missing:
-            wx.MessageBox(
-                "Missing python packages in KiCad's environment: %s\n\n"
-                "See the plugin README for install instructions."
-                % ", ".join(missing), "RFsim", wx.ICON_ERROR)
+        # The results window runs in KiCad's Python; the solver runs in its
+        # own interpreter (openEMS >= v0.37 has no cp311 wheel), so the two
+        # dependency sets are checked separately.
+        solver_py = solverenv.solver_python() or _kicad_python()
+        gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
+                       if importlib.util.find_spec(m) is None]
+        solver_missing = _solver_missing(solver_py)
+        if gui_missing or solver_missing:
+            msg = []
+            if gui_missing:
+                msg.append("Missing in KiCad's Python (results window): %s"
+                           % ", ".join(gui_missing))
+            if solver_missing:
+                msg.append("Missing in the solver Python\n%s\n%s"
+                           % (solver_py, ", ".join(solver_missing)))
+            wx.MessageBox("\n\n".join(msg)
+                          + "\n\nSee the plugin README for install "
+                            "instructions.", "RFsim", wx.ICON_ERROR)
             return
 
         board = pcbnew.GetBoard()
@@ -65,7 +98,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
-                                 preview.get("lumped_elements", []))
+                                 preview.get("lumped_elements", []),
+                                 preview=preview)
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
@@ -96,7 +130,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             json.dump(model, fh, indent=1)
 
         runner = os.path.join(os.path.dirname(__file__), "runner.py")
-        cmd = [_python_exe(), runner, model_path, outdir]
+        cmd = [solver_py, runner, model_path, outdir]
         run = gui.RunDialog(None, cmd)
         ok = run.ShowModal() == wx.ID_OK
         run.Destroy()

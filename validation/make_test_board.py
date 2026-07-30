@@ -1,7 +1,7 @@
 """Build the validation board: a 30 mm ~50-ohm microstrip on 2-layer FR4.
 
-Run with KiCad's python:
-    "C:\\Program Files\\KiCad\\8.0\\bin\\python.exe" make_test_board.py [out.kicad_pcb]
+Run with KiCad 10's python:
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" make_test_board.py [out.kicad_pcb]
 """
 import os
 import sys

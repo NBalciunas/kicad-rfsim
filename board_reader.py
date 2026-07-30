@@ -3,8 +3,9 @@
 This is the only module that touches pcbnew for geometry. Its output is
 JSON-serializable: floats in mm, right-handed coordinates (y is flipped
 relative to KiCad's y-down screen coordinates), z=0 at the board bottom.
-Swap this module out for the IPC API on KiCad 9+ without touching the
-simulation side.
+Targets KiCad 10's pcbnew SWIG bindings. Swapping it for the IPC API is
+not viable yet: IPC exposes no polygonizer for tracks, arcs or text (see
+README, "On the IPC API").
 """
 import math
 import os
@@ -12,7 +13,6 @@ import re
 
 import pcbnew
 
-PM_FAST = pcbnew.SHAPE_POLY_SET.PM_FAST
 # RF-sane defaults when the board has no explicit stackup: FR4.
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 
@@ -78,7 +78,7 @@ def selected_pads(board):
 def _stackup_from_file(path):
     """Parse the (stackup ...) block of a saved .kicad_pcb.
 
-    KiCad 8's SWIG bindings do not wrap BOARD_STACKUP, so the file is the
+    No KiCad SWIG version (8/9/10) wraps BOARD_STACKUP, so the file is the
     only scriptable source of dielectric properties. Returns a top-to-bottom
     list of {kind, name, thickness, epsilon, loss_tangent} or None.
     """
@@ -205,9 +205,11 @@ def _stackup(board, substrate=None):
     return copper, diel
 
 
-# KiCad 8 SWIG only exposes TransformShapeToPolygon usably for PAD (the
-# other overloads demand an unwrapped ERROR_LOC enum), so tracks/arcs/via
-# rings and graphic shapes are polygonized with plain math below.
+# Tracks/arcs/via rings and graphic shapes are polygonized with plain math
+# below. This dates from KiCad 8, where every TransformShapeToPolygon
+# overload except PAD's demanded the unwrapped ERROR_LOC enum. KiCad 10
+# exposes pcbnew.ERROR_INSIDE, so BOARD.ConvertBrdLayerToPolygonalContours
+# would replace all of it (and pick up text) — see README backlog.
 
 def _add_outline(ps, pts):
     ps.NewOutline()
@@ -248,7 +250,7 @@ def _add_track(ps, t):
         c = t.GetCenter()
         a0 = math.atan2(t.GetStart().y - c.y, t.GetStart().x - c.x)
         _add_arc(ps, c, t.GetRadius(), a0,
-                 math.radians(t.GetArcAngle().AsDegrees()), t.GetWidth())
+                 math.radians(t.GetAngle().AsDegrees()), t.GetWidth())
     else:
         a, b = t.GetStart(), t.GetEnd()
         _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, t.GetWidth()))
@@ -265,10 +267,10 @@ def _add_shape(ps, s):
     t = s.GetShape()
     if t == pcbnew.SHAPE_T_POLY:
         poly = s.GetPolyShape()
-        if s.IsFilled():
+        if s.IsSolidFill():
             # ponytail: ignores the outline stroke width around a filled
             # poly; add it back if a fab-matched simulation ever needs it
-            ps.BooleanAdd(poly, PM_FAST)
+            ps.BooleanAdd(poly)
         else:
             for i in range(poly.OutlineCount()):
                 ol = poly.Outline(i)
@@ -276,21 +278,21 @@ def _add_shape(ps, s):
                              for j in range(ol.PointCount())], s.GetWidth())
     elif t == pcbnew.SHAPE_T_RECT:
         pts = [(c.x, c.y) for c in s.GetRectCorners()]
-        if s.IsFilled():
+        if s.IsSolidFill():
             _add_outline(ps, pts)
         else:
             _stroke(ps, pts, s.GetWidth())
     elif t == pcbnew.SHAPE_T_CIRCLE:
         c, r, w = s.GetCenter(), s.GetRadius(), s.GetWidth()
-        if s.IsFilled():
+        if s.IsSolidFill():
             _add_outline(ps, _circle_pts(c.x, c.y, r + w / 2.0))
         else:  # ring
             ring = pcbnew.SHAPE_POLY_SET()
             _add_outline(ring, _circle_pts(c.x, c.y, r + w / 2.0))
             hole = pcbnew.SHAPE_POLY_SET()
             _add_outline(hole, _circle_pts(c.x, c.y, max(r - w / 2.0, 0)))
-            ring.BooleanSubtract(hole, PM_FAST)
-            ps.BooleanAdd(ring, PM_FAST)
+            ring.BooleanSubtract(hole)
+            ps.BooleanAdd(ring)
     elif t == pcbnew.SHAPE_T_SEGMENT:
         a, b = s.GetStart(), s.GetEnd()
         _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, s.GetWidth()))
@@ -302,11 +304,11 @@ def _add_shape(ps, s):
     elif t == pcbnew.SHAPE_T_BEZIER:
         s.RebuildBezierToSegmentsPointsList(5000)  # 5 um max error
         pts = [(p.x, p.y) for p in s.GetBezierPoints()]
-        if len(pts) >= 3 and s.IsFilled():
+        if len(pts) >= 3 and s.IsSolidFill():
             _add_outline(ps, pts)
         for (ax, ay), (bx, by) in zip(pts, pts[1:]):
             _add_outline(ps, _stadium_pts(ax, ay, bx, by, s.GetWidth()))
-    # text: no safe polygonization in KiCad 8 SWIG -> warned in extract()
+    # text: not polygonized here -> warned in extract()
 
 
 def _copper_polys(board, layer_id, region, max_err):
@@ -337,8 +339,12 @@ def _copper_polys(board, layer_id, region, max_err):
             except Exception:
                 flashed = True
             if flashed:
+                # KiCad 10 vias carry a per-layer padstack, so the annular
+                # ring must be asked for per layer (the layer-less
+                # PCB_VIA.GetWidth() also trips a debug assert).
                 pos = t.GetPosition()
-                _add_outline(ps, _circle_pts(pos.x, pos.y, t.GetWidth() / 2.0))
+                _add_outline(ps, _circle_pts(pos.x, pos.y,
+                                             t.GetWidth(int(layer_id)) / 2.0))
         else:
             _add_track(ps, t)
     for d in board.GetDrawings():
@@ -359,18 +365,18 @@ def _copper_polys(board, layer_id, region, max_err):
     for zn in board.Zones():
         if zn.GetIsRuleArea() or not zn.IsOnLayer(layer_id) or not zn.IsFilled():
             continue
-        ps.BooleanAdd(zn.GetFilledPolysList(layer_id), PM_FAST)
-    ps.Simplify(PM_FAST)
+        ps.BooleanAdd(zn.GetFilledPolysList(layer_id))
+    ps.Simplify()
 
     rect = pcbnew.SHAPE_POLY_SET()
     _add_outline(rect, ((region.GetLeft(), region.GetTop()),
                         (region.GetRight(), region.GetTop()),
                         (region.GetRight(), region.GetBottom()),
                         (region.GetLeft(), region.GetBottom())))
-    ps.BooleanIntersection(rect, PM_FAST)
+    ps.BooleanIntersection(rect)
     # ponytail: Fracture turns holes into zero-width slits; CSXCAD rasterizes
     # these fine. Switch to explicit hole subtraction if artifacts ever show.
-    ps.Fracture(PM_FAST)
+    ps.Fracture()
 
     polys = []
     for i in range(ps.OutlineCount()):
@@ -428,8 +434,26 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         kind = ref[:1].upper()
         if kind not in ("R", "L", "C") or ref in skip_refs:
             continue
-        pads = list(fp.Pads())
-        if len(pads) != 2 or not fp.GetBoundingBox().Intersects(region):
+        if not fp.GetBoundingBox().Intersects(region):
+            continue  # outside the simulated area: correctly ignored, quietly
+        # Terminals are the *numbered* pads. Real footprints often carry
+        # extra unnumbered copper (mechanical / paste-relief) pads, which
+        # can't hold a net and aren't terminals — but a plain len(Pads())==2
+        # test rejects the whole part. Seen live on a KiLib
+        # SMD_2terminal_chip_molded resistor: 4 pads, 2 of them unnumbered.
+        # The unnumbered copper is still simulated, just via _copper_polys.
+        pads = sorted((p for p in fp.Pads() if p.GetNumber()),
+                      key=lambda p: p.GetNumber())
+        if len(pads) != 2:
+            # Silent until now, which made "found nothing, said nothing" the
+            # hardest failure to diagnose. Only complain when the value also
+            # parses, so a default "REF**" or a connector called R... stays
+            # quiet while a real 50-ohm part with 3 terminals speaks up.
+            if _parse_value(fp.GetValue(), kind) is not None:
+                warnings.append(
+                    "%s (value \"%s\") has %d numbered pad(s), not 2 -> not "
+                    "modeled. A lumped element bridges exactly two terminals."
+                    % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
             warnings.append("%s: not an SMD part (THT barrel not modeled) "
@@ -554,9 +578,9 @@ def extract(board, pads, margin_mm, substrate=None):
         if n_clip:
             clipped[c["name"]] = n_clip
 
-    # Text on copper cannot be polygonized through KiCad 8's SWIG (every
-    # route needs the unwrapped ERROR_LOC enum or crashes) -> warn instead
-    # of silently dropping copper.
+    # Text on copper is not modeled by _copper_polys -> warn instead of
+    # silently dropping copper. Fixable on KiCad 10 (ERROR_INSIDE is
+    # exposed; ConvertBrdLayerToPolygonalContours handles text) — backlog.
     warnings = []
     if clipped:
         warnings.append(
@@ -573,7 +597,7 @@ def extract(board, pads, margin_mm, substrate=None):
                 and it.GetBoundingBox().Intersects(region)):
             warnings.append(
                 "text \"%s\" on %s is inside the simulated area but NOT "
-                "modeled (KiCad 8 API cannot convert text to copper)"
+                "modeled as copper"
                 % (it.GetShownText(True), _lname(it.GetLayer())))
 
     z_of = {c["name"]: c["z"] for c in copper_layers}

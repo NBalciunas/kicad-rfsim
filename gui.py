@@ -1,10 +1,13 @@
 """wxPython dialogs: simulation settings, solver log, results plots."""
 import glob
+import importlib
 import json
 import os
 import re
 import subprocess
+import sys
 import threading
+import types
 
 import wx
 
@@ -13,24 +16,147 @@ MESH_LEVELS = ["coarse", "medium", "fine"]
 SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
                      ("Custom", None, None)]
+# top view colours, shared by the settings preview and the results view
+CU_COLORS = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
+
+
+def _use_wxagg():
+    """Select matplotlib's wx backend, around KiCad's broken wxPython.
+
+    KiCad's bundled wxPython ships `wx/svg/` without the compiled
+    `_nanosvg` extension, and matplotlib's wx backend imports `wx.svg`
+    purely as a side effect and never uses it — so stub it out when the
+    real module is broken. Probe with `importlib.import_module`, never
+    `import wx.svg`: that statement would bind `wx` as a *local* here, and
+    every later `wx.*` would die with UnboundLocalError when it raises.
+    """
+    import matplotlib
+    matplotlib.use("WXAgg", force=False)
+    try:
+        importlib.import_module("wx.svg")
+    except ImportError:
+        sys.modules["wx.svg"] = types.ModuleType("wx.svg")
+
+
+def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
+    """Top view of the model: B.Cu blue, F.Cu red, ports green, R/L/C dark.
+
+    Shared by the settings dialog's preview and the results window's
+    "Board layout" view.
+
+    compact       thumbnail mode for the dialog: no axes, title or legend,
+                  so the board itself gets the whole canvas.
+    margin_mm     draw the domain from board_rect + 2*margin instead of
+                  model["region"] — the dialog previews the margin the user
+                  is about to choose, not the one the model was built with.
+    show_lumped   follow the dialog's checkbox before settings exist.
+    """
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    m = model
+    handles = []
+    for c in reversed(m["copper_layers"]):  # bottom first, F.Cu on top
+        name = c["name"]
+        col, alpha = CU_COLORS.get(name, ("0.5", 0.5))
+        polys = m["polygons"].get(name, [])
+        for poly in polys:
+            ax.fill([p[0] for p in poly], [p[1] for p in poly],
+                    color=col, alpha=alpha, linewidth=0)
+        if polys:
+            handles.append(Patch(color=col, alpha=alpha, label=name))
+    for v in m.get("vias", []):
+        ax.plot(v["x"], v["y"], "o", color="k", ms=3)
+
+    br = m["board_rect"]
+    if margin_mm is None:
+        rg = m["region"]
+    else:  # extract() inflates the board/pad bbox by 2*margin
+        d = 2.0 * float(margin_mm)
+        rg = {"x0": br["x0"] - d, "x1": br["x1"] + d,
+              "y0": br["y0"] - d, "y1": br["y1"] + d}
+    ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
+            [br["y0"], br["y0"], br["y1"], br["y1"], br["y0"]],
+            color="0.25", lw=1.2)
+    ax.plot([rg["x0"], rg["x1"], rg["x1"], rg["x0"], rg["x0"]],
+            [rg["y0"], rg["y0"], rg["y1"], rg["y1"], rg["y0"]],
+            "--", color="0.6", lw=0.8)
+
+    fs = 7 if compact else 9
+    for p in m["ports"]:
+        hw, hl = p["width"] / 2.0, p["length"] / 2.0
+        ax.fill([p["x"] - hl, p["x"] + hl, p["x"] + hl, p["x"] - hl],
+                [p["y"] - hw, p["y"] - hw, p["y"] + hw, p["y"] + hw],
+                color="lime", zorder=4)
+        ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
+                    ha="center", va="bottom", xytext=(0, 4),
+                    textcoords="offset points", fontsize=fs,
+                    fontweight="bold", color="darkgreen", zorder=6)
+    handles.append(Patch(color="lime", label="ports"))
+
+    les = (m.get("lumped_elements", []) if show_lumped
+           and m.get("settings", {}).get("lumped", True) else [])
+    for e in les:
+        (x0, y0), (x1, y1) = e["start"][:2], e["stop"][:2]
+        ax.fill([x0, x1, x1, x0], [y0, y0, y1, y1], color="green", zorder=5)
+        # pad-to-pad line: the gap box alone is sub-mm, invisible at board
+        # zoom — the line shows what the element actually connects
+        (px0, py0), (px1, py1) = e.get("pads", (e["start"][:2], e["stop"][:2]))
+        ax.plot([px0, px1], [py0, py1], "-o", color="green", lw=2, ms=4,
+                zorder=5)
+        ax.annotate(e["ref"], (0.5 * (px0 + px1), 0.5 * (py0 + py1)),
+                    ha="center", va="bottom", xytext=(0, 5),
+                    textcoords="offset points", fontsize=fs,
+                    fontweight="bold", color="darkgreen", zorder=6)
+    if les:
+        handles.append(Line2D([], [], color="green", lw=2, marker="o", ms=4,
+                              label="R/L/C"))
+    handles.append(Line2D([], [], color="0.25", lw=1.2, label="Board edge"))
+    handles.append(Line2D([], [], ls="--", color="0.6", label="Domain"))
+
+    ax.set_aspect("equal")
+    if compact:
+        # no legend: the colours are self-evident next to the labelled
+        # ports, and it was taking a third of the width off the board.
+        # Frame on the domain explicitly rather than leaving it to
+        # autoscale + margins, so the thumbnail is framed the same way
+        # whatever stray annotation happens to stick out furthest.
+        pad = 0.03 * max(rg["x1"] - rg["x0"], rg["y1"] - rg["y0"])
+        ax.set_xlim(rg["x0"] - pad, rg["x1"] + pad)
+        ax.set_ylim(rg["y0"] - pad, rg["y1"] + pad)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+    else:
+        ax.legend(handles=handles, loc="upper right", fontsize=8)
+        ax.set_xlabel("x (mm)")
+        ax.set_ylabel("y (mm)")
+        ax.set_title("Board layout")
 
 
 class SettingsDialog(wx.Dialog):
-    def __init__(self, parent, ports, default_outdir, lumped=()):
+    def __init__(self, parent, ports, default_outdir, lumped=(), preview=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
-        self._build(ports, default_outdir, lumped)
+        self._build(ports, default_outdir, lumped, preview)
 
-    def _build(self, ports, default_outdir, lumped):
+    def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
         title = wx.StaticText(self, label="RFsim v1.0")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
-        icon = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
-        if os.path.isfile(icon):
-            top.Add(wx.StaticBitmap(self, bitmap=wx.Bitmap(icon)),
-                    0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 4)
+        # A thumbnail of what is about to be simulated beats a logo: which
+        # pads became ports, which R/L/C parts were found, and how far the
+        # domain reaches. Drawn at the end of _build (needs self.margin) and
+        # falls back to the icon if matplotlib misbehaves.
+        self._preview_model = preview
+        self._prev_fig = None
+        if not self._add_preview(top):
+            icon = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
+            if os.path.isfile(icon):
+                top.Add(wx.StaticBitmap(self, bitmap=wx.Bitmap(icon)),
+                        0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 4)
 
         def section(label):
             box = wx.StaticBoxSizer(wx.VERTICAL, self, label)
@@ -151,6 +277,57 @@ class SettingsDialog(wx.Dialog):
         self.SetMinSize((520, -1))
         self.Fit()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        # the preview needs self.margin / self.lumped, so draw it last and
+        # keep it in step with the two controls it depends on
+        if self._prev_fig is not None:
+            for evt in (wx.EVT_SPINCTRLDOUBLE, wx.EVT_TEXT):
+                self.margin.Bind(evt, self._on_preview_change)
+            if self.lumped is not None:
+                self.lumped.Bind(wx.EVT_CHECKBOX, self._on_preview_change)
+            self._redraw_preview()
+
+    def _add_preview(self, top):
+        """Board-layout thumbnail. False if it can't be built (use the icon)."""
+        m = self._preview_model
+        if not m or not m.get("polygons"):
+            return False
+        try:
+            _use_wxagg()
+            from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
+            from matplotlib.figure import Figure
+            # no constrained layout: _redraw_preview places the axes over the
+            # whole figure by hand, since there are no labels to leave room for
+            self._prev_fig = Figure(figsize=(4.9, 2.9))
+            self._prev_canvas = FigureCanvasWxAgg(self, -1, self._prev_fig)
+            # FigureCanvasWxAgg reports the figure's native pixel size as its
+            # wx minimum, which would clip it — see the wx traps in the README
+            self._prev_canvas.SetMinSize((480, 285))
+        except Exception:
+            self._prev_fig = None
+            return False
+        top.Add(self._prev_canvas, 0, wx.ALIGN_CENTER_HORIZONTAL
+                | wx.TOP | wx.LEFT | wx.RIGHT, 4)
+        return True
+
+    def _on_preview_change(self, evt):
+        self._redraw_preview()
+        evt.Skip()
+
+    def _redraw_preview(self):
+        if self._prev_fig is None:
+            return
+        self._prev_fig.clear()
+        ax = self._prev_fig.add_axes((0.01, 0.01, 0.98, 0.98))
+        try:
+            _draw_board(ax, self._preview_model, compact=True,
+                        margin_mm=self.margin.GetValue(),
+                        show_lumped=(self.lumped is None
+                                     or self.lumped.GetValue()))
+        except Exception as e:  # a preview must never block the dialog
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "preview unavailable\n%s" % e, ha="center",
+                    va="center", fontsize=7, transform=ax.transAxes)
+        self._prev_canvas.draw_idle()
 
     def _on_preset(self, evt):
         _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
@@ -279,7 +456,13 @@ def _load_field(h5_path):
         x, y = np.asarray(mesh["x"]), np.asarray(mesh["y"])
         fd = f["FieldData"]["FD"]
         f_hz = float(fd.attrs["frequency"][0])
-        F = np.asarray(fd["f0_real"]) + 1j * np.asarray(fd["f0_imag"])
+        # openEMS >= v0.37 writes one native-complex dataset (with an
+        # explicit d_order attr, 'NXYZ'); <= v0.0.36 wrote a float32
+        # real/imag pair. The axis handling below covers both orders.
+        if "f0" in fd:
+            F = np.asarray(fd["f0"])
+        else:
+            F = np.asarray(fd["f0_real"]) + 1j * np.asarray(fd["f0_imag"])
     if float(x.max() - x.min()) < 1.0:  # meters -> mm (domains are > 1 mm)
         x, y = x * 1e3, y * 1e3
     F = np.squeeze(F)                   # drop the length-1 z-plane axis
@@ -328,18 +511,7 @@ class ResultsFrame(wx.Frame):
     """Plot viewer for the produced Touchstone file (needs skrf+matplotlib)."""
 
     def __init__(self, parent, touchstone_path):
-        import matplotlib
-        matplotlib.use("WXAgg", force=False)
-        # KiCad's bundled wxPython lacks the compiled wx.svg._nanosvg
-        # extension; matplotlib's wx backend imports wx.svg but never uses
-        # it, so stub it out when the real module is broken.
-        try:
-            import importlib
-            importlib.import_module("wx.svg")
-        except ImportError:
-            import sys
-            import types
-            sys.modules["wx.svg"] = types.ModuleType("wx.svg")
+        _use_wxagg()
         from matplotlib.backends.backend_wxagg import (
             FigureCanvasWxAgg, NavigationToolbar2WxAgg)
         from matplotlib.figure import Figure
@@ -505,68 +677,8 @@ class ResultsFrame(wx.Frame):
         self.canvas.draw()
 
     def _plot_board(self, ax):
-        """Top view of the simulated model: B.Cu blue, F.Cu red, ports green."""
-        from matplotlib.patches import Patch
-        m = self.model
-        colors = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
-        handles = []
-        for c in reversed(m["copper_layers"]):  # bottom first, F.Cu on top
-            name = c["name"]
-            col, alpha = colors.get(name, ("0.5", 0.5))
-            polys = m["polygons"].get(name, [])
-            for poly in polys:
-                ax.fill([p[0] for p in poly], [p[1] for p in poly],
-                        color=col, alpha=alpha, linewidth=0)
-            if polys:
-                handles.append(Patch(color=col, alpha=alpha, label=name))
-        for v in m["vias"]:
-            ax.plot(v["x"], v["y"], "o", color="k", ms=3)
-        br, rg = m["board_rect"], m["region"]
-        ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
-                [br["y0"], br["y0"], br["y1"], br["y1"], br["y0"]],
-                color="0.25", lw=1.2)
-        ax.plot([rg["x0"], rg["x1"], rg["x1"], rg["x0"], rg["x0"]],
-                [rg["y0"], rg["y0"], rg["y1"], rg["y1"], rg["y0"]],
-                "--", color="0.6", lw=0.8)
-        for p in m["ports"]:
-            hw, hl = p["width"] / 2.0, p["length"] / 2.0
-            ax.fill([p["x"] - hl, p["x"] + hl, p["x"] + hl, p["x"] - hl],
-                    [p["y"] - hw, p["y"] - hw, p["y"] + hw, p["y"] + hw],
-                    color="lime")
-            ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
-                        ha="center", va="bottom", xytext=(0, 5),
-                        textcoords="offset points", fontsize=9,
-                        fontweight="bold", color="darkgreen")
-        handles.append(Patch(color="lime", label="ports"))
-        les = (m.get("lumped_elements", [])
-               if m["settings"].get("lumped", True) else [])
-        for e in les:
-            (x0, y0), (x1, y1) = e["start"][:2], e["stop"][:2]
-            ax.fill([x0, x1, x1, x0], [y0, y0, y1, y1], color="green",
-                    zorder=5)
-            # pad-to-pad line: the gap box alone is sub-mm, invisible at
-            # board zoom — the line shows what the element connects
-            (px0, py0), (px1, py1) = e.get(
-                "pads", (e["start"][:2], e["stop"][:2]))
-            ax.plot([px0, px1], [py0, py1], "-o", color="green", lw=2,
-                    ms=5, zorder=5)
-            ax.annotate(e["ref"], (0.5 * (px0 + px1), 0.5 * (py0 + py1)),
-                        ha="center", va="bottom", xytext=(0, 6),
-                        textcoords="offset points", fontsize=9,
-                        fontweight="bold", color="darkgreen", zorder=6)
-        if les:
-            from matplotlib.lines import Line2D
-            handles.append(Line2D([], [], color="green", lw=2, marker="o",
-                                  ms=5, label="R/L/C"))
-        from matplotlib.lines import Line2D
-        handles.append(Line2D([], [], color="0.25", lw=1.2,
-                              label="Board edge"))
-        handles.append(Line2D([], [], ls="--", color="0.6", label="Domain"))
-        ax.legend(handles=handles, loc="upper right", fontsize=8)
-        ax.set_xlabel("x (mm)")
-        ax.set_ylabel("y (mm)")
-        ax.set_title("Board layout")
-        ax.set_aspect("equal")
+        """Top view of the model (shared with the settings preview)."""
+        _draw_board(ax, self.model)
 
     def _plot_field(self, ax, kind, port=None):
         """Traveling-wave animation on the substrate mid-plane.

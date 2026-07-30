@@ -13,15 +13,14 @@ import os
 import shutil
 import sys
 
+import solverenv  # this file's own dir is sys.path[0] when run as a script
+
 # The openEMS/CSXCAD python extensions need the openEMS binary DLLs on
-# Windows. Look next to KiCad's 3rdparty dir (../../openEMS relative to this
-# plugin), then OPENEMS_PATH, then C:\openEMS.
+# Windows. (openEMS >= v0.37 also documents a CSXCAD_INSTALL_PATH env var,
+# but add_dll_directory alone is sufficient — verified on v0.37.0-rc1.)
 if os.name == "nt":
-    _here = os.path.dirname(os.path.abspath(__file__))
-    for _d in (os.environ.get("OPENEMS_PATH"),
-               os.path.abspath(os.path.join(_here, "..", "..", "openEMS")),
-               r"C:\openEMS"):
-        if _d and os.path.isdir(_d):
+    for _d in solverenv.openems_dirs():
+        if os.path.isdir(_d):
             os.add_dll_directory(_d)
 
 import numpy as np
@@ -29,6 +28,57 @@ import numpy as np
 C0 = 299792458.0
 EPS0 = 8.8541878128e-12
 RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
+
+
+def _has_lumped_rlc():
+    """True if this CSXCAD can do lumped inductors / series RLC.
+
+    LEtype arrived with the lumped-RLC work (openEMS PR #121, in v0.37 and
+    the later v0.0.36-N nightlies). Older CSXCAD has no LEtype at all and
+    rejects the keyword, so this gates both the inductor guard and the
+    kwargs passed to AddLumpedElement.
+    """
+    from CSXCAD import CSProperties
+    return hasattr(CSProperties.CSPropLumpedElement, "SetLEtype")
+
+
+def _time_step_factor(model):
+    """Sub-Courant timestep factor needed for stability, or None for default.
+
+    A lumped inductor destabilises the FDTD unless the timestep is reduced:
+    on validation/run_rlc.py's geometry, 1 nH is fine at the full Courant
+    step while 10/100/300 nH diverge into NaN. The largest stable factor was
+    measured to track ~1.8/sqrt(L[nH]), so 1/sqrt(L[nH]) leaves ~1.8x margin.
+
+    This is a heuristic fitted on one geometry — the real criterion also
+    involves cell size and the element box — so a run can still diverge.
+    The runner detects that and tells the user to set
+    settings["time_step_factor"] explicitly, which overrides this.
+    """
+    s = model["settings"]
+    if s.get("time_step_factor"):
+        return float(s["time_step_factor"])
+    if not s.get("lumped", True):
+        return None
+    ind = [e["value"] for e in model.get("lumped_elements", [])
+           if e["type"] == "L" and e["value"] > 0]
+    if not ind:
+        return None
+    return min(1.0, 1.0 / (max(ind) * 1e9) ** 0.5)
+
+
+def _diverged(sim_path):
+    """Name of a port file containing NaN, i.e. the FDTD blew up.
+
+    Worth checking explicitly: openEMS writes '-nan(ind)' into the port
+    time-domain data and CalcPort then dies with an opaque
+    "could not convert string to float" ValueError.
+    """
+    for fn in sorted(glob.glob(os.path.join(sim_path, "port_ut_*"))):
+        with open(fn) as fh:
+            if "nan" in fh.read().lower():
+                return os.path.basename(fn)
+    return None
 
 
 def _merge_close(vals, tol):
@@ -138,7 +188,17 @@ def build(model, excite_idx, res, want_ff=False):
     s = model["settings"]
     f0 = 0.5 * (s["f_start"] + s["f_stop"])
     fc = 0.5 * (s["f_stop"] - s["f_start"])
-    fdtd = openEMS(NrTS=s["max_timesteps"], EndCriteria=s["end_criteria"])
+    # A reduced timestep needs proportionally more steps to cover the same
+    # simulated time, so the step budget is scaled with it.
+    tsf = _time_step_factor(model)
+    nrts = s["max_timesteps"]
+    if tsf and tsf < 1.0:
+        nrts = int(nrts / tsf)
+    fdtd = openEMS(NrTS=nrts, EndCriteria=s["end_criteria"])
+    if tsf and tsf < 1.0:
+        fdtd.SetTimeStepFactor(tsf)
+        print("[rfsim] timestep factor %.3g (lumped inductor stability), "
+              "max steps %d" % (tsf, nrts), flush=True)
     fdtd.SetGaussExcite(f0, fc)
     # MUR showed slow late-time energy growth on this setup; PML_8 with an
     # explicitly meshed 8-cell absorber band is stable.
@@ -179,14 +239,22 @@ def build(model, excite_idx, res, want_ff=False):
                                   v["r"], priority=10)
 
     if s.get("lumped", True):
+        le_kw = {"LEtype": 1} if _has_lumped_rlc() else {}
         for e in model.get("lumped_elements", []):
             if e["type"] == "R" and e["value"] == 0:  # 0-ohm jumper = short
                 csx.AddMetal("short_" + e["ref"]).AddBox(
                     e["start"], e["stop"], priority=15)
                 unit = "ohm (short)"
             else:
+                # LEtype=1 (series) is the topology of a 2-terminal part
+                # bridging a gap in a trace, and openEMS requires it for a
+                # lumped inductor. Unspecified components are NaN (not 0),
+                # so a single-component element is identical under either
+                # topology — checked against theory in validation/run_rlc.py.
+                # Needed once package parasitics land (R+L+C in one element).
                 csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
-                                     **{e["type"]: e["value"]}).AddBox(
+                                     **dict(le_kw,
+                                            **{e["type"]: e["value"]})).AddBox(
                     e["start"], e["stop"], priority=15)
                 unit = {"R": "ohm", "L": "H", "C": "F"}[e["type"]]
             print("[rfsim] lumped %s: %s=%g %s (%s-axis) at z=%.3f"
@@ -331,18 +399,20 @@ def main(model_path, outdir):
     if n < 1:
         raise SystemExit("expected at least 1 port, got %d" % n)
 
-    # ponytail: hard stop until openEMS >= v0.37 is wired in; then send
-    # inductors as AddLumpedElement(..., L=..., LEtype=1) instead.
+    # Lumped inductors need openEMS >= v0.37 (lumped RLC). Older engines
+    # log "Lumped Element R or C not specified! skipping" and silently model
+    # an open circuit, so refuse rather than return wrong numbers.
     if s.get("lumped", True):
         bad = [e["ref"] for e in model.get("lumped_elements", [])
                if e["type"] == "L"]
-        if bad:
+        if bad and not _has_lumped_rlc():
             raise SystemExit(
-                "[rfsim] ERROR: %s: this openEMS (<= v0.0.36) cannot "
-                "simulate lumped inductors — it silently drops them, so "
-                "results would be wrong (open circuit at the part). Set "
-                "the value to DNP or remove the part, or upgrade openEMS "
-                "to >= v0.37 (lumped RLC support)." % ", ".join(bad))
+                "[rfsim] ERROR: %s: this openEMS build cannot simulate "
+                "lumped inductors — it silently drops them, so results "
+                "would be wrong (open circuit at the part). Set the value "
+                "to DNP, or run the solver under a Python 3.13/3.14 "
+                "interpreter with openEMS >= v0.37 (see README, \"Solver "
+                "interpreter\")." % ", ".join(bad))
 
     # drop leftovers from a previous run into this outdir: an excN folder or
     # farfield.json not rewritten below (different excite set / failed far
@@ -373,6 +443,15 @@ def main(model_path, outdir):
               % (step + 1, len(exc), k + 1), flush=True)
         fdtd, ports, ff = build(model, k, res, want_ff=True)
         fdtd.Run(sim_path, cleanup=True)
+        bad = _diverged(sim_path)
+        if bad:
+            tsf = _time_step_factor(model) or 1.0
+            raise SystemExit(
+                "[rfsim] ERROR: the FDTD run diverged — NaN in %s.\n"
+                "A lumped inductor is the usual cause: it needs a "
+                "sub-Courant timestep. This run used time_step_factor "
+                "%.3g; set a smaller \"time_step_factor\" in the model's "
+                "settings (e.g. %.3g) and re-run." % (bad, tsf, tsf / 2.0))
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
         for j in range(n):
