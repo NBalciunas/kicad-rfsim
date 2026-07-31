@@ -1,6 +1,6 @@
-"""Build the validation board: a 30 mm ~50-ohm microstrip on 2-layer FR4.
+"""Make the validation board: a microstrip of 30 mm and about 50 ohm.
 
-Run with KiCad 10's python:
+The board has 2 layers of FR4. Run this file with the python of KiCad 10:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" make_test_board.py [out.kicad_pcb]
 """
 import os
@@ -9,7 +9,7 @@ import sys
 import pcbnew
 from pcbnew import FromMM, VECTOR2I
 
-TRACE_W = 2.9   # ~50 ohm on 1.6 mm FR4 (er 4.5)
+TRACE_W = 2.9   # about 50 ohm on FR4 of 1.6 mm (er 4.5)
 TRACE_Y = 10.0
 X0, X1 = 5.0, 35.0
 BOARD = (0.0, 0.0, 40.0, 20.0)

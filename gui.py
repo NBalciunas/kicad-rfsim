@@ -1,4 +1,5 @@
-"""wxPython dialogs: simulation settings, solver log, results plots."""
+"""The wxPython dialogs: the settings of the simulation, the log of the
+solver, and the plots of the results."""
 import glob
 import importlib
 import json
@@ -16,19 +17,21 @@ MESH_LEVELS = ["coarse", "medium", "fine"]
 SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
                      ("Custom", None, None)]
-# top view colours, shared by the settings preview and the results view
+# The colours of the top view. The preview in the settings dialog and the
+# view in the results window both use them.
 CU_COLORS = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
 
 
 def _use_wxagg():
-    """Select matplotlib's wx backend, around KiCad's broken wxPython.
+    """Select the wx backend of matplotlib, around a defect in wxPython.
 
-    KiCad's bundled wxPython ships `wx/svg/` without the compiled
-    `_nanosvg` extension, and matplotlib's wx backend imports `wx.svg`
-    purely as a side effect and never uses it — so stub it out when the
-    real module is broken. Probe with `importlib.import_module`, never
-    `import wx.svg`: that statement would bind `wx` as a *local* here, and
-    every later `wx.*` would die with UnboundLocalError when it raises.
+    The wxPython of KiCad contains `wx/svg/`, but not the compiled
+    `_nanosvg` extension. The wx backend of matplotlib imports `wx.svg`
+    for a side effect only and never uses it. Thus this function replaces
+    the module when the real module is defective. Use
+    `importlib.import_module` for the test, never `import wx.svg`. That
+    statement makes `wx` a *local* name here. Then, if the import fails,
+    all the `wx.*` names after it stop with UnboundLocalError.
     """
     import matplotlib
     matplotlib.use("WXAgg", force=False)
@@ -39,23 +42,26 @@ def _use_wxagg():
 
 
 def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
-    """Top view of the model: B.Cu blue, F.Cu red, ports green, R/L/C dark.
+    """Draw the top view of the model.
 
-    Shared by the settings dialog's preview and the results window's
-    "Board layout" view.
+    B.Cu is blue, F.Cu is red, the ports are green and the R/L/C parts
+    are dark green. The preview of the settings dialog and the "Board
+    layout" view of the results window both use this function.
 
-    compact       thumbnail mode for the dialog: no axes, title or legend,
-                  so the board itself gets the whole canvas.
-    margin_mm     draw the domain from board_rect + 2*margin instead of
-                  model["region"] — the dialog previews the margin the user
-                  is about to choose, not the one the model was built with.
-    show_lumped   follow the dialog's checkbox before settings exist.
+    compact       Make a thumbnail for the dialog: no axes, no title and
+                  no legend. Thus the board fills the full canvas.
+    margin_mm     Draw the domain from board_rect plus 2 times the
+                  margin, and not from model["region"]. The dialog shows
+                  the margin that the user selects now, not the margin of
+                  the model.
+    show_lumped   Obey the checkbox of the dialog before the settings
+                  exist.
     """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     m = model
     handles = []
-    for c in reversed(m["copper_layers"]):  # bottom first, F.Cu on top
+    for c in reversed(m["copper_layers"]):  # the bottom first, F.Cu on top
         name = c["name"]
         col, alpha = CU_COLORS.get(name, ("0.5", 0.5))
         polys = m["polygons"].get(name, [])
@@ -70,7 +76,7 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
     br = m["board_rect"]
     if margin_mm is None:
         rg = m["region"]
-    else:  # extract() inflates the board/pad bbox by 2*margin
+    else:  # extract() increases the board bbox by 2 times the margin
         d = 2.0 * float(margin_mm)
         rg = {"x0": br["x0"] - d, "x1": br["x1"] + d,
               "y0": br["y0"] - d, "y1": br["y1"] + d}
@@ -98,8 +104,9 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
     for e in les:
         (x0, y0), (x1, y1) = e["start"][:2], e["stop"][:2]
         ax.fill([x0, x1, x1, x0], [y0, y0, y1, y1], color="green", zorder=5)
-        # pad-to-pad line: the gap box alone is sub-mm, invisible at board
-        # zoom — the line shows what the element actually connects
+        # The line from pad to pad: the box in the gap is less than 1 mm
+        # long, and you cannot see it at the zoom of the board. The line
+        # shows what the element connects.
         (px0, py0), (px1, py1) = e.get("pads", (e["start"][:2], e["stop"][:2]))
         ax.plot([px0, px1], [py0, py1], "-o", color="green", lw=2, ms=4,
                 zorder=5)
@@ -115,11 +122,11 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
     ax.set_aspect("equal")
     if compact:
-        # no legend: the colours are self-evident next to the labelled
-        # ports, and it was taking a third of the width off the board.
-        # Frame on the domain explicitly rather than leaving it to
-        # autoscale + margins, so the thumbnail is framed the same way
-        # whatever stray annotation happens to stick out furthest.
+        # No legend: the colours are clear near the ports, which have
+        # labels, and the legend used one third of the width of the
+        # board. Put the frame on the domain, and do not let matplotlib
+        # scale it. Then the thumbnail always has the same frame,
+        # whatever annotation goes out the furthest.
         pad = 0.03 * max(rg["x1"] - rg["x0"], rg["y1"] - rg["y0"])
         ax.set_xlim(rg["x0"] - pad, rg["x1"] + pad)
         ax.set_ylim(rg["y0"] - pad, rg["y1"] + pad)
@@ -146,10 +153,11 @@ class SettingsDialog(wx.Dialog):
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
-        # A thumbnail of what is about to be simulated beats a logo: which
-        # pads became ports, which R/L/C parts were found, and how far the
-        # domain reaches. Drawn at the end of _build (needs self.margin) and
-        # falls back to the icon if matplotlib misbehaves.
+        # A thumbnail of the simulation is better than a logo. It shows
+        # which pads became ports, which R/L/C parts the plugin found,
+        # and how far the domain goes. The code draws it at the end of
+        # _build, because it needs self.margin. If matplotlib fails, the
+        # icon replaces the thumbnail.
         self._preview_model = preview
         self._prev_fig = None
         if not self._add_preview(top):
@@ -196,7 +204,8 @@ class SettingsDialog(wx.Dialog):
                wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
         fbox.Add(fs, 0, wx.ALL | wx.EXPAND, 6)
         fg = grid_in(fbox)
-        # field dumps (E/H animation) + far-field are computed at this freq
+        # The solver calculates the field dumps, which give the E/H
+        # animation, and the far field at this frequency.
         self.f_field = row(fg, "Define at:",
                            wx.TextCtrl(self, value="2.4"), "GHz")
 
@@ -250,7 +259,7 @@ class SettingsDialog(wx.Dialog):
         self.preset = row(sg, "Presets:", wx.Choice(
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
         self.preset.SetSelection(0)
-        # defaults: 1.6 mm FR4, 35 um (1 oz) copper
+        # the default values: FR4 of 1.6 mm, copper of 35 um (1 oz)
         self.er = row(sg, "er:", wx.TextCtrl(self, value="4.2"))
         self.tand = row(sg, "Loss tangent:", wx.TextCtrl(self, value="0.02"))
         self.h = row(sg, "Substrate thickness:",
@@ -277,8 +286,8 @@ class SettingsDialog(wx.Dialog):
         self.SetMinSize((520, -1))
         self.Fit()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
-        # the preview needs self.margin / self.lumped, so draw it last and
-        # keep it in step with the two controls it depends on
+        # The preview needs self.margin and self.lumped. Thus draw it
+        # last, and keep it in agreement with the two controls.
         if self._prev_fig is not None:
             for evt in (wx.EVT_SPINCTRLDOUBLE, wx.EVT_TEXT):
                 self.margin.Bind(evt, self._on_preview_change)
@@ -287,7 +296,11 @@ class SettingsDialog(wx.Dialog):
             self._redraw_preview()
 
     def _add_preview(self, top):
-        """Board-layout thumbnail. False if it can't be built (use the icon)."""
+        """Make the thumbnail of the board layout.
+
+        The function gives False if it cannot make the thumbnail. Then
+        the caller shows the icon.
+        """
         m = self._preview_model
         if not m or not m.get("polygons"):
             return False
@@ -295,12 +308,13 @@ class SettingsDialog(wx.Dialog):
             _use_wxagg()
             from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
             from matplotlib.figure import Figure
-            # no constrained layout: _redraw_preview places the axes over the
-            # whole figure by hand, since there are no labels to leave room for
+            # No constrained layout: _redraw_preview puts the axes on the
+            # full figure, because there are no labels that need space.
             self._prev_fig = Figure(figsize=(4.9, 2.9))
             self._prev_canvas = FigureCanvasWxAgg(self, -1, self._prev_fig)
-            # FigureCanvasWxAgg reports the figure's native pixel size as its
-            # wx minimum, which would clip it — see the wx traps in the README
+            # FigureCanvasWxAgg gives the native pixel size of the figure
+            # as its minimum size for wx, and this clips the figure. Refer
+            # to the wx problems in NOTES.md.
             self._prev_canvas.SetMinSize((480, 285))
         except Exception:
             self._prev_fig = None
@@ -323,7 +337,7 @@ class SettingsDialog(wx.Dialog):
                         margin_mm=self.margin.GetValue(),
                         show_lumped=(self.lumped is None
                                      or self.lumped.GetValue()))
-        except Exception as e:  # a preview must never block the dialog
+        except Exception as e:  # the preview must never stop the dialog
             ax.set_axis_off()
             ax.text(0.5, 0.5, "preview unavailable\n%s" % e, ha="center",
                     va="center", fontsize=7, transform=ax.transAxes)
@@ -331,7 +345,7 @@ class SettingsDialog(wx.Dialog):
 
     def _on_preset(self, evt):
         _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
-        if er is not None:  # ChangeValue: no EVT_TEXT, stays on the preset
+        if er is not None:  # ChangeValue sends no EVT_TEXT: the preset stays
             self.er.ChangeValue(str(er))
             self.tand.ChangeValue(str(tand))
 
@@ -381,8 +395,8 @@ class SettingsDialog(wx.Dialog):
             "port_types": [PORT_TYPES[c.GetSelection()][1]
                            for c in self.port_choices],
             "order": [c.GetSelection() + 1 for c in self.port_order],
-            # excite carries FINAL port numbers (after renumbering), which is
-            # what the runner matches against
+            # "excite" holds the FINAL port numbers, after the change of
+            # the numbers. The runner compares against these numbers.
             "excite": sorted(num.GetSelection() + 1
                              for num, cb in zip(self.port_order,
                                                 self.port_excite)
@@ -390,13 +404,16 @@ class SettingsDialog(wx.Dialog):
             "lumped": bool(self.lumped and self.lumped.GetValue()),
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
-            "max_timesteps": 300000,  # ponytail: fixed cap; expose if high-Q
-            "end_criteria": 1e-4,     # structures need longer ringdown
+            # ponytail: these two limits are constant. Put them in the
+            # dialog if high-Q structures, which need a longer ringdown,
+            # become usual.
+            "max_timesteps": 300000,
+            "end_criteria": 1e-4,
         }
 
 
 class RunDialog(wx.Dialog):
-    """Runs the solver subprocess, streaming its output into a log window."""
+    """Run the solver subprocess and show its output in a log window."""
 
     def __init__(self, parent, cmd):
         wx.Dialog.__init__(self, parent, title="RFsim",
@@ -448,7 +465,11 @@ class RunDialog(wx.Dialog):
 
 
 def _load_field(h5_path):
-    """openEMS FD dump -> (x_mm, y_mm, complex F[y, x, 3], f_hz). No wx needed."""
+    """Read an FD dump of openEMS.
+
+    The result is (x_mm, y_mm, complex F[y, x, 3], f_hz). This function
+    does not need wx.
+    """
     import h5py
     import numpy as np
     with h5py.File(h5_path, "r") as f:
@@ -456,17 +477,19 @@ def _load_field(h5_path):
         x, y = np.asarray(mesh["x"]), np.asarray(mesh["y"])
         fd = f["FieldData"]["FD"]
         f_hz = float(fd.attrs["frequency"][0])
-        # openEMS >= v0.37 writes one native-complex dataset (with an
-        # explicit d_order attr, 'NXYZ'); <= v0.0.36 wrote a float32
-        # real/imag pair. The axis handling below covers both orders.
+        # openEMS v0.37 and later write one dataset of native complex
+        # values, with a d_order attribute of 'NXYZ'. openEMS v0.0.36 and
+        # earlier wrote a pair of float32 datasets, one for the real part
+        # and one for the imaginary part. The code below reads the two
+        # sequences of the axes.
         if "f0" in fd:
             F = np.asarray(fd["f0"])
         else:
             F = np.asarray(fd["f0_real"]) + 1j * np.asarray(fd["f0_imag"])
-    if float(x.max() - x.min()) < 1.0:  # meters -> mm (domains are > 1 mm)
+    if float(x.max() - x.min()) < 1.0:  # meters -> mm (a domain is > 1 mm)
         x, y = x * 1e3, y * 1e3
-    F = np.squeeze(F)                   # drop the length-1 z-plane axis
-    if F.shape[0] == 3:                 # component axis first -> last
+    F = np.squeeze(F)                   # remove the z axis: its length is 1
+    if F.shape[0] == 3:                 # move the component axis to the end
         F = np.moveaxis(F, 0, -1)
     if F.shape[:2] == (len(x), len(y)):
         F = np.swapaxes(F, 0, 1)
@@ -474,11 +497,12 @@ def _load_field(h5_path):
 
 
 def _lobe_stats(ang_deg, D):
-    """Main-lobe direction, 3 dB width and side-lobe level of a closed cut."""
+    """Give the direction of the main lobe, the width at 3 dB and the side
+    lobe level of a closed cut."""
     import numpy as np
     ang = np.asarray(ang_deg, float)
     d = np.asarray(D, float)
-    if abs((ang[-1] - ang[0]) - 360.0) < 1e-6:  # closed cut: drop dup endpoint
+    if abs((ang[-1] - ang[0]) - 360.0) < 1e-6:  # closed cut: remove the copy
         ang, d = ang[:-1], d[:-1]
     n = len(d)
     step = abs(ang[1] - ang[0])
@@ -491,8 +515,8 @@ def _lobe_stats(ang_deg, D):
     while ri < n - 1 and d[(i0 + ri + 1) % n] >= peak - 3.0:
         ri += 1
     width = min((li + ri) * step, 360.0)
-    # main lobe = walk to the first local minimum on each side; the rest of
-    # the pattern holds the side lobes
+    # The main lobe goes to the first local minimum on each side. The side
+    # lobes are in the remaining part of the pattern.
     lm = 0
     while lm < n - 1 and d[(i0 - lm - 1) % n] <= d[(i0 - lm) % n]:
         lm += 1
@@ -508,7 +532,7 @@ def _lobe_stats(ang_deg, D):
 
 
 class ResultsFrame(wx.Frame):
-    """Plot viewer for the produced Touchstone file (needs skrf+matplotlib)."""
+    """Show the plots of the Touchstone file. It needs skrf and matplotlib."""
 
     def __init__(self, parent, touchstone_path):
         _use_wxagg()
@@ -534,15 +558,16 @@ class ResultsFrame(wx.Frame):
                 self.model = json.load(fh)
         except Exception:
             self.model = None
-        # per-excitation outputs: excN/[EH]f.h5 + farfield_pN.json for every
-        # excited port N; plain farfield.json = legacy single-farfield runs
-        self.field_h5s = {}  # (kind, port) -> h5 path
+        # The outputs of each excitation: excN/[EH]f.h5 and
+        # farfield_pN.json for each excited port N. A plain farfield.json
+        # comes from an old run that had one far field only.
+        self.field_h5s = {}  # (kind, port) -> the h5 path
         for k in ("E", "H"):
             for hit in glob.glob(os.path.join(self.outdir, "exc*",
                                               k + "f.h5")):
                 p = int(re.search(r"exc(\d+)", hit).group(1))
                 self.field_h5s[(k, p)] = hit
-        self._ff = {}  # port (0 = legacy/unknown) -> farfield dict
+        self._ff = {}  # port (0 = old or unknown) -> the far-field dict
         for path in glob.glob(os.path.join(self.outdir, "farfield*.json")):
             m = re.search(r"farfield_p(\d+)", os.path.basename(path))
             try:
@@ -578,8 +603,9 @@ class ResultsFrame(wx.Frame):
         self.choice.SetSelection(0)
         self.figure = Figure(figsize=(8, 5.5), layout="constrained")
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-        # default min size = figure's native 800x550: the sizer then can't
-        # shrink the canvas and the bottom axis gets clipped instead
+        # The default minimum size is the native size of the figure,
+        # 800x550. The sizer then cannot make the canvas smaller, and it
+        # clips the bottom axis.
         self.canvas.SetMinSize((320, 240))
         toolbar = NavigationToolbar2WxAgg(self.canvas)
         toolbar.Realize()
@@ -591,9 +617,10 @@ class ResultsFrame(wx.Frame):
         self.SetSizer(s)
         self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
         self._plot()
-        # the canvas only adopts its sizer-given size after a size event;
-        # without this the figure paints at its native size and the bottom
-        # axis label is clipped until the user resizes the window
+        # The canvas takes the size from the sizer only after a size
+        # event. Without this call, the figure paints at its native size
+        # and the label of the bottom axis stays clipped until the user
+        # changes the size of the window. the window
         wx.CallAfter(self.SendSizeEvent)
 
     def _plot(self):
@@ -618,16 +645,16 @@ class ResultsFrame(wx.Frame):
             ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
             ptag = " (Port %d)" % pnum if pnum else ""
             tag = base[base.rfind("(") + 1:-1]
-            if tag in ff.get("cuts", {}):    # "(Phi=0)" etc. -> 2D cut
+            if tag in ff.get("cuts", {}):    # "(Phi=0)" and similar: a 2D cut
                 self._plot_farfield(ff, tag, ptag)
-            else:                            # bare "(f=xx GHz)" -> 3D balloon
+            else:                            # only "(f=xx GHz)": a 3D balloon
                 self._plot_farfield3d(ff, ptag)
         elif sel.startswith("S-Parameters"):
             phase = sel.endswith("[Phase]")
             for j in range(net.nports):
                 for k in range(net.nports):
                     if not np.any(np.abs(net.s[:, j, k]) > 1e-9):
-                        continue  # port k not excited -> column not computed
+                        continue  # port k is not excited: no data in column
                     v = (np.degrees(np.angle(net.s[:, j, k])) if phase
                          else net.s_db[:, j, k])
                     ax.plot(f_ghz, v, label="S%d%d" % (j + 1, k + 1))
@@ -639,10 +666,10 @@ class ResultsFrame(wx.Frame):
             grid = True
             for i in range(net.nports):
                 if not np.any(np.abs(net.s[:, i, i]) > 1e-9):
-                    continue  # port i not excited -> S_ii not computed
+                    continue  # port i is not excited: no data for S_ii
                 net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid)
                 grid = False
-            for ln in ax.get_lines():  # skrf labels "name, S11" -> "S11"
+            for ln in ax.get_lines():  # skrf writes "name, S11": use "S11"
                 if ", S" in ln.get_label():
                     ln.set_label(ln.get_label().split(", ")[-1])
             ax.legend()
@@ -658,7 +685,7 @@ class ResultsFrame(wx.Frame):
             ax.set_title("Voltage Standing Wave Ratio (VSWR)")
             ax.set_ylim(1, min(20, ax.get_ylim()[1]))
             ax.legend()
-        else:  # group delay: all computed transmission pairs in one graph
+        else:  # the group delay: all the pairs that have data, in one graph
             for k in range(net.nports):
                 for j in range(net.nports):
                     if j == k or not np.any(np.abs(net.s[:, j, k]) > 1e-9):
@@ -677,15 +704,19 @@ class ResultsFrame(wx.Frame):
         self.canvas.draw()
 
     def _plot_board(self, ax):
-        """Top view of the model (shared with the settings preview)."""
+        """Draw the top view of the model.
+
+        The preview of the settings dialog uses the same function.
+        """
         _draw_board(ax, self.model)
 
     def _plot_field(self, ax, kind, port=None):
-        """Traveling-wave animation on the substrate mid-plane.
+        """Show an animation of the wave on the mid-plane of the substrate.
 
-        Same signed red/blue view for both fields: E shows E_z, H shows the
-        dominant in-plane H component (H loops around the trace, so its
-        vertical part is ~zero on this plane).
+        The two fields have the same red and blue view, which keeps the
+        sign. E shows E_z. H shows the largest in-plane component of H,
+        because H makes loops around the track and its vertical part is
+        near zero on this plane.
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation
@@ -699,10 +730,10 @@ class ResultsFrame(wx.Frame):
         frames = 24
 
         if kind == "E":
-            comp = F[..., 2]                 # vertical E under the trace
+            comp = F[..., 2]                 # the vertical E below the track
         else:
             hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
-            comp = F[..., 0] if hx >= hy else F[..., 1]  # dominant in-plane H
+            comp = F[..., 0] if hx >= hy else F[..., 1]  # the largest H
         lim = float(np.percentile(np.abs(comp), 99)) or 1.0
         mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
                              vmin=-lim, vmax=lim, shading="gouraud")
@@ -728,9 +759,10 @@ class ResultsFrame(wx.Frame):
                                    cache_frame_data=False)
 
     def _plot_farfield3d(self, ff, ptag=""):
-        """Transparent 3D directivity balloon with the PCB as a reference plate.
+        """Show a transparent 3D balloon of the directivity.
 
-        radius/color = dBi over a 30 dB range, +z = board normal.
+        The PCB is a reference plate. The radius and the colour give the
+        dBi in a range of 30 dB. +z is the normal of the board.
         """
         import numpy as np
         from matplotlib import cm, colors
@@ -748,15 +780,18 @@ class ResultsFrame(wx.Frame):
         ax = self.figure.add_subplot(111, projection="3d")
         norm = colors.Normalize(vmin=rmin, vmax=float(D.max()))
         fc = cm.jet(norm(D))
-        fc[..., 3] = 0.3  # transparent balloon so the board shows through
+        fc[..., 3] = 0.3  # a transparent balloon: you can see the board
         ax.plot_surface(X, Y, Z, facecolors=fc, rstride=1, cstride=1,
                         linewidth=0, antialiased=False, shade=False)
         m = float(R.max()) or 1.0
 
-        # PCB reference plate at the origin, oriented as in Board layout
-        # (+z = board normal). Scale is a display choice: the far field is
-        # notionally infinitely far, so the board is a size-less orientation
-        # marker -> largest board dim ~= half the balloon radius.
+        # The reference plate of the PCB is at the origin. Its
+        # orientation is the orientation of the Board layout view, thus
+        # +z is the normal of the board. The scale is only a display
+        # parameter: the far field is at an infinite distance, thus the
+        # board has no size and shows the orientation only. The largest
+        # dimension of the board is about one half of the radius of the
+        # balloon.
         br = self.model["board_rect"]
         cx, cy = 0.5 * (br["x0"] + br["x1"]), 0.5 * (br["y0"] + br["y1"])
         span = max(br["x1"] - br["x0"], br["y1"] - br["y0"], 1e-6)
@@ -789,7 +824,10 @@ class ResultsFrame(wx.Frame):
         self.figure.colorbar(sm, ax=ax, shrink=0.65, label="dBi")
 
     def _plot_farfield(self, ff, cut, ptag=""):
-        """One polar directivity cut in absolute dBi (CST-style)."""
+        """Show one polar cut of the directivity in absolute dBi.
+
+        The style is the style of CST.
+        """
         import numpy as np
         c = ff["cuts"][cut]
         ang_deg = np.asarray(c["angle_deg"], float)
@@ -807,7 +845,7 @@ class ResultsFrame(wx.Frame):
         ax.set_theta_zero_location("N")
         ax.set_thetagrids(range(0, 360, 30),
                           labels=[str(a) for a in range(0, 360, 30)])
-        ax.set_rlabel_position(270)  # dBi numbers along the right, CST-style
+        ax.set_rlabel_position(270)  # put the dBi numbers on the right, as CST
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))

@@ -1,34 +1,39 @@
-"""Where openEMS lives, and which Python should run the solver.
+"""The location of openEMS, and the Python that must run the solver.
 
-Imported from both sides of the process split (the pcbnew plugin and the
-standalone runner), so it must stay free of pcbnew, wx and numpy.
+The two sides of the process split import this module: the pcbnew plugin
+and the independent runner. Thus it must not import pcbnew, wx or numpy.
 """
 import os
 
 
 def openems_dirs():
-    """Candidate openEMS install dirs, best first. May not exist."""
+    """Give the possible openEMS install directories, the best one first.
+
+    A directory in the list can be absent from the disk.
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     return [d for d in (
         os.environ.get("OPENEMS_PATH"),
-        # <kicad>/3rdparty/openEMS when the plugin sits in .../plugins/rfsim
+        # <kicad>/3rdparty/openEMS if the plugin is in .../plugins/rfsim
         os.path.abspath(os.path.join(here, "..", "..", "openEMS")),
         r"C:\openEMS",
     ) if d]
 
 
 def solver_python():
-    """Interpreter that should run runner.py, or None to keep the caller's.
+    """Give the interpreter that must run runner.py, or give None.
 
-    runner.py imports only numpy/h5py/CSXCAD/openEMS — never pcbnew or wx —
-    so it can run under a different Python than KiCad's. That is *required*
-    for openEMS >= v0.37, which ships cp313/cp314 wheels only while KiCad 8,
-    9 and 10 all bundle Python 3.11. Search order:
+    runner.py imports only numpy, h5py, CSXCAD and openEMS. It does not
+    import pcbnew or wx. Thus it can run in a different Python than the
+    Python of KiCad. openEMS v0.37 and later make this necessary: they
+    supply cp313 and cp314 wheels only, but KiCad 8, 9 and 10 all contain
+    Python 3.11. The function looks in this sequence:
 
       1. $RFSIM_PYTHON
-      2. a `venv` beside the openEMS install (what the README sets up)
-      3. None -> caller keeps its own interpreter, which is right for
-         openEMS v0.0.36 (cp311 wheel, but no lumped inductors)
+      2. a `venv` near the openEMS installation (the README makes it)
+      3. None. Then the caller keeps its own interpreter. This is correct
+         for openEMS v0.0.36, which has a cp311 wheel but no lumped
+         inductors.
     """
     cfg = os.environ.get("RFSIM_PYTHON")
     if cfg:

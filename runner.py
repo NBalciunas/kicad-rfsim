@@ -1,11 +1,17 @@
-"""Standalone openEMS runner: model.json -> Touchstone file.
+"""The independent openEMS runner: it changes model.json into a Touchstone
+file.
 
-Runs outside KiCad (spawned as a subprocess by the plugin, or manually:
+The runner runs outside KiCad. The plugin starts it as a subprocess, or
+you can start it manually:
+
     python runner.py model.json output_dir
-) so a solver crash never takes KiCad down, and the sim pipeline can be
-tested headless. Imports only numpy/CSXCAD/openEMS — never pcbnew or wx.
 
-Excites each port in turn (N ports -> N runs) to fill the full S-matrix.
+Thus a crash of the solver cannot stop KiCad, and you can test the
+simulation without the GUI. The runner imports only numpy, CSXCAD and
+openEMS. It does not import pcbnew or wx.
+
+The runner excites each port in sequence. N ports give N runs, which fill
+the full S-matrix.
 """
 import glob
 import json
@@ -13,11 +19,12 @@ import os
 import shutil
 import sys
 
-import solverenv  # this file's own dir is sys.path[0] when run as a script
+import solverenv  # the directory of this file is sys.path[0] for a script
 
-# The openEMS/CSXCAD python extensions need the openEMS binary DLLs on
-# Windows. (openEMS >= v0.37 also documents a CSXCAD_INSTALL_PATH env var,
-# but add_dll_directory alone is sufficient — verified on v0.37.0-rc1.)
+# On Windows, the python extensions of openEMS and CSXCAD need the DLLs
+# from the binary directory of openEMS. (openEMS v0.37 and later also give
+# a CSXCAD_INSTALL_PATH environment variable, but add_dll_directory alone
+# is enough. This is a test result on v0.37.0-rc1.)
 if os.name == "nt":
     for _d in solverenv.openems_dirs():
         if os.path.isdir(_d):
@@ -31,29 +38,30 @@ RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
 
 
 def _has_lumped_rlc():
-    """True if this CSXCAD can do lumped inductors / series RLC.
+    """Tell if this CSXCAD can do lumped inductors and series RLC.
 
-    LEtype arrived with the lumped-RLC work (openEMS PR #121, in v0.37 and
-    the later v0.0.36-N nightlies). Older CSXCAD has no LEtype at all and
-    rejects the keyword, so this gates both the inductor guard and the
-    kwargs passed to AddLumpedElement.
+    LEtype came with the lumped RLC work: openEMS PR #121, which is in
+    v0.37 and in the later v0.0.36-N nightly builds. An older CSXCAD has
+    no LEtype and refuses the keyword. Thus this test controls the guard
+    for the inductors and the kwargs for AddLumpedElement.
     """
     from CSXCAD import CSProperties
     return hasattr(CSProperties.CSPropLumpedElement, "SetLEtype")
 
 
 def _time_step_factor(model):
-    """Sub-Courant timestep factor needed for stability, or None for default.
+    """Give the timestep factor that keeps the run stable, or give None.
 
-    A lumped inductor destabilises the FDTD unless the timestep is reduced:
-    on validation/run_rlc.py's geometry, 1 nH is fine at the full Courant
-    step while 10/100/300 nH diverge into NaN. The largest stable factor was
-    measured to track ~1.8/sqrt(L[nH]), so 1/sqrt(L[nH]) leaves ~1.8x margin.
+    A lumped inductor makes the FDTD unstable if the timestep is too
+    large. On the geometry of validation/run_rlc.py, 1 nH is stable at
+    the full Courant step, but 10, 100 and 300 nH diverge to NaN. The
+    largest stable factor is near 1.8/sqrt(L[nH]). Thus 1/sqrt(L[nH])
+    keeps a margin of about 1.8.
 
-    This is a heuristic fitted on one geometry — the real criterion also
-    involves cell size and the element box — so a run can still diverge.
-    The runner detects that and tells the user to set
-    settings["time_step_factor"] explicitly, which overrides this.
+    This is an approximation from one geometry only. The true criterion
+    also includes the cell size and the box of the element. Thus a run
+    can diverge. The runner finds this condition and tells the user to
+    set settings["time_step_factor"], which has priority over this value.
     """
     s = model["settings"]
     if s.get("time_step_factor"):
@@ -68,11 +76,11 @@ def _time_step_factor(model):
 
 
 def _diverged(sim_path):
-    """Name of a port file containing NaN, i.e. the FDTD blew up.
+    """Give the name of a port file that contains NaN.
 
-    Worth checking explicitly: openEMS writes '-nan(ind)' into the port
-    time-domain data and CalcPort then dies with an opaque
-    "could not convert string to float" ValueError.
+    NaN shows that the FDTD run diverged. Do this test: openEMS writes
+    '-nan(ind)' into the time-domain data of the port, and CalcPort then
+    stops with an unclear "could not convert string to float" ValueError.
     """
     for fn in sorted(glob.glob(os.path.join(sim_path, "port_ut_*"))):
         with open(fn) as fh:
@@ -82,7 +90,10 @@ def _diverged(sim_path):
 
 
 def _merge_close(vals, tol):
-    """Sort and merge coordinates closer than tol (avoids sliver mesh cells)."""
+    """Sort the coordinates and merge those that are nearer than tol.
+
+    This prevents very thin mesh cells.
+    """
     vals = sorted(vals)
     out = [vals[0]]
     for v in vals[1:]:
@@ -94,7 +105,11 @@ def _merge_close(vals, tol):
 
 
 def _port_geometry(model, res):
-    """Precompute port boxes/planes (pure floats, needed before meshing)."""
+    """Calculate the boxes and the planes of the ports.
+
+    The result contains floats only. The mesh needs these values, thus
+    this function runs first.
+    """
     z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
     ports = []
     plist = model["ports"]
@@ -132,18 +147,22 @@ def _port_geometry(model, res):
 
 
 def _pml_band(lo, hi, margin):
-    """Fixed lines for the outer 8-cell PML band at both ends of an axis."""
+    """Give the fixed lines of the outer PML band of 8 cells.
+
+    The function gives the lines for the two ends of one axis.
+    """
     step = margin / 8.0
     return ([lo + i * step for i in range(9)]
             + [hi - i * step for i in range(9)])
 
 
 def _mesh(model, ports, res):
-    """Mesh line lists (x, y, z) from geometry hints + smoothing resolution.
+    """Give the lists of mesh lines (x, y, z) from the geometry and `res`.
 
-    The domain equals the extraction region; its outer `margin` on every
-    face is meshed as exactly 8 cells and used as PML_8, leaving an equally
-    thick clear-air band between structure and absorber.
+    The domain is the region from the extraction. The outer `margin` on
+    each of the 6 faces has exactly 8 cells and becomes the PML_8
+    absorber. A band of clear air with the same thickness stays between
+    the structure and the absorber.
     """
     s = model["settings"]
     margin = s["margin_mm"]
@@ -163,7 +182,8 @@ def _mesh(model, ports, res):
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
     for e in model.get("lumped_elements", []):
-        # pin the element box: sub-mm parts must not depend on cell snapping
+        # Hold the box of the element. A part that is less than 1 mm long
+        # must not move with the cells.
         xs.update((e["start"][0], e["stop"][0]))
         ys.update((e["start"][1], e["stop"][1]))
 
@@ -172,7 +192,7 @@ def _mesh(model, ports, res):
     for c in model["copper_layers"]:
         zs.add(c["z"])
     for d in model["dielectric_layers"]:
-        # >=4 cells across every dielectric layer
+        # 4 cells or more in each dielectric layer
         zs.update(np.linspace(d["z_bottom"], d["z_top"], 5).tolist())
 
     tol = min(res / 8.0, margin / 20.0)
@@ -181,15 +201,15 @@ def _mesh(model, ports, res):
 
 
 def build(model, excite_idx, res, want_ff=False):
-    """Fresh FDTD + CSX model with port `excite_idx` excited."""
+    """Make a new FDTD model and CSX model, with port `excite_idx` excited."""
     from CSXCAD import ContinuousStructure
     from openEMS import openEMS
 
     s = model["settings"]
     f0 = 0.5 * (s["f_start"] + s["f_stop"])
     fc = 0.5 * (s["f_stop"] - s["f_start"])
-    # A reduced timestep needs proportionally more steps to cover the same
-    # simulated time, so the step budget is scaled with it.
+    # A smaller timestep needs more steps for the same simulated time.
+    # Thus the code increases the number of steps by the same ratio.
     tsf = _time_step_factor(model)
     nrts = s["max_timesteps"]
     if tsf and tsf < 1.0:
@@ -200,8 +220,8 @@ def build(model, excite_idx, res, want_ff=False):
         print("[rfsim] timestep factor %.3g (lumped inductor stability), "
               "max steps %d" % (tsf, nrts), flush=True)
     fdtd.SetGaussExcite(f0, fc)
-    # MUR showed slow late-time energy growth on this setup; PML_8 with an
-    # explicitly meshed 8-cell absorber band is stable.
+    # MUR showed a slow increase of the energy at late times on this
+    # setup. PML_8 with an absorber band of exactly 8 cells is stable.
     fdtd.SetBoundaryCond(["PML_8"] * 6)
     csx = ContinuousStructure()
     fdtd.SetCSX(csx)
@@ -210,8 +230,9 @@ def build(model, excite_idx, res, want_ff=False):
 
     ports_geo = _port_geometry(model, res)
     from CSXCAD.SmoothMeshLines import SmoothMeshLines
-    # round smoothed lines: a line at 1.5300000000000002 misses a
-    # zero-thickness copper sheet at exactly 1.53 -> "unused primitive"
+    # Round the smooth mesh lines. A line at 1.5300000000000002 does not
+    # touch a copper sheet with no thickness at exactly 1.53, and openEMS
+    # then gives "unused primitive".
     for axis, lines in zip("xyz", _mesh(model, ports_geo, res)):
         grid.AddLine(axis, np.round(SmoothMeshLines(lines, res, 1.4), 9))
 
@@ -241,17 +262,19 @@ def build(model, excite_idx, res, want_ff=False):
     if s.get("lumped", True):
         le_kw = {"LEtype": 1} if _has_lumped_rlc() else {}
         for e in model.get("lumped_elements", []):
-            if e["type"] == "R" and e["value"] == 0:  # 0-ohm jumper = short
+            if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(
                     e["start"], e["stop"], priority=15)
                 unit = "ohm (short)"
             else:
-                # LEtype=1 (series) is the topology of a 2-terminal part
-                # bridging a gap in a trace, and openEMS requires it for a
-                # lumped inductor. Unspecified components are NaN (not 0),
-                # so a single-component element is identical under either
-                # topology — checked against theory in validation/run_rlc.py.
-                # Needed once package parasitics land (R+L+C in one element).
+                # LEtype=1 (series) is the topology of a part that has 2
+                # terminals and that bridges a gap in a track. openEMS
+                # also needs it for a lumped inductor. The components
+                # that you do not give are NaN, not 0. Thus an element
+                # with one component is the same with the two topologies.
+                # validation/run_rlc.py shows this against the theory.
+                # The topology becomes important with the package
+                # parasitics, which put R, L and C in one element.
                 csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
                                      **dict(le_kw,
                                             **{e["type"]: e["value"]})).AddBox(
@@ -281,22 +304,26 @@ def build(model, excite_idx, res, want_ff=False):
 
     ff = None
     if want_ff:
-        # FD E/H-field dumps on the substrate mid-plane under the driven port,
-        # at the user's "Define at" frequency (center frequency for old
-        # models): small files, enough for the GUI's traveling-wave animations.
+        # Dump the E field and the H field on the mid-plane of the
+        # substrate, below the port that the run drives. The frequency is
+        # the "Define at" value of the user, or the center frequency for
+        # an old model. The files are small, but they are enough for the
+        # wave animations of the GUI.
         f_dump = s.get("f_field") or f0
         g0 = ports_geo[excite_idx]
         z_cut = 0.5 * (g0["z_top"] + g0["z_ref"])
         r = model["region"]
         for name, dt in (("Ef", 10), ("Hf", 11)):
-            # dump_mode=1: interpolate to mesh nodes. The default (0) dumps
-            # raw staggered Yee values, drawing H half a cell off the copper
+            # dump_mode=1 interpolates to the mesh nodes. The default
+            # value (0) dumps the raw Yee values, which draw H one half
+            # of a cell away from the copper.
             dump = csx.AddDump(name, dump_type=dt, dump_mode=1, file_type=1,
                                frequency=[f_dump])
             dump.AddBox([r["x0"], r["y0"], z_cut], [r["x1"], r["y1"], z_cut])
 
-        # NF2FF recording box in the clear-air band between structure and
-        # PML (domain edge + 1.5*margin), recorded at the same frequency.
+        # The NF2FF box is in the band of clear air between the structure
+        # and the PML: the edge of the domain plus 1.5 times the margin.
+        # The recording frequency is the same.
         from openEMS.nf2ff import nf2ff
         margin = s["margin_mm"]
         board_top = model["copper_layers"][0]["z"]
@@ -313,11 +340,13 @@ def build(model, excite_idx, res, want_ff=False):
 
 
 def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
-    """NF2FF at the recorded ('Define at') frequency -> farfield{suffix}.json.
+    """Calculate the NF2FF far field at the recorded frequency.
 
-    Three cuts, CST-style: theta sweeps at phi=0/90 and an azimuth sweep
-    at theta=90. Each cut is in absolute dBi (its own slice peak = the
-    engine's Dmax for that angle grid).
+    The recorded frequency is the "Define at" value. The result goes into
+    farfield{suffix}.json. There are three cuts, in the style of CST:
+    theta sweeps at phi=0 and phi=90, and an azimuth sweep at theta=90.
+    Each cut is in absolute dBi. The peak of each slice is the Dmax of
+    the engine for that grid of angles.
     """
     f_ff = ff.freq[0]
     print("[rfsim] NF2FF%s at %.3f GHz..." % (suffix, f_ff / 1e9), flush=True)
@@ -327,7 +356,7 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
     res = ff.CalcNF2FF(sim_path, f_ff, theta, [0.0, 90.0], center=center)
     res_az = ff.CalcNF2FF(sim_path, f_ff, [90.0], phi_az.tolist(),
                           center=center, outfile="nf2ff_az.h5")
-    theta3 = np.arange(0.0, 180.1, 5.0)   # full sphere, 5 deg: 3D balloon
+    theta3 = np.arange(0.0, 180.1, 5.0)   # the full sphere at 5 deg: 3D balloon
     phi3 = np.arange(0.0, 360.1, 5.0)
     res3 = ff.CalcNF2FF(sim_path, f_ff, theta3.tolist(), phi3.tolist(),
                         center=center, outfile="nf2ff_3d.h5")
@@ -365,8 +394,12 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
 
 
 def write_touchstone(path, freq, S, z0):
-    """Touchstone v1. 1/2-port stay single-line (the 2-port column order is
-    the classic S11 S21 S12 S22); N>=3 is row-major, <=4 pairs per line."""
+    """Write a Touchstone v1 file.
+
+    A file for 1 or 2 ports has one line for each frequency. The columns
+    of a 2-port file are in the usual sequence S11 S21 S12 S22. A file
+    for 3 ports or more is row-major, with a maximum of 4 pairs on a line.
+    """
     n = S.shape[1]
     with open(path, "w") as fh:
         fh.write("! rfsim (KiCad + openEMS)\n# HZ S RI R %g\n" % z0)
@@ -380,10 +413,10 @@ def write_touchstone(path, freq, S, z0):
             fh.write("%.6e" % f)
             for j in range(n):
                 if j:
-                    fh.write("\n           ")  # each matrix row on its own line
+                    fh.write("\n           ")  # one line for each matrix row
                 for k in range(n):
                     if k and k % 4 == 0:
-                        fh.write("\n           ")  # wrap at 4 pairs/line
+                        fh.write("\n           ")  # start a line after 4 pairs
                     v = S[i, j, k]
                     fh.write(" %.9e %.9e" % (v.real, v.imag))
             fh.write("\n")
@@ -399,9 +432,10 @@ def main(model_path, outdir):
     if n < 1:
         raise SystemExit("expected at least 1 port, got %d" % n)
 
-    # Lumped inductors need openEMS >= v0.37 (lumped RLC). Older engines
-    # log "Lumped Element R or C not specified! skipping" and silently model
-    # an open circuit, so refuse rather than return wrong numbers.
+    # A lumped inductor needs openEMS v0.37 or later, which has lumped
+    # RLC. An older engine writes "Lumped Element R or C not specified!
+    # skipping" and models an open circuit. Thus refuse to run, because
+    # the results would be incorrect.
     if s.get("lumped", True):
         bad = [e["ref"] for e in model.get("lumped_elements", [])
                if e["type"] == "L"]
@@ -411,12 +445,13 @@ def main(model_path, outdir):
                 "lumped inductors — it silently drops them, so results "
                 "would be wrong (open circuit at the part). Set the value "
                 "to DNP, or run the solver under a Python 3.13/3.14 "
-                "interpreter with openEMS >= v0.37 (see README, \"Solver "
-                "interpreter\")." % ", ".join(bad))
+                "interpreter with openEMS >= v0.37 (see README, "
+                "\"Installation\")." % ", ".join(bad))
 
-    # drop leftovers from a previous run into this outdir: an excN folder or
-    # farfield.json not rewritten below (different excite set / failed far
-    # field) would be picked up by the GUI as if it were current
+    # Remove the results of a previous run from this output directory. An
+    # excN folder, or a farfield.json that this run does not write again,
+    # looks current to the GUI. This occurs with a different set of
+    # excited ports, or after a far field that failed.
     for d in glob.glob(os.path.join(outdir, "exc*")):
         shutil.rmtree(d, ignore_errors=True)
     for fpath in glob.glob(os.path.join(outdir, "farfield*.json")):
@@ -432,8 +467,9 @@ def main(model_path, outdir):
 
     freq = np.linspace(s["f_start"], s["f_stop"], s.get("n_freq", 401))
     S = np.zeros((len(freq), n, n), dtype=complex)
-    # excite only the ports the user asked for (each is a full FDTD run);
-    # un-excited S-columns stay zero. Default/legacy models excite all.
+    # Excite only the ports that the user selected. Each port is a full
+    # FDTD run. The S-columns of the other ports stay zero. A default
+    # model, or an old model, excites all the ports.
     nums = [p["number"] for p in model["ports"]]
     want = set(s.get("excite") or nums)
     exc = [i for i, num in enumerate(nums) if num in want] or [0]
@@ -466,7 +502,7 @@ def main(model_path, outdir):
 
     out = os.path.join(outdir, "results.s%dp" % n)
     write_touchstone(out, freq, S, s["z0"])
-    for k in exc:  # report only the columns actually computed
+    for k in exc:  # show only the columns that this run calculated
         for j in range(n):
             mag = 20 * np.log10(np.maximum(np.abs(S[:, j, k]), 1e-12))
             print("[rfsim] S%d%d: %.1f .. %.1f dB"

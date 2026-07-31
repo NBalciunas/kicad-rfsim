@@ -1,9 +1,13 @@
-"""End-to-end lumped-element check: a series 50-ohm resistor in a 50-ohm
-microstrip. Ideal (Z0=50): S21 = 2*Z0/(2*Z0+R) = -3.5 dB, S11 = R/(R+2*Z0)
-= -9.5 dB. If the resistor were ignored, the gap would read as an open:
-S11 ~ 0 dB, S21 far lower -> the asserts below tell the two apart.
+"""A full test of a lumped element: a series resistor of 50 ohm in a
+microstrip of 50 ohm.
 
-Run with KiCad 10's python (needs pcbnew; spawns the solver itself):
+For an ideal part with Z0 = 50, S21 = 2*Z0/(2*Z0+R) = -3.5 dB and
+S11 = R/(R+2*Z0) = -9.5 dB. If the simulation ignored the resistor, the
+gap would be an open circuit: S11 near 0 dB and S21 much lower. The
+asserts below tell the two conditions apart.
+
+Run this file with the python of KiCad 10. It needs pcbnew, and it starts
+the solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_lumped.py [coarse|medium|fine]
 """
 import json
@@ -20,7 +24,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 import board_reader  # noqa: E402
 import solverenv  # noqa: E402
 
-TRACE_W = 2.9   # ~50 ohm on 1.6 mm FR4
+TRACE_W = 2.9   # about 50 ohm on FR4 of 1.6 mm
 Y = 10.0
 BOARD = (0.0, 0.0, 40.0, 20.0)
 
@@ -58,7 +62,10 @@ def _track(board, x0, x1, net):
 
 
 def make(path, ref="R1", val="50"):
-    """50-ohm microstrip broken by a 0.5 mm gap bridged by one R/L/C part."""
+    """Make a microstrip of 50 ohm that has a gap of 0.5 mm.
+
+    One R/L/C part bridges the gap.
+    """
     board = pcbnew.NewBoard(path)
     rf1 = pcbnew.NETINFO_ITEM(board, "RF1")
     rf2 = pcbnew.NETINFO_ITEM(board, "RF2")
@@ -68,13 +75,15 @@ def make(path, ref="R1", val="50"):
 
     pad1 = _pad(_fp(board, "P1"), "1", 5.0, Y, TRACE_W, TRACE_W, rf1)
     pad2 = _pad(_fp(board, "P2"), "1", 35.0, Y, TRACE_W, TRACE_W, rf2)
-    # series part: rect pads at [19,20] and [20.5,21.5] -> a clean 0.5 mm
-    # copper gap in [20, 20.5] that the lumped element must bridge
+    # The series part has rectangular pads at [19, 20] and [20.5, 21.5].
+    # They make a clean copper gap of 0.5 mm in [20, 20.5]. The lumped
+    # element must bridge this gap.
     r = _fp(board, ref, val)
     _pad(r, "1", 19.5, Y, 1.0, TRACE_W, rf1)
     _pad(r, "2", 21.0, Y, 1.0, TRACE_W, rf2)
 
-    # tracks stop short so their round caps don't spill into the gap
+    # The tracks stop before the pads. Thus their round ends do not go
+    # into the gap.
     _track(board, 5.0, 18.0, rf1)
     _track(board, 22.0, 35.0, rf2)
 
@@ -134,7 +143,7 @@ def main(mesh="medium"):
     f = rows[:, 0]
     s11 = 20 * np.log10(np.abs(rows[:, 1] + 1j * rows[:, 2]) + 1e-12)
     s21 = 20 * np.log10(np.abs(rows[:, 3] + 1j * rows[:, 4]) + 1e-12)
-    i = int(np.argmin(np.abs(f - 2e9)))  # low f -> parasitics small
+    i = int(np.argmin(np.abs(f - 2e9)))  # the parasitics are small at a low f
     print("at %.2f GHz: S11=%.2f dB (ideal -9.5), S21=%.2f dB (ideal -3.5)"
           % (f[i] / 1e9, s11[i], s21[i]))
     assert -12.0 < s11[i] < -7.0, "S11 %.2f dB off ideal -9.5" % s11[i]

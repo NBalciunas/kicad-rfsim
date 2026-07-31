@@ -1,4 +1,5 @@
-"""RFsim action plugin: selected pads -> openEMS S-parameter simulation."""
+"""The RFsim action plugin: it simulates the S-parameters of the selected
+pads with openEMS."""
 import importlib.util
 import json
 import os
@@ -14,7 +15,7 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
 def _kicad_python():
-    """KiCad's bundled python.exe (sys.executable may be pcbnew.exe)."""
+    """Give the python.exe of KiCad (sys.executable can be pcbnew.exe)."""
     exe = sys.executable or ""
     if os.path.basename(exe).lower().startswith("python") and os.path.isfile(exe):
         return exe
@@ -27,10 +28,10 @@ def _kicad_python():
 
 
 def _solver_missing(exe):
-    """Modules runner.py needs that `exe` cannot provide.
+    """Give the modules that runner.py needs but that `exe` does not have.
 
-    Uses find_spec in a subprocess: it never imports the extensions, so a
-    missing openEMS DLL doesn't masquerade as a missing package.
+    The subprocess uses find_spec, which does not import the extensions.
+    Thus an absent openEMS DLL does not look like an absent package.
     """
     code = ("import importlib.util as u\n"
             "print(','.join(m for m in ('numpy', 'h5py', 'CSXCAD', 'openEMS')\n"
@@ -58,16 +59,17 @@ class RFSimPlugin(pcbnew.ActionPlugin):
     def Run(self):
         try:
             self._run()
-        except ValueError as e:  # setup problems: readable message, no traceback
+        except ValueError as e:  # a setup problem: show a message, not a traceback
             wx.MessageBox(str(e), "RFsim", wx.ICON_ERROR)
         except Exception:
             import traceback
             wx.MessageBox(traceback.format_exc(), "RFsim error", wx.ICON_ERROR)
 
     def _run(self):
-        # The results window runs in KiCad's Python; the solver runs in its
-        # own interpreter (openEMS >= v0.37 has no cp311 wheel), so the two
-        # dependency sets are checked separately.
+        # The results window runs in the Python of KiCad. The solver runs
+        # in its own interpreter, because openEMS v0.37 and later have no
+        # cp311 wheel. Thus the code examines the two sets of packages
+        # one after the other.
         solver_py = solverenv.solver_python() or _kicad_python()
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
@@ -93,7 +95,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 "RFsim", wx.ICON_INFORMATION)
             return
 
-        # Preview port info (margin-independent) for the dialog.
+        # Get the port data for the preview in the dialog. The margin has
+        # no effect on this data.
         preview = board_reader.extract(board, pads, 1.0)
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
@@ -107,7 +110,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         dlg.Destroy()
 
         port_types = settings.pop("port_types")
-        # dialog numbering -> pad i becomes port order[i] (types follow)
+        # the numbers from the dialog: pad i becomes port order[i], and
+        # the types move with the pads
         order = settings.pop("order")
         pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
         port_types = [t for _, t in

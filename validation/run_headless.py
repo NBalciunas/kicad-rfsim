@@ -1,11 +1,13 @@
-"""End-to-end check without the KiCad GUI: board -> model.json -> openEMS -> .s2p.
+"""A full test without the GUI of KiCad: board -> model.json -> openEMS -> .s2p.
 
-Run with KiCad 10's python (per-user install; machine-wide installs are
-under "C:\\Program Files\\KiCad\\10.0\\bin" instead):
+Run this file with the python of KiCad 10. This is the path of a per-user
+installation. A machine-wide installation is in
+"C:\\Program Files\\KiCad\\10.0\\bin".
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_headless.py [coarse|medium|fine]
 
-A ~50-ohm microstrip thru line must show decent match and low insertion
-loss; the asserts are deliberately loose (FDTD + FR4 tolerances).
+A microstrip through line of about 50 ohm must give a good match and a low
+insertion loss. The limits in the asserts are wide, because FDTD and FR4
+both have large tolerances.
 """
 import json
 import os

@@ -1,16 +1,17 @@
-"""Why isn't my R/L/C part being simulated as a lumped element?
+"""Why does the simulation not include my R/L/C part as a lumped element?
 
-Walks _lumped_elements' gates in order for every R*/L*/C* footprint and
-reports the first one that rejects it. Several gates are deliberately quiet
-in normal use, so this is the way to see them.
+For each R*/L*/C* footprint, this tool obeys the tests of
+_lumped_elements in sequence. It shows the first test that refuses the
+part. Several tests are quiet in usual operation, thus this tool is the
+way to see them.
 
-On the LIVE board, including unsaved edits — paste into pcbnew's
-Tools > Scripting Console:
+To examine the LIVE board, together with the changes that you did not
+save, put these lines into Tools > Scripting Console of pcbnew:
 
     import sys; sys.path.insert(0, r"<this folder>")
     import diag_lumped; diag_lumped.report()
 
-On a saved file, from a shell:
+To examine a file that you saved, use a shell:
 
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" diag_lumped.py board.kicad_pcb
 """
@@ -27,7 +28,7 @@ _ATTR = {getattr(pcbnew, n): n for n in dir(pcbnew)
 
 
 def report(board=None, margin_mm=4.0):
-    """Print the gate-by-gate verdict for every R*/L*/C* footprint."""
+    """Show the result of each test for every R*/L*/C* footprint."""
     board = board or pcbnew.GetBoard()
     out = print
     copper, _ = br._stackup(board)
@@ -56,7 +57,8 @@ def report(board=None, margin_mm=4.0):
             continue
         n += 1
         allpads = list(fp.Pads())
-        # only numbered pads are terminals; the rest is plain copper
+        # Only the pads that have a number are terminals. The other pads
+        # are copper.
         pads = sorted((p for p in allpads if p.GetNumber()),
                       key=lambda p: p.GetNumber())
         out("\n=== %s  value=%r  (%d pad(s), %d numbered) ==="

@@ -1,27 +1,31 @@
-"""Validate all three lumped element types against closed-form theory.
+"""Test the three types of lumped element against closed-form theory.
 
-A single series R, L or C bridges a 0.5 mm gap in a 50-ohm microstrip.
-For a series impedance Z between two Z0 lines:
+One series R, L or C bridges a gap of 0.5 mm in a microstrip of 50 ohm.
+For a series impedance Z between two lines of Z0:
 
     S21 = 2*Z0 / (2*Z0 + Z)        S11 = Z / (Z + 2*Z0)
 
-so each type has a distinct, unmistakable signature over 1..5 GHz:
+Thus each type has a different and clear signature from 1 to 5 GHz:
 
-    R = 50 ohm : |S21| flat at -3.5 dB
-    L = 10 nH  : |S21| FALLS   -1.4 -> -10.4 dB   (Z = jwL grows with f)
-    C = 1 pF   : |S21| RISES   -5.5 ->  -0.4 dB   (Z = 1/jwC shrinks with f)
+    R = 50 ohm : |S21| is flat at -3.5 dB
+    L = 10 nH  : |S21| DECREASES  -1.4 -> -10.4 dB  (Z = jwL increases with f)
+    C = 1 pF   : |S21| INCREASES  -5.5 ->  -0.4 dB  (Z = 1/jwC decreases with f)
 
-The opposite slopes are the point: they cannot be faked by a dropped
-element (which reads as an open, |S21| far down and falling the other way)
-nor by mixing up L and C. The slope is also mesh-robust, which the absolute
-magnitude is not: at the coarse preset the 2.9 mm trace is only ~1 cell
-wide, and the resulting parasitic series inductance inflates |Z| more and
-more with frequency. So the analytic magnitude is asserted only at the low
-end of the sweep, and the higher points are printed for inspection.
+The opposite slopes are the important result. An element that the
+simulation ignores cannot make them: it is an open circuit, thus |S21| is
+much lower and its slope goes in the other direction. You also cannot
+confuse L and C. The mesh has only a small effect on the slope, but it has
+a large effect on the absolute magnitude. At the coarse preset the track
+of 2.9 mm is only about 1 cell wide, and the parasitic series inductance
+then increases |Z| more and more with the frequency. Thus the test asserts
+the analytic magnitude only at the low end of the sweep. It prints the
+other points for examination.
 
-Inductors need openEMS >= v0.37; see README "Solver interpreter".
+An inductor needs openEMS v0.37 or later. Refer to the README,
+"Installation".
 
-Run with KiCad 10's python (needs pcbnew; spawns the solver itself):
+Run this file with the python of KiCad 10. It needs pcbnew, and it starts
+the solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_rlc.py [coarse|medium|fine]
 """
 import json
@@ -37,22 +41,22 @@ import numpy as np  # noqa: E402
 
 import board_reader  # noqa: E402
 import solverenv  # noqa: E402
-import run_lumped  # noqa: E402  (reuses its board builder)
+import run_lumped  # noqa: E402  (this file uses its board builder again)
 
 Z0 = 50.0
 # ref, value text, kind, SI value
 CASES = [("R1", "50", "R", 50.0),
          ("L1", "10n", "L", 10e-9),
          ("C1", "1p", "C", 1e-12)]
-REPORT_F = (1.5e9, 2e9, 3e9)    # printed for inspection
-MAG_CHECK_F = 1.5e9             # only this one is asserted (see check())
-SLOPE_F = (1e9, 5e9)            # where the L-vs-C slope is measured
-MAG_TOL_DB = 2.5                # coarse mesh + pad parasitics
-SLOPE_MIN_DB = 3.0              # required |S21| change across 1..5 GHz
+REPORT_F = (1.5e9, 2e9, 3e9)    # the tool prints these frequencies
+MAG_CHECK_F = 1.5e9             # only this one has an assert (refer to check())
+SLOPE_F = (1e9, 5e9)            # the tool measures the slope of L and C here
+MAG_TOL_DB = 2.5                # for the coarse mesh and the pad parasitics
+SLOPE_MIN_DB = 3.0              # the necessary change of |S21| from 1 to 5 GHz
 
 
 def ideal(kind, value, f):
-    """Analytic S11, S21 for a series R/L/C between two Z0 lines."""
+    """Give the analytic S11 and S21 for a series R/L/C between two Z0 lines."""
     w = 2 * np.pi * f
     if kind == "R":
         Z = np.full(np.shape(f), value, dtype=complex)
@@ -64,18 +68,21 @@ def ideal(kind, value, f):
 
 
 def series_z_mag(kind, s21):
-    """|Z| of an ideal series element, from |S21| alone.
+    """Give |Z| of an ideal series element from |S21| only.
 
-    |S21| = 2*Z0/|2*Z0 + Z|, and inverting it needs Z's phase — which the
-    element type supplies: a resistor is real, so |2*Z0 + R| = 2*Z0 + R,
-    while L and C are imaginary, so |2*Z0 + jX| = sqrt(4*Z0^2 + X^2).
+    |S21| = 2*Z0/|2*Z0 + Z|. To invert this equation you must know the
+    phase of Z, and the type of the element gives it. A resistor is real,
+    thus |2*Z0 + R| = 2*Z0 + R. L and C are imaginary, thus
+    |2*Z0 + jX| = sqrt(4*Z0^2 + X^2).
 
-    Using magnitudes only makes this immune to the 50-ohm line between the
-    port's de-embedding plane and the part: a matched lossless line is a
-    pure phase shift and cannot change |S21|. The phase-based extraction
-    Z = 2*Z0*(1-S21)/S21 is NOT usable here — the MSL reference planes sit
-    ~10 mm from the part, several tenths of a wavelength, and it returns
-    nonsense like a negative resistance.
+    Magnitudes only make this calculation immune to the 50-ohm line
+    between the de-embedding plane of the port and the part. A matched
+    line with no loss changes the phase only, and it cannot change
+    |S21|. Do NOT use the extraction from the phase,
+    Z = 2*Z0*(1-S21)/S21. The reference planes of the MSL ports are about
+    10 mm from the part, which is some tenths of a wavelength. That
+    equation then gives incorrect values, for example a negative
+    resistance.
     """
     m = np.abs(s21)
     if kind == "R":
@@ -84,7 +91,10 @@ def series_z_mag(kind, s21):
 
 
 def implied(kind, zmag, f):
-    """Component value implied by |Z| (treats the element as ideal)."""
+    """Give the value of the component from |Z|.
+
+    The calculation is correct only if the element is ideal.
+    """
     w = 2 * np.pi * f
     if kind == "R":
         return zmag
@@ -98,7 +108,10 @@ def db(x):
 
 
 def simulate(ref, val, mesh):
-    """Build, extract, solve. Returns (freq, S11, S21) as complex arrays."""
+    """Make the board, extract it, and solve it.
+
+    The function gives (freq, S11, S21) as complex arrays.
+    """
     outdir = os.path.join(HERE, "out_rlc_%s_%s" % (ref, mesh))
     os.makedirs(outdir, exist_ok=True)
     board, pads = run_lumped.make(
@@ -116,7 +129,7 @@ def simulate(ref, val, mesh):
         "f_start": 1e9, "f_stop": 6e9, "z0": Z0, "margin_mm": margin,
         "mesh": mesh, "n_freq": 201, "max_timesteps": 300000,
         "end_criteria": 1e-4, "lumped": True,
-        "excite": [1],   # only port 1: S11 + S21 is all this check needs
+        "excite": [1],   # port 1 only: this test needs S11 and S21 only
     }
     model_path = os.path.join(outdir, "model.json")
     with open(model_path, "w") as fh:
@@ -156,14 +169,15 @@ def check(ref, val, kind, nominal, mesh):
         print("   %5.2f   %8.2f  %6.2f   %8.2f  %6.2f   %7.1f  %8.2f"
               % (f[i] / 1e9, got, want, db(s11[i]), db(i11[i]),
                  zmag[i], implied(kind, zmag[i], f[i]) * scale))
-        # Only the low-frequency point is held to the analytic magnitude:
-        # higher up, the coarse mesh's parasitic series L (the trace is only
-        # ~1 cell wide at lambda/10) dominates and inflates |Z|.
+        # The test holds only the low-frequency point to the analytic
+        # magnitude. At a higher frequency, the parasitic series L of the
+        # coarse mesh is larger than the element and increases |Z|. The
+        # track is only about 1 cell wide at lambda/10.
         if ft == MAG_CHECK_F and abs(got - want) > MAG_TOL_DB:
             fails.append("|S21| at %.2f GHz: %.2f dB vs ideal %.2f (>%.1f dB off)"
                          % (f[i] / 1e9, got, want, MAG_TOL_DB))
 
-    # the decisive test: which way does |S21| slope across the band?
+    # The most important test: in which direction does |S21| slope?
     lo = int(np.argmin(np.abs(f - SLOPE_F[0])))
     hi = int(np.argmin(np.abs(f - SLOPE_F[1])))
     slope = db(s21[hi]) - db(s21[lo])
@@ -175,7 +189,7 @@ def check(ref, val, kind, nominal, mesh):
     if kind == "R" and abs(slope) > MAG_TOL_DB:
         fails.append("resistor should be flat: slope %+.2f dB" % slope)
 
-    # value sanity, at the low frequency for the same reason
+    # a test of the value, at the low frequency for the same reason
     i = int(np.argmin(np.abs(f - MAG_CHECK_F)))
     v = implied(kind, zmag[i], f[i])
     if not (0.5 * nominal < v < 2.0 * nominal):
