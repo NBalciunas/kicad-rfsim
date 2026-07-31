@@ -12,7 +12,7 @@
         }
     },
     "license": "MIT",
-    "icon": "assets/icon.png",
+    "icon": "resources/icon.png",
     "resources": {
         "homepage": "https://github.com/NBalciunas/kicad-rfsim"
     },

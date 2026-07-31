@@ -1,4 +1,4 @@
-<img align="right" width="60px" src="assets/icon.png">
+<img align="right" width="60px" src="resources/icon.png">
 
 # RFsim
 
@@ -123,7 +123,7 @@ Used to validate the Touchstone writer. skrf must read back the same S-matrix, f
 * **`make_test_board.py`**  
 Used to make the microstrip board that `run_headless.py` needs.
 
-`%KIPY% board_reader.py` is the self-test of the value parser (21 cases).
+`%KIPY% plugins\board_reader.py` is the self-test of the value parser (21 cases).
 
 ## License
 

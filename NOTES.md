@@ -42,13 +42,15 @@ Installation, Usage, Examples, Validation, License. Three rules:
 **1. The README documents an installation that does not exist.** The
 Installation section tells the user to download a release ZIP file and to
 install it with the Plugin and Content Manager. The repository has no
-release, no tag and no PCM zip layout. `metadata.json` is a correct PCM
-manifest, but nothing builds the package. Two things are necessary: make
-the zip with a `plugins/` subfolder that holds the `.py` files, `assets/`
-and `resources/`; then publish it as a release at
-`github.com/NBalciunas/kicad-rfsim/releases`. Until then, a user must
-copy the folder into
-`%USERPROFILE%\Documents\KiCad\10.0\3rdparty\plugins\`. The venv of the
+release and no tag. `metadata.json` is a correct PCM manifest, and the
+repository root now has the PCM layout: `plugins/` holds the `.py` files
+and `assets/`, and `resources/icon.png` stays at the root. But nothing
+builds the package. Two things are necessary: make the zip from
+`metadata.json`, `plugins/` and `resources/`; then publish it as a
+release at `github.com/NBalciunas/kicad-rfsim/releases`. Until then, a
+user must copy `plugins/` into
+`%USERPROFILE%\Documents\KiCad\10.0\3rdparty\plugins\` with the name
+`rfsim`. The venv of the
 solver cannot go into the package: it stays step 6 of the installation.
 This is backlog item 10, and it is now a blocker.
 

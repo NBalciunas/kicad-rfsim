@@ -12,7 +12,8 @@ import tempfile
 import numpy as np
 import skrf
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins"))
 from runner import write_touchstone
 
 rng = np.random.default_rng(0)

@@ -20,7 +20,8 @@ import sys
 
 import pcbnew
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins"))
 import board_reader as br  # noqa: E402
 
 _ATTR = {getattr(pcbnew, n): n for n in dir(pcbnew)

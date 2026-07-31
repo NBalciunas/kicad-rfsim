@@ -19,7 +19,8 @@ import pcbnew
 from pcbnew import FromMM, VECTOR2I
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+PLUGINS = os.path.join(os.path.dirname(HERE), "plugins")
+sys.path.insert(0, PLUGINS)
 
 import board_reader  # noqa: E402
 import solverenv  # noqa: E402
@@ -133,7 +134,7 @@ def main(mesh="medium"):
     with open(model_path, "w") as fh:
         json.dump(model, fh, indent=1)
 
-    runner = os.path.join(os.path.dirname(HERE), "runner.py")
+    runner = os.path.join(PLUGINS, "runner.py")
     solver_py = solverenv.solver_python() or sys.executable
     print("solver python:", solver_py)
     subprocess.check_call([solver_py, runner, model_path, outdir])

@@ -15,7 +15,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+PLUGINS = os.path.join(os.path.dirname(HERE), "plugins")
+sys.path.insert(0, PLUGINS)
 
 import board_reader  # noqa: E402
 import make_test_board  # noqa: E402
@@ -44,7 +45,7 @@ def main(mesh="medium", port_type="msl"):
         len(model["polygons"].get("F.Cu", [])),
         len(model["polygons"].get("B.Cu", [])), len(model["ports"])))
 
-    runner = os.path.join(os.path.dirname(HERE), "runner.py")
+    runner = os.path.join(PLUGINS, "runner.py")
     solver_py = solverenv.solver_python() or sys.executable
     print("solver python:", solver_py)
     subprocess.check_call([solver_py, runner, model_path, outdir])
