@@ -9,24 +9,26 @@ CSXCAD.
 
 ## Features
 
-- **S-parameters** — magnitude, phase, Smith chart, VSWR, group delay,
-  and a Touchstone (`.sNp`) file.
-- **Far field** — three polar NF2FF cuts in dBi, a 3D balloon that you
-  can rotate, Dmax and the radiation efficiency.
-- **Field animations** — E and H on the mid-plane of the substrate, one
-  view for each excited port.
-- **Board layout view** — the structure that the solver used.
-- **Geometry directly from the board** — pads, tracks, arcs, vias,
-  filled zones, and the graphic shapes on the copper layers.
-- **SMD R, L and C as lumped elements** — the plugin reads the value
-  from the footprint.
-- **Any number of ports** — lumped or de-embedded microstrip (MSL), with
-  one FDTD run for each excited port.
-- **The substrate in the dialog** — εr, tanδ, the height and the copper
-  thickness.
-- **Three mesh presets** and PML_8 boundaries.
-- **The solver is a different process** — a crash cannot stop KiCad, and
-  the runner also works without a GUI.
+- Simulate the S-parameters of any number of ports. The plugin plots the
+  magnitude, the phase, a Smith chart, the VSWR and the group delay, and
+  it writes a Touchstone (`.sNp`) file.
+- Calculate the far field with NF2FF. The plugin plots three polar cuts
+  in absolute dBi and a 3D radiation pattern that you can rotate. It also
+  gives Dmax and the radiation efficiency.
+- Animate the E-field and the H-field on the mid-plane of the substrate,
+  with one view for each excited port.
+- Draw the board layout that the solver uses: a preview in the dialog
+  and a view with the results.
+- Extract the geometry directly from the board: the pads, tracks, arcs,
+  vias, filled zones and the graphic shapes on the copper layers.
+- Model the resistors, inductors and capacitors as lumped elements, with
+  the value from the footprint.
+- Feed each port as a lumped port or as a de-embedded microstrip (MSL)
+  port.
+- Define the substrate: εr, tanδ, the height and the copper thickness.
+- Mesh the structure at three resolutions: coarse, medium and fine.
+- The solver runs in a different process. Thus, a crash cannot stop
+  KiCad, and the same runner also works without a GUI.
 
 ## Installation
 
@@ -66,7 +68,8 @@ CSXCAD.
 
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key
    and click more pads for more ports.
-2. Select Tools > External Plugins > RFsim.
+2. Click the **RFsim** icon in the toolbar. It is also in
+   Tools > External Plugins.
 3. Look at the preview at the top of the dialog. It shows the ports, the
    R/L/C parts and the domain, and it follows the "Domain margin" field
    and the lumped checkbox.
@@ -125,19 +128,19 @@ an antenna, give the radiator more space before the absorber: a margin of
 
 > The pictures come later.
 
-**The settings dialog** — the preview shows which pads became ports,
+**The settings dialog** - the preview shows which pads became ports,
 which R/L/C parts the plugin found, and how far the domain goes.
 
-**S-parameters** — the magnitude and the phase of each column that the
+**S-parameters** - the magnitude and the phase of each column that the
 run calculated, plus the Smith chart, the VSWR and the group delay.
 
-**The board layout** — a top view of the structure that the solver used.
+**The board layout** - a top view of the structure that the solver used.
 
-**The E field and the H field** — the wave on the mid-plane of the
+**The E field and the H field** - the wave on the mid-plane of the
 substrate, one view for each excited port.
 
-**The far field** — three polar cuts with the lobe data, and a 3D balloon
-that you can rotate.
+**The far field** - three polar cuts with the lobe data, and a 3D
+radiation pattern that you can rotate.
 
 ## Validation
 

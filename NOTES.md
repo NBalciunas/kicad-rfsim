@@ -25,6 +25,9 @@ Installation, Usage, Examples, Validation, License. Three rules:
 - **The strings that the user sees are not in STE.** The warnings, the
   dialog text and the `print` output keep their original words. Some
   tests compare against them.
+- **Do not use an em dash (—) in the README.** Use a hyphen with a space
+  on each side, or make two sentences. The minus sign (−) in a value
+  such as −10 dB is a different character: keep it.
 - A comment that starts with `ponytail:` marks a deliberate shortcut.
   `/ponytail-debt` collects them. Keep the marker when you edit the
   comment near it.
