@@ -2,7 +2,7 @@
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "RFsim",
     "description": "S-parameter simulation of PCB structures with openEMS",
-    "description_full": "Select one or two pads in the PCB editor and simulate S-parameters (S11/S21, Smith chart, VSWR, group delay) with the openEMS FDTD solver. Board geometry and stackup are converted directly from KiCad data to CSXCAD primitives; results are saved as Touchstone files. Requires openEMS, scikit-rf, matplotlib and h5py installed into KiCad's Python (see README).",
+    "description_full": "RFsim simulates the S-parameters of an RF structure directly in the PCB editor, with the openEMS FDTD solver, for any number of ports. It plots the magnitude, the phase, a Smith chart, the VSWR and the group delay, and it writes a Touchstone (.sNp) file. It also calculates the far field, and it animates the E-field and the H-field. The geometry comes directly from the board: the pads, tracks, vias, zones and the R/L/C parts.",
     "identifier": "com.github.nbalciunas.kicad-rfsim",
     "type": "plugin",
     "author": {
