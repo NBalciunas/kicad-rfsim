@@ -77,7 +77,7 @@ The domain fits the full board and adds the margin as air around it. The plugin 
 
 ### Accuracy
 
-The coarse preset is for a first look. A small lumped element reads too large at that resolution, so use medium or fine when the value of the element matters. The lumped elements are ideal, and they have no package parasitics. For the behavior of the solver itself, refer to the[openEMS documentation](https://docs.openems.de).
+The coarse preset is for a first look. A small lumped element reads too large at that resolution, so use medium or fine when the value of the element matters. The lumped elements are ideal, and they have no package parasitics. For the behavior of the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
 
 ## Examples
 
