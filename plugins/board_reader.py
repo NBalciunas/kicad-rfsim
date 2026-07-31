@@ -27,6 +27,27 @@ _PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
+# The body ESL of a chip part with 2 terminals, in nH, against the code of
+# the imperial package. These values are for the BODY only. They are
+# smaller than the "mounted ESL" of a datasheet, because the FDTD model
+# already contains the loop of the pads and the tracks: that copper is in
+# the mesh. If you add the mounted value, you count the loop two times.
+_ESL_NH = {"0201": 0.20, "0402": 0.25, "0603": 0.35, "0805": 0.45,
+           "1206": 0.60, "1210": 0.70, "2010": 0.80, "2512": 0.90}
+_ESL_DEFAULT_NH = 0.40  # a part whose package the code cannot read
+# The series loss of the body: the ESR of a capacitor and the DCR of an
+# inductor. A resistor gives its own value, thus it has no entry.
+_ESR_OHM = {"C": 0.03, "L": 0.10}
+# KiCad puts the imperial code first: "R_0402_1005Metric". Thus the first
+# match is the correct one. The tests for a digit on each side prevent a
+# match inside the metric code.
+_PKG_RE = re.compile(r"(?<!\d)(%s)(?!\d)" % "|".join(_ESL_NH))
+
+# The largest gap that the code accepts as a coplanar gap, in mm. A gap of
+# a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
+# than this limit is not a coplanar ground.
+MAX_CPW_GAP = 2.0
+
 
 def _parse_value(text, kind):
     """Change '4k7', '4.7k', '100nF' or '3n3' into a float in SI units.
@@ -413,6 +434,72 @@ def _copper_polys(board, layer_id, region, max_err):
     return polys, n_clipped
 
 
+def _ray_hits(px, py, axis, sign, polys):
+    """Give the sorted distances from a point to the edges of `polys`.
+
+    The ray starts at (px, py) and goes along `axis` (0 = x, 1 = y) in the
+    direction of `sign`. The polygons are the copper of one layer, thus
+    they are fractured and they do not cover each other.
+
+    The function uses the half-open rule of the standard crossing test.
+    Thus a ray through a vertex gives one hit, and not two, and the parity
+    of the hits stays correct: an odd number of hits shows that the start
+    point is inside the copper.
+    """
+    a, b = axis, 1 - axis
+    p = (px, py)
+    hits = []
+    for poly in polys:
+        prev = poly[-1]
+        for cur in poly:
+            if (prev[b] <= p[b]) != (cur[b] <= p[b]):
+                t = prev[a] + ((p[b] - prev[b]) * (cur[a] - prev[a])
+                               / (cur[b] - prev[b]))
+                d = sign * (t - p[a])
+                if d > 0:
+                    hits.append(d)
+            prev = cur
+    return sorted(hits)
+
+
+def _coplanar_gap(polys, x, y, direction):
+    """Measure the gap between a feed line and the copper at its sides.
+
+    A CPW port needs this value. The function sends a ray to each side of
+    the line, at some positions along it. The first hit is the edge of the
+    line, and the second hit is the edge of the copper on the other side
+    of the gap. The result is the median of the measurements, in mm.
+
+    The function gives None if the copper is not on the two sides, or if
+    it is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+    """
+    if not direction or not polys:
+        return None
+    axis = 1 if direction[0] else 0  # the ray goes across the feed line
+    dx, dy = direction
+    # Take samples along the line and not at the pad. A pad is often wider
+    # than the line. A sample that is not on copper (the line stops before
+    # that point) gives an even number of hits, and the code ignores it.
+    gaps = []
+    for step in (0.4, 0.8, 1.2, 1.6, 2.0):
+        px, py = x + dx * step, y + dy * step
+        pair = []
+        for sign in (1, -1):
+            hits = _ray_hits(px, py, axis, sign, polys)
+            if len(hits) % 2 == 0:  # the start point is not on copper
+                break
+            if len(hits) < 2 or hits[1] - hits[0] > MAX_CPW_GAP:
+                break  # no copper at the side of the line: not a CPW
+            pair.append(hits[1] - hits[0])
+        if len(pair) == 2:
+            gaps += pair
+    if len(gaps) < 4:  # 2 sides at 2 positions or more
+        return None
+    gaps.sort()
+    n = len(gaps)
+    return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+
+
 def _feed_direction(board, pad):
     """Give the direction of the track that goes out of the pad.
 
@@ -444,6 +531,42 @@ def _feed_direction(board, pad):
     else:
         direction = [0, 1 if dy > 0 else -1]
     return direction, _mm(width)
+
+
+def package_presets():
+    """Give the body ESL of each package that the code knows, in H.
+
+    The settings dialog makes its list of presets from this table. Thus
+    the values stay in one place only.
+    """
+    return {k: v * 1e-9 for k, v in _ESL_NH.items()}
+
+
+def _package(fp):
+    """Give the imperial package code of a footprint, or give None.
+
+    The function reads the name of the footprint, for example
+    "R_0402_1005Metric".
+    """
+    try:
+        name = fp.GetFPID().GetUniStringLibItemName()
+    except Exception:
+        return None
+    m = _PKG_RE.search(name or "")
+    return m.group(1) if m else None
+
+
+def _parasitics(fp, kind):
+    """Give (package, ESL in H, ESR in ohm) for the body of a part.
+
+    An ideal element gives incorrect results above about 1 GHz: the ESL of
+    an 0402 capacitor puts its self-resonance inside a usual sweep. The
+    solver puts these values in series with the value of the part. Refer
+    to NOTES.md, "Package parasitics".
+    """
+    pkg = _package(fp)
+    esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
+    return pkg, esl, _ESR_OHM.get(kind, 0.0)
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):
@@ -532,9 +655,11 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
             warnings.append("%s is placed off-axis; approximated as a %s-axis "
                             "element" % (ref, ny))
+        pkg, esl, esr = _parasitics(fp, kind)
         elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
                          "layer": layer, "start": start, "stop": stop,
-                         "pads": [list(c1), list(c2)]})
+                         "pads": [list(c1), list(c2)],
+                         "package": pkg, "esl": esl, "esr": esr})
     return elements, warnings
 
 
@@ -548,6 +673,23 @@ def _port(board, pad, number, copper_layers):
     if len(names) < 2:
         raise ValueError("Board needs at least 2 copper layers (signal + reference)")
     ref = names[idx - 1] if idx == len(names) - 1 else names[idx + 1]
+
+    # A stripline needs a plane above the strip and a plane below it. Thus
+    # the port must be on an inner layer. openEMS puts the voltage probes
+    # at the same distance above and below, thus its model is a symmetric
+    # stripline. The code gives the mean distance, and extract() gives a
+    # warning if the two distances do not agree.
+    z_of = {c["name"]: c["z"] for c in copper_layers}
+    ref2, height, asym = None, None, 0.0
+    if 0 < idx < len(names) - 1:
+        ref2 = names[idx - 1]
+        h_dn = z_of[layer_name] - z_of[names[idx + 1]]
+        h_up = z_of[ref2] - z_of[layer_name]
+        if h_up > 0 and h_dn > 0:
+            height = round(0.5 * (h_up + h_dn), 6)
+            asym = abs(h_up - h_dn) / (h_up + h_dn)
+        else:
+            ref2 = None
 
     bbox = pad.GetBoundingBox()
     direction, track_w = _feed_direction(board, pad)
@@ -563,6 +705,10 @@ def _port(board, pad, number, copper_layers):
         "y": -_mm(bbox.Centre().y),
         "layer": layer_name,
         "ref_layer": ref,
+        "ref_layer2": ref2,      # the second plane of a stripline
+        "height": height,        # strip to each plane, mm; None = no stripline
+        "asymmetry": round(asym, 4),
+        "gap": None,             # the coplanar gap; extract() measures it
         "width": ext_x if along_y else ext_y,     # extent across the feed
         "length": ext_y if along_y else ext_x,    # extent along the feed
         "direction": direction,
@@ -657,6 +803,19 @@ def extract(board, pads, margin_mm, substrate=None):
             })
 
     ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    # Measure the coplanar gap of each port. The copper of the layer must
+    # exist first, thus this operation comes after the extraction of the
+    # polygons. A port that has a gap can use a CPW port.
+    for p in ports:
+        p["gap"] = _coplanar_gap(polygons.get(p["layer"], []),
+                                 p["x"], p["y"], p["direction"])
+        if p["height"] and p["asymmetry"] > 0.25:
+            warnings.append(
+                "Port %d (%s): the strip is not centered between %s and %s "
+                "(%.0f%% off). A Stripline port models a centered strip, so "
+                "its reference plane is approximate."
+                % (p["number"], p["label"], p["ref_layer2"], p["ref_layer"],
+                   100.0 * p["asymmetry"]))
     # A port needs a ground return: copper on the reference layer that
     # touches any part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
@@ -674,6 +833,17 @@ def extract(board, pads, margin_mm, substrate=None):
                     and min(ys) <= py1 and max(ys) >= py0):
                 break
         else:
+            # A CPW carries its return current on the coplanar ground of
+            # its own layer. Thus a board with no plane below the pad is
+            # correct for a CPW port, and the guard must not stop it.
+            if p["gap"]:
+                warnings.append(
+                    "Port %d (%s): no copper on reference layer %s, but "
+                    "there is coplanar copper %.3f mm from the feed line. "
+                    "Set this port to \"Coplanar (CPW)\": a Lumped or "
+                    "Microstrip port has no return path here."
+                    % (p["number"], p["label"], p["ref_layer"], p["gap"]))
+                continue
             raise ValueError(
                 "Port %d (%s): no copper on reference layer %s under the "
                 "pad.\nThe port drives the pad against %s, so a ground "
@@ -722,3 +892,41 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
             _got is not None and abs(_got - _want) <= 1e-15 + 1e-6 * abs(_want))
         assert _ok, "%r/%s -> %r, want %r" % (_t, _k, _got, _want)
     print("parser OK (%d cases)" % len(_CASES))
+
+    # The gap of a CPW: a strip of 1.0 mm wide on the x axis, with a
+    # ground at each side. The gap is 0.2 mm.
+    def _rect(x0, y0, x1, y1):
+        return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+
+    _STRIP = _rect(0.0, -0.5, 20.0, 0.5)
+    _CPW = [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -5.0, 20.0, -0.7)]
+    _GEO = [
+        ("cpw", _CPW, [1, 0], 0.2),
+        ("cpw, the feed on the y axis",
+         [_rect(-0.5, 0.0, 0.5, 20.0), _rect(0.7, 0.0, 5.0, 20.0),
+          _rect(-5.0, 0.0, -0.7, 20.0)], [0, 1], 0.2),
+        ("cpw, the feed in -x", _CPW, [-1, 0], None),   # the strip is at +x
+        ("microstrip: no coplanar copper", [_STRIP], [1, 0], None),
+        ("ground at one side only", _CPW[:2], [1, 0], None),
+        ("the ground is too distant",
+         [_STRIP, _rect(0.0, 3.0, 20.0, 5.0), _rect(0.0, -5.0, 20.0, -3.0)],
+         [1, 0], None),
+        ("no track", _CPW, None, None),
+    ]
+    for _name, _polys, _dir, _want in _GEO:
+        _got = _coplanar_gap(_polys, 0.0, 0.0, _dir)
+        _ok = (_want is None and _got is None) or (
+            _got is not None and abs(_got - _want) < 1e-6)
+        assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
+    # A ray that goes exactly through a vertex must give one hit only.
+    assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
+    print("geometry OK (%d cases)" % (len(_GEO) + 1))
+
+    _PKGS = [("R_0402_1005Metric", "0402"), ("C_0603_1608Metric", "0603"),
+             ("R_0201_0603Metric", "0201"), ("L_1210_3225Metric", "1210"),
+             ("C_1005", None), ("SOT-23", None), ("R_2512_6332Metric", "2512")]
+    for _name, _want in _PKGS:
+        _m = _PKG_RE.search(_name)
+        _got = _m.group(1) if _m else None
+        assert _got == _want, "%s -> %r, want %r" % (_name, _got, _want)
+    print("package OK (%d cases)" % len(_PKGS))

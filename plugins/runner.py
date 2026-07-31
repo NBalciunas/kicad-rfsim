@@ -35,6 +35,13 @@ import numpy as np
 C0 = 299792458.0
 EPS0 = 8.8541878128e-12
 RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
+# The port types that openEMS de-embeds. Each one gives the impedance of
+# the line and the propagation constant. A lumped port does not.
+TL_PORTS = ("msl", "cpw", "stripline")
+# The number of mesh cells across each gap of a CPW port, and across the
+# strip. Refer to NOTES.md, "The mesh of a CPW port".
+CPW_GAP_CELLS = 4
+CPW_STRIP_CELLS = 8
 
 
 def _has_lumped_rlc():
@@ -68,11 +75,44 @@ def _time_step_factor(model):
         return float(s["time_step_factor"])
     if not s.get("lumped", True):
         return None
-    ind = [e["value"] for e in model.get("lumped_elements", [])
-           if e["type"] == "L" and e["value"] > 0]
+    # The package parasitics put an ESL in each element. A body ESL is
+    # less than 1 nH, thus it keeps the factor at 1.0 and it costs no
+    # extra steps. But the code must count it: the criterion is the
+    # largest inductance in the model, whatever its source.
+    ind = []
+    for e in model.get("lumped_elements", []):
+        if e["type"] == "L" and e["value"] > 0:
+            ind.append(e["value"])
+        if s.get("parasitics", True) and e.get("esl"):
+            ind.append(e["esl"])
     if not ind:
         return None
     return min(1.0, 1.0 / (max(ind) * 1e9) ** 0.5)
+
+
+def _parasitic_components(e):
+    """Give the parasitic components of the body of a part.
+
+    The engine puts the R, the L and the C of one element in series
+    (LEtype=1). Thus:
+
+    - A capacitor becomes ESR + ESL + C. This is the usual model of a real
+      capacitor, and it puts the self-resonance at the correct frequency.
+    - A resistor becomes R + ESL.
+    - An inductor becomes DCR + L. A series element cannot make the
+      parallel capacitance of a real inductor. Thus this model does not
+      give the self-resonance of an inductor.
+
+    The values are for the body of the part only. The mesh already
+    contains the loop of the pads and the tracks.
+    """
+    out = {}
+    esl, esr = e.get("esl") or 0.0, e.get("esr") or 0.0
+    if e["type"] in ("R", "C") and esl > 0:
+        out["L"] = esl
+    if e["type"] in ("C", "L") and esr > 0:
+        out["R"] = esr
+    return out
 
 
 def _diverged(sim_path):
@@ -109,6 +149,11 @@ def _port_geometry(model, res):
 
     The result contains floats only. The mesh needs these values, thus
     this function runs first.
+
+    A microstrip port goes from the strip plane down to the plane of the
+    reference layer. A CPW port and a stripline port are FLAT: openEMS
+    refuses a start and a stop that are different in the direction of
+    exc_dir. Their return path is the coplanar copper, or the two planes.
     """
     z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
     ports = []
@@ -117,7 +162,12 @@ def _port_geometry(model, res):
         z_top = z_of[p["layer"]]
         z_ref = z_of[p["ref_layer"]]
         g = dict(p, z_top=z_top, z_ref=z_ref)
-        if p["type"] == "msl" and p["direction"]:
+        # Each de-embedded port needs a track that gives the direction.
+        # A CPW port also needs the gap, and a stripline port needs a
+        # plane above the strip and a plane below it.
+        need = {"cpw": "gap", "stripline": "height"}.get(p["type"])
+        if (p["type"] in TL_PORTS and p["direction"]
+                and (need is None or p.get(need))):
             w = p.get("track_width") or p["width"]
             length = max(3.0 * w, 6.0 * res)
             if len(plist) == 2:
@@ -126,19 +176,25 @@ def _port_geometry(model, res):
                 if dist > 0:
                     length = min(length, 0.3 * dist)
             d = p["direction"]
+            # Only a microstrip port goes down to the reference plane.
+            z_far = z_ref if p["type"] == "msl" else z_top
             if d[0]:
                 start = [p["x"], p["y"] - w / 2, z_top]
-                stop = [p["x"] + d[0] * length, p["y"] + w / 2, z_ref]
+                stop = [p["x"] + d[0] * length, p["y"] + w / 2, z_far]
                 g["prop_dir"] = "x"
             else:
                 start = [p["x"] - w / 2, p["y"], z_top]
-                stop = [p["x"] + w / 2, p["y"] + d[1] * length, z_ref]
+                stop = [p["x"] + w / 2, p["y"] + d[1] * length, z_far]
                 g["prop_dir"] = "y"
             g.update(start=start, stop=stop, msl_width=w, msl_len=length)
         else:
-            if p["type"] == "msl":
-                print("[rfsim] WARNING: port %d has no attached track; "
-                      "falling back to lumped port" % p["number"], flush=True)
+            if p["type"] in TL_PORTS:
+                why = ("it has no attached track" if not p["direction"] else
+                       "it has no coplanar gap" if p["type"] == "cpw" else
+                       "it has no plane above and below the strip")
+                print("[rfsim] WARNING: port %d (%s): %s; falling back to a "
+                      "lumped port" % (p["number"], p["type"], why),
+                      flush=True)
             g["type"] = "lumped"
             g["start"] = [p["x"] - p["length"] / 2, p["y"] - p["width"] / 2, z_ref]
             g["stop"] = [p["x"] + p["length"] / 2, p["y"] + p["width"] / 2, z_top]
@@ -181,6 +237,35 @@ def _mesh(model, ports, res):
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
+        if g["type"] == "cpw":
+            # The voltage probes of a CPW port go across the two gaps, and
+            # the current probe goes around the strip. The E field has a
+            # peak at each edge of the strip. Thus the mesh step across
+            # the line must come from the gap, and not from the
+            # wavelength: a gap of 0.3 mm with a step of 2.4 mm gives an
+            # impedance that is about 30% too small. Refer to NOTES.md,
+            # "The mesh of a CPW port".
+            across = ys if g["prop_dir"] == "x" else xs
+            c = g["y"] if g["prop_dir"] == "x" else g["x"]
+            hw = 0.5 * g["msl_width"]
+            for side in (-1, 1):
+                for i in range(CPW_GAP_CELLS + 1):
+                    across.add(c + side * (hw + g["gap"] * i / CPW_GAP_CELLS))
+                half = max(1, CPW_STRIP_CELLS // 2)
+                for i in range(1, half + 1):
+                    across.add(c + side * hw * i / half)
+                # Grade the mesh outward from the gap. SmoothMeshLines
+                # cannot do this: it fills each interval between two fixed
+                # lines separately, thus a cell of 0.08 mm can touch a
+                # cell of 1 mm. Such a step reflects the wave and it makes
+                # the impedance incorrect, and more lines in the full
+                # domain do not correct it.
+                pos = c + side * (hw + g["gap"])
+                step = g["gap"] / CPW_GAP_CELLS
+                while step < res:
+                    pos += side * step
+                    across.add(pos)
+                    step *= 1.4
     for e in model.get("lumped_elements", []):
         # Hold the box of the element. A part that is less than 1 mm long
         # must not move with the cells.
@@ -194,8 +279,28 @@ def _mesh(model, ports, res):
     for d in model["dielectric_layers"]:
         # 4 cells or more in each dielectric layer
         zs.update(np.linspace(d["z_bottom"], d["z_top"], 5).tolist())
+    # A CPW port and a stripline port put their current probe 2 mesh cells
+    # above the strip and 2 below it. The air above the board has no
+    # dielectric rule, thus its cells are as large as the full mesh step,
+    # and the probe box then becomes very large and asymmetric. It then
+    # measures a current that is much too large, and the impedance of the
+    # line becomes much too small. Thus put some lines at each side of
+    # each copper plane. The step is the step of the dielectric rule, thus
+    # this operation makes no cell smaller and it costs no timestep.
+    if model["dielectric_layers"]:
+        step = 0.25 * min(d["z_top"] - d["z_bottom"]
+                          for d in model["dielectric_layers"])
+        for c in model["copper_layers"]:
+            for k in (1, 2):
+                zs.update((c["z"] + k * step, c["z"] - k * step))
 
     tol = min(res / 8.0, margin / 20.0)
+    gaps = [g["gap"] for g in ports if g["type"] == "cpw" and g["gap"]]
+    if gaps:
+        # A CPW gap is usually much smaller than the mesh step. Thus the
+        # merge can remove the lines in the gap, and the voltage probes
+        # of the port then measure across the wrong cells.
+        tol = min(tol, 0.25 * min(gaps) / CPW_GAP_CELLS)
     return (_merge_close(xs, tol), _merge_close(ys, tol),
             _merge_close(zs, min(tol, 0.05)))
 
@@ -260,7 +365,16 @@ def build(model, excite_idx, res, want_ff=False):
                                   v["r"], priority=10)
 
     if s.get("lumped", True):
-        le_kw = {"LEtype": 1} if _has_lumped_rlc() else {}
+        rlc = _has_lumped_rlc()
+        le_kw = {"LEtype": 1} if rlc else {}
+        # The package parasitics need R, L and C together in one element,
+        # thus they need the series topology of LEtype. An older engine
+        # has no LEtype, and it removes an element that has an L without a
+        # message. Thus the code drops the parasitics on such an engine.
+        para = s.get("parasitics", True) and rlc
+        if s.get("parasitics", True) and not rlc:
+            print("[rfsim] WARNING: this openEMS build has no LEtype; the "
+                  "package parasitics are OFF (ideal elements)", flush=True)
         for e in model.get("lumped_elements", []):
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(
@@ -275,11 +389,19 @@ def build(model, excite_idx, res, want_ff=False):
                 # validation/run_rlc.py shows this against the theory.
                 # The topology becomes important with the package
                 # parasitics, which put R, L and C in one element.
+                comp = {e["type"]: e["value"]}
+                if para:
+                    comp.update(_parasitic_components(e))
                 csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
-                                     **dict(le_kw,
-                                            **{e["type"]: e["value"]})).AddBox(
+                                     **dict(le_kw, **comp)).AddBox(
                     e["start"], e["stop"], priority=15)
                 unit = {"R": "ohm", "L": "H", "C": "F"}[e["type"]]
+                extra = ["%s %g %s" % (k, v, {"R": "ohm", "L": "H",
+                                              "C": "F"}[k])
+                         for k, v in sorted(comp.items()) if k != e["type"]]
+                if extra:
+                    unit += " + %s (%s body)" % (
+                        ", ".join(extra), e.get("package") or "unknown package")
             print("[rfsim] lumped %s: %s=%g %s (%s-axis) at z=%.3f"
                   % (e["ref"], e["type"], e["value"], unit, e["ny"],
                      e["start"][2]), flush=True)
@@ -287,20 +409,33 @@ def build(model, excite_idx, res, want_ff=False):
     ports = []
     for i, g in enumerate(ports_geo):
         excite = (i == excite_idx)
-        if g["type"] == "msl":
-            ports.append(fdtd.AddMSLPort(
-                g["number"], copper_prop[g["layer"]], g["start"], g["stop"],
-                g["prop_dir"], "z", excite=-1 if excite else 0,
-                FeedShift=res, MeasPlaneShift=0.5 * g["msl_len"],
-                Feed_R=s["z0"], priority=20))
+        note = ""
+        if g["type"] in TL_PORTS:
+            # exc_dir is "z" for all three types. A microstrip port uses
+            # it as the direction from the strip to the plane. A CPW port
+            # and a stripline port use it only to find the plane of the
+            # strip: their probes go across the gaps, or up and down.
+            kw = dict(excite=(-1 if g["type"] == "msl" else 1) if excite else 0,
+                      FeedShift=res, MeasPlaneShift=0.5 * g["msl_len"],
+                      Feed_R=s["z0"], priority=20)
+            metal = copper_prop[g["layer"]]
+            args = (g["number"], metal, g["start"], g["stop"], g["prop_dir"],
+                    "z")
+            if g["type"] == "msl":
+                ports.append(fdtd.AddMSLPort(*args, **kw))
+            elif g["type"] == "cpw":
+                ports.append(fdtd.AddCPWPort(*args, g["gap"], **kw))
+                note = ", gap %.3f mm" % g["gap"]
+            else:
+                ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
+                note = ", %.3f mm to each plane" % g["height"]
+            note = "dir " + g["prop_dir"] + note
         else:
             ports.append(fdtd.AddLumpedPort(
                 g["number"], s["z0"], g["start"], g["stop"], "z",
                 excite=1.0 if excite else 0, priority=20))
         print("[rfsim] port %d: %s at (%.2f, %.2f) %s" % (
-            g["number"], g["type"], g["x"], g["y"],
-            "dir " + g.get("prop_dir", "-") if g["type"] == "msl" else ""),
-            flush=True)
+            g["number"], g["type"], g["x"], g["y"], note), flush=True)
 
     ff = None
     if want_ff:
@@ -393,6 +528,36 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
           % (10.0 * np.log10(Dmax), eff if eff is not None else -1), flush=True)
 
 
+def _line_data(port, sim_path, freq):
+    """Give the impedance of the line and eps_eff of a port, or give None.
+
+    A de-embedded port (microstrip, CPW or stripline) has three voltage
+    probes and two current probes along the line. From them, ReadUIData
+    calculates `beta`, the propagation constant, and `Z_ref`, the
+    impedance of the line. These are the values of the REAL track on the
+    REAL stackup: KiCad has no other tool that gives them.
+
+    CalcPort then writes the reference impedance of the system (usually
+    50 ohm) over Z_ref, because the S-parameters need that value. Thus the
+    caller must call this function BEFORE CalcPort.
+
+    A lumped port has no line, thus it has no beta. Then the result is
+    None.
+    """
+    port.ReadUIData(sim_path, freq)
+    if not hasattr(port, "beta"):
+        return None
+    z = np.asarray(port.Z_ref, dtype=complex)
+    beta = np.asarray(port.beta, dtype=complex)
+    # The effective permittivity: eps_eff = (beta / k0)^2, and k0 = w/c0.
+    k0 = 2.0 * np.pi * np.asarray(freq, dtype=float) / C0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eps = (np.real(beta) / k0) ** 2
+    return {"Z0_real": np.real(z).tolist(),
+            "Z0_imag": np.imag(z).tolist(),
+            "eps_eff": np.where(np.isfinite(eps), eps, 0.0).tolist()}
+
+
 def write_touchstone(path, freq, S, z0):
     """Write a Touchstone v1 file.
 
@@ -454,7 +619,8 @@ def main(model_path, outdir):
     # excited ports, or after a far field that failed.
     for d in glob.glob(os.path.join(outdir, "exc*")):
         shutil.rmtree(d, ignore_errors=True)
-    for fpath in glob.glob(os.path.join(outdir, "farfield*.json")):
+    for fpath in (glob.glob(os.path.join(outdir, "farfield*.json"))
+                  + [os.path.join(outdir, "lines.json")]):
         try:
             os.remove(fpath)
         except OSError:
@@ -473,6 +639,7 @@ def main(model_path, outdir):
     nums = [p["number"] for p in model["ports"]]
     want = set(s.get("excite") or nums)
     exc = [i for i, num in enumerate(nums) if num in want] or [0]
+    lines = {}  # the port number -> the impedance data of its line
     for step, k in enumerate(exc):
         sim_path = os.path.join(outdir, "exc%d" % (k + 1))
         print("[rfsim] === excitation %d/%d (port %d) ==="
@@ -488,6 +655,18 @@ def main(model_path, outdir):
                 "sub-Courant timestep. This run used time_step_factor "
                 "%.3g; set a smaller \"time_step_factor\" in the model's "
                 "settings (e.g. %.3g) and re-run." % (bad, tsf, tsf / 2.0))
+        # Read the impedance of the line of the excited port first. The
+        # wave of that port is the cleanest, and CalcPort replaces the
+        # value some lines below.
+        ld = _line_data(ports[k], sim_path, freq)
+        if ld:
+            lines[k + 1] = ld
+            f_at = s.get("f_field") or 0.5 * (s["f_start"] + s["f_stop"])
+            i_at = int(np.argmin(np.abs(freq - f_at)))
+            print("[rfsim] port %d line: Z0 = %.1f%+.1fj ohm, eps_eff = %.2f "
+                  "(at %.3f GHz)"
+                  % (k + 1, ld["Z0_real"][i_at], ld["Z0_imag"][i_at],
+                     ld["eps_eff"][i_at], freq[i_at] / 1e9), flush=True)
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
         for j in range(n):
@@ -499,6 +678,25 @@ def main(model_path, outdir):
             except Exception as e:
                 print("[rfsim] WARNING: far-field (port %d) failed: %s"
                       % (k + 1, e), flush=True)
+
+    if lines:
+        with open(os.path.join(outdir, "lines.json"), "w") as fh:
+            json.dump({"freq_hz": freq.tolist(), "ports": lines}, fh, indent=1)
+
+    # A passive structure cannot give out more power than it takes in.
+    # Thus the sum of |S|^2 down an excited column must not go above 1.
+    # A value above 1 shows that the voltage probes or the current probes
+    # of the port are not calibrated: the S-parameters are then incorrect,
+    # and not only inexact. Refer to NOTES.md, "The impedance of a CPW
+    # port and of a stripline port is too small".
+    for k in exc:
+        power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
+        if power.max() > 1.05:
+            print("[rfsim] WARNING: port %d gives out more power than it "
+                  "takes in (max sum|S|^2 = %.2f). The S-parameters of this "
+                  "port are NOT reliable. This occurs with the CPW port and "
+                  "the stripline port of openEMS v0.37.0-rc1."
+                  % (k + 1, power.max()), flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)
     write_touchstone(out, freq, S, s["z0"])

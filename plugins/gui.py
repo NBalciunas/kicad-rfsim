@@ -12,14 +12,79 @@ import types
 
 import wx
 
-PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl")]
+PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl"),
+              ("Coplanar (CPW)", "cpw"), ("Stripline", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
+CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
+NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
+KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor"}
+KIND_UNITS = {"R": "ohm", "C": "F", "L": "H"}
+# The multipliers for a value that a person reads, the largest first.
+_ENG = ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""),
+        (1e-3, "m"), (1e-6, "u"), (1e-9, "n"), (1e-12, "p"))
+
+
 SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
                      ("Custom", None, None)]
 # The colours of the top view. The preview in the settings dialog and the
 # view in the results window both use them.
 CU_COLORS = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
+
+
+def _badge(parent, text):
+    """Give a small box that holds `text`, for the name or the value of a
+    part.
+
+    The function gives no size to the box. Add it to the grid with
+    wx.EXPAND: then each box fills its column, thus all the boxes of one
+    column have the same width. The colour comes from the system, thus it
+    obeys a dark theme.
+    """
+    t = wx.StaticText(parent, label=text,
+                      style=wx.BORDER_SIMPLE | wx.ALIGN_CENTRE_HORIZONTAL)
+    t.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE))
+    return t
+
+
+def _eng(value, unit):
+    """Give a value with its multiplier, for example "4.7 kohm" or "3.3 nH"."""
+    if value is None:
+        return ""
+    if value == 0:
+        return "0 " + unit
+    for scale, prefix in _ENG:
+        if abs(value) >= scale:
+            return "%g %s%s" % (value / scale, prefix, unit)
+    return "%g %s" % (value, unit)
+
+
+def _port_types(p):
+    """Give the port types that the geometry of a port permits.
+
+    A lumped port always operates. Each de-embedded port needs a track
+    that gives the direction. A CPW port also needs a coplanar gap, and a
+    stripline port needs a plane above the strip and a plane below it.
+    """
+    ok = {"lumped": True,
+          "msl": bool(p.get("direction")),
+          "cpw": bool(p.get("direction") and p.get("gap")),
+          "stripline": bool(p.get("direction") and p.get("height"))}
+    return [t for t in PORT_TYPES if ok[t[1]]]
+
+
+def _port_note(p):
+    """Give what the geometry of a port ADDS.
+
+    The box of the port holds the restriction "no track, lumped only",
+    thus this text does not hold it again.
+    """
+    extra = []
+    if p.get("gap"):
+        extra.append("coplanar gap %.3f mm" % p["gap"])
+    if p.get("height"):
+        extra.append("stripline: %.3f mm to each plane" % p["height"])
+    return "; ".join(extra)
 
 
 def _use_wxagg():
@@ -54,8 +119,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
                   margin, and not from model["region"]. The dialog shows
                   the margin that the user selects now, not the margin of
                   the model.
-    show_lumped   Obey the checkbox of the dialog before the settings
-                  exist.
+    show_lumped   Draw the R/L/C parts or do not draw them. The dialog
+                  gives False when no part has its "Model" checkbox.
     """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -142,8 +207,14 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
 
 class SettingsDialog(wx.Dialog):
-    def __init__(self, parent, ports, default_outdir, lumped=(), preview=None):
+    def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
+                 packages=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
+        # {the code of the package: the ESL in H}. board_reader keeps the
+        # table, thus there is one source of truth. This module must not
+        # import it: board_reader imports pcbnew.
+        self._packages = dict(packages or {})
+        self._pkg_values = []
         self._build(ports, default_outdir, lumped, preview)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
@@ -214,29 +285,52 @@ class SettingsDialog(wx.Dialog):
         self.z0 = row(pg, "Port impedance:",
                       wx.TextCtrl(self, value="50"), "ohm")
         self.port_choices = []
+        self.port_types = []   # the values of the choices of each port
         self.port_order = []
         self.port_excite = []
         nums = [str(i + 1) for i in range(len(ports))]
+        # The rows of the ports use their own grid, in the same way as the
+        # lumped elements: a box that holds the number of the port, then
+        # what the geometry gives, then the controls. Column 1 grows, thus
+        # "Excite" stays at the right end.
+        mid = wx.ALIGN_CENTER_VERTICAL
+        prg = wx.FlexGridSizer(cols=5, vgap=6, hgap=8)
+        prg.AddGrowableCol(1, 1)
+        pbox.Add(prg, 0, wx.ALL | wx.EXPAND, 6)
+        self.port_badges = []
         for i, p in enumerate(ports):
-            note = "" if p["direction"] else "  [no track: lumped only]"
             num = wx.Choice(self, choices=nums)
             num.SetSelection(i)
             num.Enable(len(ports) > 1)
-            ch = wx.Choice(self, choices=[t[0] for t in PORT_TYPES])
+            # The types are not the same for each port: they come from the
+            # geometry. Thus each choice keeps its own list of values.
+            types = _port_types(p)
+            self.port_types.append([t[1] for t in types])
+            ch = wx.Choice(self, choices=[t[0] for t in types])
             ch.SetSelection(0)
-            ch.Enable(bool(p["direction"]))
+            ch.Enable(len(types) > 1)
             exc = wx.CheckBox(self, label="Excite")
             exc.SetValue(True)
-            h = wx.BoxSizer(wx.HORIZONTAL)
-            h.Add(num, 0, wx.RIGHT, 8)
-            h.Add(ch, 1, wx.EXPAND)
-            h.Add(exc, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-            pg.Add(wx.StaticText(self, label="%s%s" % (p["label"], note)),
-                   0, wx.ALIGN_CENTER_VERTICAL)
-            pg.Add(h, 0, wx.EXPAND)
+            # _refresh_port_badges puts the text in. The pad, the
+            # footprint and the net go into the tooltip: the box stays
+            # short, and no data goes away.
+            badge = _badge(self, "")
+            badge.SetToolTip(p["label"])
+            self.port_badges.append(p)
+            prg.Add(badge, 0, wx.EXPAND)
+            prg.Add(wx.StaticText(self, label=_port_note(p)), 0, mid)
+            prg.Add(num, 0, mid)
+            prg.Add(ch, 0, mid)
+            prg.Add(exc, 0, mid | wx.LEFT, 12)
             self.port_choices.append(ch)
             self.port_order.append(num)
             self.port_excite.append(exc)
+            # The user can change the number of a port. Thus the box must
+            # follow it, or it tells a number that is not correct.
+            num.Bind(wx.EVT_CHOICE, self._on_port_number)
+        self._port_badge_ctrls = [prg.GetItem(5 * i).GetWindow()
+                                  for i in range(len(ports))]
+        self._refresh_port_badges()
         if len(ports) > 1:
             pbox.Add(wx.StaticText(
                 self, label="The number assigns the port (excited in that "
@@ -245,14 +339,89 @@ class SettingsDialog(wx.Dialog):
                 "S-columns you don't need."),
                 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        self.lumped = None
+        # (ref, the Model checkbox, the package choice, the ESL, the ESR)
+        self.para_rows = []
         if lumped:
-            refs = ", ".join(e["ref"] for e in lumped)
-            self.lumped = wx.CheckBox(
-                self, label="Model SMD R/L/C parts as lumped elements "
-                "(%d found: %s)" % (len(lumped), refs))
-            self.lumped.SetValue(True)
-            pbox.Add(self.lumped, 0, wx.ALL, 6)
+            # These controls have their own box, because they are not a
+            # part of the port. There is no checkbox for all the parts:
+            # each row has its own "Model" checkbox, in the same way as
+            # the "Excite" checkbox of a port.
+            lbox = section("Lumped elements")
+            # One row for each part. The code reads the package from the
+            # name of the footprint. A name that has no code gives
+            # "Custom", and the user then puts in the values. "No
+            # parasitics" gives an ideal element, thus each row can go off
+            # by itself and there is no checkbox for all of them.
+            # The choice SHOWS "0603 Package", but the value that goes into
+            # model.json stays "0603": board_reader reads that code, and
+            # the log of the solver prints it. Thus the labels and the
+            # values are two lists, and _pkg_of() changes one into the
+            # other. "Custom" and "No parasitics" show their own name.
+            names = sorted(self._packages) + [CUSTOM_PKG, NO_PARASITICS]
+            self._pkg_values = names
+            labels = ["%s Package" % v for v in sorted(self._packages)]
+            labels += [CUSTOM_PKG, NO_PARASITICS]
+            # One grid for all the rows, and not one sizer for each row.
+            # Thus each part of a row stays in a column that agrees from
+            # row to row. The name of the box already says "Lumped
+            # elements", thus a row does not say it again: it starts with
+            # the type and the reference, in the same way as a port row
+            # starts with the name of its pad. Column 2 is an empty
+            # column that grows, thus it holds the two boxes at the left
+            # and the parasitics at the right.
+            lg = wx.FlexGridSizer(cols=12, vgap=6, hgap=8)
+            lg.AddGrowableCol(2, 1)
+            lbox.Add(lg, 0, wx.ALL | wx.EXPAND, 6)
+            mid = wx.ALIGN_CENTER_VERTICAL
+            for e in lumped:
+                i = len(self.para_rows)
+                pkg = e.get("package")
+                cb = wx.CheckBox(self, label="Model")
+                cb.SetValue(True)
+                ch = wx.Choice(self, choices=labels)
+                # A package that the code did not read gives "Custom", and
+                # not "No parasitics": the parasitics are on by default.
+                ch.SetSelection(names.index(pkg) if pkg in names
+                                else names.index(CUSTOM_PKG))
+                esl = wx.TextCtrl(self, value="%g" % (
+                    1e9 * (e.get("esl") or 0.0)), size=(55, -1))
+                esr = wx.TextCtrl(self, value="%g" % (e.get("esr") or 0.0),
+                                  size=(55, -1))
+                kind = e.get("type", "")
+                # wx.EXPAND, and no ALIGN: then each box fills its column
+                # and all the boxes of one column are the same width.
+                lg.Add(_badge(self, '%s "%s"' % (KIND_NAMES.get(kind) or "Part",
+                                                 e["ref"])), 0, wx.EXPAND)
+                lg.Add(_badge(self, _eng(e.get("value"),
+                                         KIND_UNITS.get(kind, ""))),
+                       0, wx.EXPAND)
+                lg.Add((0, 0))   # the empty column that grows
+                lg.Add(wx.StaticText(self, label="Parasitics:"), 0, mid)
+                lg.Add(ch, 0, mid)
+                # R before L, in the sequence of "RLC". There is no third
+                # field: a series capacitance is not a parasitic of these
+                # parts. Refer to NOTES.md, "Package parasitics".
+                for label, ctrl, unit in (("ESR:", esr, "ohm"),
+                                          ("ESL:", esl, "nH")):
+                    lg.Add(wx.StaticText(self, label=label), 0, mid | wx.LEFT, 6)
+                    lg.Add(ctrl, 0, mid)
+                    lg.Add(wx.StaticText(self, label=unit), 0, mid)
+                lg.Add(cb, 0, mid | wx.LEFT, 12)
+                # A preset writes the ESL with ChangeValue, which sends no
+                # EVT_TEXT. Thus the choice stays on the package. An edit
+                # by the user moves the choice to Custom. The substrate
+                # presets use the same method.
+                ch.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_package(k))
+                for c in (esl, esr):
+                    c.Bind(wx.EVT_TEXT,
+                           lambda evt, k=i: self._on_para_edit(k, evt))
+                self.para_rows.append((e["ref"], cb, ch, esl, esr))
+            lbox.Add(wx.StaticText(
+                self, label="The values are for the part BODY only: the loop "
+                "of the pads and the tracks is already in the mesh. A preset "
+                "sets the ESL; the ESR comes from the type of the part. Pick "
+                "\"No parasitics\" for an ideal element."),
+                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -286,14 +455,16 @@ class SettingsDialog(wx.Dialog):
         self.SetMinSize((520, -1))
         self.Fit()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
-        # The preview needs self.margin and self.lumped. Thus draw it
+        # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
         if self._prev_fig is not None:
             for evt in (wx.EVT_SPINCTRLDOUBLE, wx.EVT_TEXT):
                 self.margin.Bind(evt, self._on_preview_change)
-            if self.lumped is not None:
-                self.lumped.Bind(wx.EVT_CHECKBOX, self._on_preview_change)
             self._redraw_preview()
+        if self.para_rows:
+            for _, cb, _, _, _ in self.para_rows:
+                cb.Bind(wx.EVT_CHECKBOX, self._on_lumped)
+            self._on_lumped(None)
 
     def _add_preview(self, top):
         """Make the thumbnail of the board layout.
@@ -327,6 +498,45 @@ class SettingsDialog(wx.Dialog):
         self._redraw_preview()
         evt.Skip()
 
+    def _on_port_number(self, evt):
+        self._refresh_port_badges()
+        evt.Skip()
+
+    def _refresh_port_badges(self):
+        """Put "Port N" into the box of each port.
+
+        N is the number that the choice of that row gives now, and not the
+        number of the selection. Two rows can hold the same number for a
+        short time; _on_ok refuses that.
+        """
+        for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
+                                 self.port_badges):
+            note = "" if p.get("direction") else " (no track, lumped only)"
+            badge.SetLabel("Port %d%s" % (num.GetSelection() + 1, note))
+        self.Layout()
+
+    def _any_modelled(self):
+        """Tell if the model contains one lumped element or more."""
+        return any(cb.GetValue() for _, cb, _, _, _ in self.para_rows)
+
+    def _on_lumped(self, evt):
+        """Keep the controls of each row in agreement with its checkboxes.
+
+        Parasitics of a part that the model does not contain have no
+        meaning. Thus the fields of a row go off with its Model checkbox.
+        """
+        for _, cb, ch, esl, esr in self.para_rows:
+            # A part that the model does not contain has no parasitics.
+            # "No parasitics" makes an ideal element, thus its two fields
+            # have no meaning either.
+            on = cb.GetValue()
+            ch.Enable(on)
+            for c in (esl, esr):
+                c.Enable(on and self._pkg_of(ch) != NO_PARASITICS)
+        self._redraw_preview()
+        if evt is not None:
+            evt.Skip()
+
     def _redraw_preview(self):
         if self._prev_fig is None:
             return
@@ -335,8 +545,8 @@ class SettingsDialog(wx.Dialog):
         try:
             _draw_board(ax, self._preview_model, compact=True,
                         margin_mm=self.margin.GetValue(),
-                        show_lumped=(self.lumped is None
-                                     or self.lumped.GetValue()))
+                        show_lumped=(not self.para_rows
+                                     or self._any_modelled()))
         except Exception as e:  # the preview must never stop the dialog
             ax.set_axis_off()
             ax.text(0.5, 0.5, "preview unavailable\n%s" % e, ha="center",
@@ -360,13 +570,17 @@ class SettingsDialog(wx.Dialog):
             z0 = float(self.z0.GetValue())
             er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
             h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
+            para = [(float(esl.GetValue()), float(esr.GetValue()))
+                    for _, _, _, esl, esr in self.para_rows]
             if (not (0 < fa < fb) or not (fa <= fd <= fb) or z0 <= 0
-                    or er < 1 or tand < 0 or h <= 0 or cu_t <= 0):
+                    or er < 1 or tand < 0 or h <= 0 or cu_t <= 0
+                    or any(a < 0 or b < 0 for a, b in para)):
                 raise ValueError
         except ValueError:
             wx.MessageBox(
                 "Check frequency / impedance / substrate values.\n"
-                "('Define at' must lie inside the sweep range.)",
+                "('Define at' must lie inside the sweep range. "
+                "ESL and ESR must be numbers, and not negative.)",
                 "RFsim", wx.ICON_ERROR)
             return
         order = [c.GetSelection() for c in self.port_order]
@@ -378,6 +592,41 @@ class SettingsDialog(wx.Dialog):
             wx.MessageBox("Select at least one port to excite.",
                           "RFsim", wx.ICON_ERROR)
             return
+        evt.Skip()
+
+    def _pkg_of(self, ch):
+        """Give the package VALUE of a choice, and not its label.
+
+        The choice shows "0603 Package"; the value is "0603".
+        """
+        return self._pkg_values[ch.GetSelection()]
+
+    def _para_value(self, ch, ctrl, scale=1.0):
+        """Give the value of a field in SI, or give 0 for "No parasitics".
+
+        The text of the field does not change. Thus the value of the user
+        comes back when the row takes a package again.
+        """
+        if self._pkg_of(ch) == NO_PARASITICS:
+            return 0.0
+        return float(ctrl.GetValue()) * scale
+
+    def _on_package(self, i):
+        """Put the ESL of the package into the field of that row.
+
+        ChangeValue sends no EVT_TEXT, thus the choice stays on the
+        package. Custom changes nothing: the values of the user stay.
+        """
+        _, _, ch, esl, _ = self.para_rows[i]
+        pkg = self._pkg_of(ch)
+        if pkg in self._packages:
+            esl.ChangeValue("%g" % (1e9 * self._packages[pkg]))
+        self._on_lumped(None)   # "No parasitics" turns the fields off
+
+    def _on_para_edit(self, i, evt):
+        """Move the choice of that row to Custom when the user types."""
+        ch = self.para_rows[i][2]
+        ch.SetSelection(ch.GetCount() - 1)
         evt.Skip()
 
     def get_settings(self):
@@ -392,8 +641,8 @@ class SettingsDialog(wx.Dialog):
             "cu_t": float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
-            "port_types": [PORT_TYPES[c.GetSelection()][1]
-                           for c in self.port_choices],
+            "port_types": [vals[c.GetSelection()] for c, vals
+                           in zip(self.port_choices, self.port_types)],
             "order": [c.GetSelection() + 1 for c in self.port_order],
             # "excite" holds the FINAL port numbers, after the change of
             # the numbers. The runner compares against these numbers.
@@ -401,7 +650,21 @@ class SettingsDialog(wx.Dialog):
                              for num, cb in zip(self.port_order,
                                                 self.port_excite)
                              if cb.GetValue()),
-            "lumped": bool(self.lumped and self.lumped.GetValue()),
+            "lumped": self._any_modelled(),
+            "parasitics": any(self._pkg_of(ch) != NO_PARASITICS
+                              for _, _, ch, _, _ in self.para_rows),
+            # One entry for each R/L/C part. rfsim.py puts them into the
+            # elements, thus model.json keeps the values that the solver
+            # uses.
+            # "Custom" goes through as it is. Thus the log of the solver
+            # tells the difference between a value that the user selected
+            # and a package that the code could not read.
+            "lumped_parasitics": {
+                ref: {"model": cb.GetValue(),
+                      "package": self._pkg_of(ch),
+                      "esl": self._para_value(ch, esl, 1e-9),
+                      "esr": self._para_value(ch, esr)}
+                for ref, cb, ch, esl, esr in self.para_rows},
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             # ponytail: these two limits are constant. Put them in the
@@ -575,6 +838,16 @@ class ResultsFrame(wx.Frame):
                     self._ff[int(m.group(1)) if m else 0] = json.load(fh)
             except Exception:
                 pass
+        # The impedance of the line of each de-embedded port. An old run,
+        # or a run that has lumped ports only, writes no such file.
+        self._lines = None
+        try:
+            with open(os.path.join(self.outdir, "lines.json")) as fh:
+                self._lines = json.load(fh)
+        except Exception:
+            pass
+        if self._lines and self._lines.get("ports"):
+            plots.append("Line impedance")
         self._field = {}
         self._anim = None
         if self.model:
@@ -638,6 +911,8 @@ class ResultsFrame(wx.Frame):
 
         if sel.startswith("Board layout"):
             self._plot_board(ax)
+        elif sel.startswith("Line impedance"):
+            self._plot_lines(ax)
         elif sel.startswith(("E-Field", "H-Field")):
             self._plot_field(ax, sel[0], pnum)
         elif sel.startswith("Farfield"):
@@ -709,6 +984,49 @@ class ResultsFrame(wx.Frame):
         The preview of the settings dialog uses the same function.
         """
         _draw_board(ax, self.model)
+
+    def _plot_lines(self, ax):
+        """Draw the impedance of the line and eps_eff of each port.
+
+        These values come from the voltage probes and the current probes
+        of a de-embedded port. Thus they are the impedance of the real
+        track on the real stackup, and not the reference impedance of the
+        system. A lumped port has no line, thus it is not in this view.
+
+        The formula divides by the field at the measurement plane. Thus
+        the values are noisy where the excitation has little energy,
+        usually at the two ends of the sweep. The limits of the axes use
+        percentiles, and not the extreme values.
+        """
+        import numpy as np
+        d = self._lines
+        f_ghz = np.asarray(d["freq_hz"], float) / 1e9
+        ax2 = ax.twinx()
+        z_all, e_all = [], []
+        for num in sorted(d["ports"], key=int):
+            p = d["ports"][num]
+            z, e = np.asarray(p["Z0_real"], float), np.asarray(p["eps_eff"],
+                                                               float)
+            z_all.append(z)
+            e_all.append(e)
+            ln, = ax.plot(f_ghz, z, label="Port %s: Re(Z0)" % num)
+            ax2.plot(f_ghz, e, "--", lw=1.0, color=ln.get_color(),
+                     label="Port %s: eps_eff" % num)
+
+        def limits(vals, floor):
+            lo, hi = np.percentile(np.concatenate(vals), [2, 98])
+            pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
+            return max(floor, lo - pad), hi + pad
+
+        ax.set_ylim(*limits(z_all, 0.0))
+        ax2.set_ylim(*limits(e_all, 1.0))
+        ax.set_ylabel("Line impedance Re(Z0) / ohm")
+        ax2.set_ylabel("Effective permittivity")
+        ax2.grid(False)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, fontsize=8)
+        ax.set_title("Transmission line impedance")
 
     def _plot_field(self, ax, kind, port=None):
         """Show an animation of the wave on the mid-plane of the substrate.

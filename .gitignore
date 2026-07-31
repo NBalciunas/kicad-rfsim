@@ -1,5 +1,6 @@
 .idea/
 .claude/settings.local.json
+NOTES.md
 __pycache__/
 .venv/
 validation/out_*/

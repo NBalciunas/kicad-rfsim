@@ -102,7 +102,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
                                  preview.get("lumped_elements", []),
-                                 preview=preview)
+                                 preview=preview,
+                                 packages=board_reader.package_presets())
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
@@ -118,9 +119,24 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                       sorted(zip(order, port_types), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
+        # The parasitics of each R/L/C part, from the rows of the dialog.
+        # They go into the elements below, and not into the settings:
+        # model.json must hold the values that the solver uses.
+        para = settings.pop("lumped_parasitics", None) or {}
 
         model = board_reader.extract(board, pads, settings["margin_mm"],
                                      substrate)
+        for e in model["lumped_elements"]:
+            v = para.get(e["ref"])
+            if v:
+                e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
+        # A part whose Model checkbox is off does not go into the model at
+        # all. Its pads stay in the copper, thus the gap between them stays
+        # open. This is the same result as the old checkbox for all the
+        # parts, and the runner needs no test of its own.
+        model["lumped_elements"] = [
+            e for e in model["lumped_elements"]
+            if para.get(e["ref"], {}).get("model", True)]
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
