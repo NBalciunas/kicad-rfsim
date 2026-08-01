@@ -29,10 +29,10 @@ CSXCAD.
 4) Install `scikit-rf`, `matplotlib` and `h5py` into the Python of KiCad:
 
    ```bat
-   "%LOCALAPPDATA%\Programs\KiCad\10.0\bin\python.exe" -m pip install --user scikit-rf matplotlib h5py
+   "C:\Program Files\KiCad\10.0\bin\python.exe" -m pip install --user scikit-rf matplotlib h5py
    ```
 
-   > If KiCad is installed for all the users, its Python is in `C:\Program Files\KiCad\10.0\bin`.
+   > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
 5) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases). Extract the `openEMS` folder to `C:\openEMS`.
 
@@ -42,13 +42,11 @@ CSXCAD.
 
    ```bat
    py -3.14 -m venv C:\openEMS\venv
-   C:\openEMS\venv\Scripts\python.exe -m pip install numpy h5py
-   C:\openEMS\venv\Scripts\python.exe -m pip install C:\openEMS\python\csxcad-*-cp314-*.whl
-   C:\openEMS\venv\Scripts\python.exe -m pip install C:\openEMS\python\openems-*-cp314-*.whl
-   C:\openEMS\venv\Scripts\python.exe -c "import CSXCAD, openEMS; print('ok')"
+   C:\openEMS\venv\Scripts\python.exe -m pip install --find-links C:\openEMS\python csxcad openems
+   C:\openEMS\venv\Scripts\python.exe -c "import os; os.add_dll_directory('C:/openEMS'); import CSXCAD, openEMS; print('ok')"
    ```
 
-   > CSXCAD must go in before openEMS.
+   > The last command must print `ok`. A warning about the version of HDF5 is not a problem.
 
 7) Restart KiCad. The plugin is now installed.
 
@@ -138,7 +136,7 @@ The following example shows the 3D radiation pattern that you can rotate.
 The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory. Run the files with the Python of KiCad:
 
 ```bat
-set KIPY="%LOCALAPPDATA%\Programs\KiCad\10.0\bin\python.exe"
+set KIPY="C:\Program Files\KiCad\10.0\bin\python.exe"
 %KIPY% validation\run_rlc.py coarse
 ```
 
