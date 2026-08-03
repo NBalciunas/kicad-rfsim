@@ -12,8 +12,8 @@ import types
 
 import wx
 
-PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl"),
-              ("Coplanar (CPW)", "cpw"), ("Stripline", "stripline")]
+PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
+              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
@@ -59,32 +59,36 @@ def _eng(value, unit):
     return "%g %s" % (value, unit)
 
 
-def _port_types(p):
-    """Give the port types that the geometry of a port permits.
+def _port_choices(p):
+    """Give (label, value) for the port types that the geometry permits.
 
-    A lumped port always operates. Each de-embedded port needs a track
-    that gives the direction. A CPW port also needs a coplanar gap, and a
+    A lumped port always operates. Each de-embedded port needs a feed
+    direction (a track, or the manual "Feed" control). A CPW port also
+    needs a coplanar gap, and its entry shows the measured gap. A
     stripline port needs a plane above the strip and a plane below it.
+    The label of the port row names what the geometry does not give.
     """
-    ok = {"lumped": True,
-          "msl": bool(p.get("direction")),
-          "cpw": bool(p.get("direction") and p.get("gap")),
-          "stripline": bool(p.get("direction") and p.get("height"))}
-    return [t for t in PORT_TYPES if ok[t[1]]]
+    out = [PORT_TYPES[0]]
+    if p.get("direction"):
+        out.append(PORT_TYPES[1])
+        if p.get("gap"):
+            out.append(("%s [Coplanar Gap: %.2f mm]"
+                        % (PORT_TYPES[2][0], p["gap"]), "cpw"))
+        if p.get("height"):
+            out.append(PORT_TYPES[3])
+    return out
 
 
 def _port_note(p):
     """Give what the geometry of a port ADDS.
 
-    The box of the port holds the restriction "no track, lumped only",
-    thus this text does not hold it again.
+    The label of the port holds the problem tags ("[No Track]"), and
+    the CPW entry of the type choice holds the gap. Thus this text
+    holds only the stripline distance.
     """
-    extra = []
-    if p.get("gap"):
-        extra.append("coplanar gap %.3f mm" % p["gap"])
     if p.get("height"):
-        extra.append("stripline: %.3f mm to each plane" % p["height"])
-    return "; ".join(extra)
+        return "stripline: %.3f mm to each plane" % p["height"]
+    return ""
 
 
 def _use_wxagg():
@@ -288,13 +292,15 @@ class SettingsDialog(wx.Dialog):
         self.port_types = []   # the values of the choices of each port
         self.port_order = []
         self.port_excite = []
+        # (the direction choice, the width field) of a pad that has no
+        # track, or None for a pad that has one.
+        self.port_feed = []
         nums = [str(i + 1) for i in range(len(ports))]
         # The rows of the ports use their own grid, in the same way as the
-        # lumped elements: a box that holds the number of the port, then
-        # what the geometry gives, then the controls. Column 1 grows, thus
-        # "Excite" stays at the right end.
+        # lumped elements. Column 1 is empty and grows, thus the label
+        # stays at the left and the controls stay at the right end.
         mid = wx.ALIGN_CENTER_VERTICAL
-        prg = wx.FlexGridSizer(cols=5, vgap=6, hgap=8)
+        prg = wx.FlexGridSizer(cols=6, vgap=6, hgap=8)
         prg.AddGrowableCol(1, 1)
         pbox.Add(prg, 0, wx.ALL | wx.EXPAND, 6)
         self.port_badges = []
@@ -302,42 +308,83 @@ class SettingsDialog(wx.Dialog):
             num = wx.Choice(self, choices=nums)
             num.SetSelection(i)
             num.Enable(len(ports) > 1)
-            # The types are not the same for each port: they come from the
-            # geometry. Thus each choice keeps its own list of values.
-            types = _port_types(p)
-            self.port_types.append([t[1] for t in types])
-            ch = wx.Choice(self, choices=[t[0] for t in types])
-            ch.SetSelection(0)
-            ch.Enable(len(types) > 1)
+            num.SetToolTip("The number assigns the port. Port 1 drives "
+                           "the field and far-field views.")
+            # The type choice holds only the types that the geometry
+            # permits; the label of the row names what the geometry does
+            # not give. The fixed width fits the CPW entry with its gap:
+            # the list can change with the feed direction, and the
+            # control must not change its size with it.
+            # _set_type_choices fills the control below.
+            self.port_types.append([])
+            ch = wx.Choice(self, size=(280, -1))
             exc = wx.CheckBox(self, label="Excite")
             exc.SetValue(True)
+            exc.SetToolTip("Drive this port: one FDTD run for each "
+                           "excited port. Uncheck ports whose S-columns "
+                           "you don't need.")
             # _refresh_port_badges puts the text in. The pad, the
-            # footprint and the net go into the tooltip: the box stays
-            # short, and no data goes away.
-            badge = _badge(self, "")
-            badge.SetToolTip(p["label"])
+            # footprint and the net go into the tooltip.
+            label = wx.StaticText(self, label="")
+            label.SetToolTip(p["label"])
             self.port_badges.append(p)
-            prg.Add(badge, 0, wx.EXPAND)
-            prg.Add(wx.StaticText(self, label=_port_note(p)), 0, mid)
-            prg.Add(num, 0, mid)
+            # The feed controls. A pad with a track shows the direction
+            # and the width that the track gives, locked (off). A pad
+            # with no track can still sit on a line that the user drew
+            # as a shape or as a polygon (the feed of a patch antenna,
+            # for example): the user then gives the two values, and a
+            # de-embedded port becomes possible. Refer to NOTES.md,
+            # backlog item 16.
+            note = wx.BoxSizer(wx.HORIZONTAL)
+            dch = wx.Choice(self, choices=["No Line", "+x (→)", "-x (←)",
+                                           "+y (↑)", "-y (↓)"])
+            wtc = wx.TextCtrl(self, size=(50, -1))
+            if p.get("direction"):
+                dch.SetSelection({(1, 0): 1, (-1, 0): 2, (0, 1): 3,
+                                  (0, -1): 4}[tuple(p["direction"])])
+                wtc.ChangeValue("%g" % (p.get("track_width")
+                                        or min(p["width"], p["length"])))
+                for c in (dch, wtc):
+                    c.SetToolTip("The track at this pad gives this value")
+                    c.Enable(False)
+                self.port_feed.append(None)
+            else:
+                dch.SetSelection(0)
+                dch.SetToolTip("Direction of the feed line at this pad, "
+                               "as drawn in the preview above (+y points "
+                               "up). Pick one to enable de-embedded port "
+                               "types on copper drawn as shapes/polygons.")
+                wtc.ChangeValue("%g" % min(p["width"], p["length"]))
+                wtc.SetToolTip("Width of the feed line (the track width "
+                               "a routed track would provide)")
+                self.port_feed.append((dch, wtc))
+                dch.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_feed(k))
+            note.Add(wx.StaticText(self, label="Feed:"), 0, mid)
+            note.Add(dch, 0, mid | wx.LEFT, 4)
+            note.Add(wx.StaticText(self, label="Width:"), 0,
+                     mid | wx.LEFT, 6)
+            note.Add(wtc, 0, mid | wx.LEFT, 4)
+            note.Add(wx.StaticText(self, label="mm"), 0, mid | wx.LEFT, 2)
+            extra = _port_note(p)
+            if extra:
+                note.Add(wx.StaticText(self, label=extra), 0,
+                         mid | wx.LEFT, 8)
+            prg.Add(label, 0, mid)
+            prg.Add((0, 0))   # the empty column that grows
+            prg.Add(note, 0, mid)
             prg.Add(ch, 0, mid)
+            prg.Add(num, 0, mid)
             prg.Add(exc, 0, mid | wx.LEFT, 12)
             self.port_choices.append(ch)
             self.port_order.append(num)
             self.port_excite.append(exc)
-            # The user can change the number of a port. Thus the box must
-            # follow it, or it tells a number that is not correct.
+            self._set_type_choices(i, p)
+            # The user can change the number of a port. Thus the label
+            # must follow it, or it tells a number that is not correct.
             num.Bind(wx.EVT_CHOICE, self._on_port_number)
-        self._port_badge_ctrls = [prg.GetItem(5 * i).GetWindow()
+        self._port_badge_ctrls = [prg.GetItem(6 * i).GetWindow()
                                   for i in range(len(ports))]
         self._refresh_port_badges()
-        if len(ports) > 1:
-            pbox.Add(wx.StaticText(
-                self, label="The number assigns the port (excited in that "
-                "order; port 1 drives the field/far-field views). Excite = "
-                "drive this port (one FDTD run each); uncheck ports whose "
-                "S-columns you don't need."),
-                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         # (ref, the Model checkbox, the package choice, the ESL, the ESR)
         self.para_rows = []
@@ -441,6 +488,16 @@ class SettingsDialog(wx.Dialog):
 
         rbox = section("Simulation")
         rg = grid_in(rbox)
+        cpus = os.cpu_count() or 1
+        self.threads = row(rg, "CPU threads:", wx.Choice(
+            self, choices=["Auto"] + [str(i) for i in range(1, cpus + 1)]))
+        self.threads.SetSelection(0)
+        self.threads.SetToolTip(
+            "Threads for the FDTD engine. Each thread takes one slice of "
+            "the domain, and all the threads wait for the slowest one at "
+            "each timestep. Thus a small model is fastest with few "
+            "threads, and a large model with more. \"Auto\" reads the "
+            "size of the mesh and selects the value.")
         self.mesh = row(rg, "Mesh resolution:", wx.Choice(
             self, choices=[m.capitalize() for m in MESH_LEVELS]))
         self.mesh.SetSelection(1)
@@ -502,17 +559,80 @@ class SettingsDialog(wx.Dialog):
         self._refresh_port_badges()
         evt.Skip()
 
+    def _on_feed(self, k):
+        """Update the port types that a manual feed direction permits.
+
+        The gap of each candidate direction comes from extract(), in
+        port["gaps"]. Thus a drawn CPW (a center line from a polygon,
+        and not from a track) gets the CPW type for a direction that
+        has copper at the two sides. The detector reads the geometry
+        only, not the nets: that copper must really be ground.
+        """
+        p = self.port_badges[k]
+        dch, _ = self.port_feed[k]
+        sel = dch.GetSelection()
+        key = ("+x", "-x", "+y", "-y")[sel - 1] if sel > 0 else None
+        gap = (p.get("gaps") or {}).get(key) if key else None
+        self._set_type_choices(k, dict(p, direction=[1, 0] if key else None,
+                                       gap=gap))
+
+    def _set_type_choices(self, k, p):
+        """Fill the type choice of row k for the geometry in `p`.
+
+        The selection stays on the same type when the new list still
+        holds it; a type that went away falls back to Lumped. The
+        control goes off when Lumped is the one entry.
+        """
+        rows = _port_choices(p)
+        ch = self.port_choices[k]
+        old = self.port_types[k]
+        cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0 \
+            else "lumped"
+        self.port_types[k] = [v for _, v in rows]
+        ch.Set([label for label, _ in rows])
+        ch.SetSelection(self.port_types[k].index(cur)
+                        if cur in self.port_types[k] else 0)
+        ch.Enable(len(rows) > 1)
+
+    def _feed_of(self, i):
+        """Give (direction, width in mm) of a manual feed, or give None.
+
+        The result is None for a pad that has a track, for "No Line",
+        and for a width that is not a positive number.
+        """
+        fc = self.port_feed[i]
+        if not fc:
+            return None
+        dch, wtc = fc
+        sel = dch.GetSelection()
+        if sel <= 0:
+            return None
+        try:
+            w = float(wtc.GetValue())
+        except ValueError:
+            return None
+        if w <= 0:
+            return None
+        return ([[1, 0], [-1, 0], [0, 1], [0, -1]][sel - 1], w)
+
     def _refresh_port_badges(self):
-        """Put "Port N" into the box of each port.
+        """Put "Port N" and its problem tags into the label of each port.
 
         N is the number that the choice of that row gives now, and not the
         number of the selection. Two rows can hold the same number for a
-        short time; _on_ok refuses that.
+        short time; _on_ok refuses that. The tags name what the geometry
+        does not give: "[No Track]", "[No Coplanar Gap]".
         """
         for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
                                  self.port_badges):
-            note = "" if p.get("direction") else " (no track, lumped only)"
-            badge.SetLabel("Port %d%s" % (num.GetSelection() + 1, note))
+            parts = ["Port %d" % (num.GetSelection() + 1)]
+            if not p.get("direction"):
+                parts.append("[No Track]")
+                if not any((p.get("gaps") or {}).values()):
+                    parts.append("[No Coplanar Gap]")
+            elif not p.get("gap"):
+                parts.append("[No Coplanar Gap]")
+            badge.SetLabel(" ".join(parts))
         self.Layout()
 
     def _any_modelled(self):
@@ -592,6 +712,20 @@ class SettingsDialog(wx.Dialog):
             wx.MessageBox("Select at least one port to excite.",
                           "RFsim", wx.ICON_ERROR)
             return
+        # A de-embedded type on a manual feed needs a direction and a
+        # width. The type list already removes the de-embedded types
+        # when the direction goes back to "No Line", thus this test
+        # catches only a width that does not parse.
+        for i, (ch, vals) in enumerate(zip(self.port_choices,
+                                           self.port_types)):
+            if (self.port_feed[i] and vals[ch.GetSelection()] != "lumped"
+                    and self._feed_of(i) is None):
+                wx.MessageBox(
+                    "Port %d: a de-embedded port needs a feed direction "
+                    "and a positive width in mm."
+                    % (self.port_order[i].GetSelection() + 1),
+                    "RFsim", wx.ICON_ERROR)
+                return
         evt.Skip()
 
     def _pkg_of(self, ch):
@@ -640,9 +774,16 @@ class SettingsDialog(wx.Dialog):
             "h": float(self.h.GetValue()),
             "cu_t": float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
+            # "Auto" is item 0 and it gives None: the runner then reads the
+            # cell count and selects the value. Item i gives i threads.
+            "threads": self.threads.GetSelection() or None,
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
             "port_types": [vals[c.GetSelection()] for c, vals
                            in zip(self.port_choices, self.port_types)],
+            # The manual feed of each pad that has no track: (direction,
+            # width in mm), or None. rfsim.py puts it into the port.
+            "port_feed": [self._feed_of(i)
+                          for i in range(len(self.port_choices))],
             "order": [c.GetSelection() + 1 for c in self.port_order],
             # "excite" holds the FINAL port numbers, after the change of
             # the numbers. The runner compares against these numbers.

@@ -20,6 +20,7 @@ CSXCAD.
 - Define the substrate: εr, tanδ, the height and the copper thickness.
 - Mesh the structure at three resolutions: coarse, medium and fine.
 - The solver runs in a different process. Thus, a crash cannot stop KiCad, and the same runner also works without a GUI.
+- Run the engine on more than one CPU thread. "Auto" reads the size of the mesh and selects the count.
 
 ## Installation
 
@@ -59,12 +60,12 @@ CSXCAD.
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog. It shows the ports, the R/L/C parts and the domain, and it follows the "Domain margin" field and the "Model" checkboxes.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the port impedance, the number and the type of each port, the substrate, the mesh preset, the domain margin and the output directory.
+4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the port impedance, the number and the type of each port, the substrate, the CPU threads, the mesh preset, the domain margin and the output directory.
 5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports
 
-The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. A port that has no track shows `Port N (no track, lumped only)`.
+The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. The label of a port names what the geometry does not give, for example `Port N [No Track]` or `Port N [No Coplanar Gap]`. Each port shows a "Feed" control with the direction and the width of its line. A routed track fills the two values and locks them. If the feed line is drawn copper (a graphic shape or a polygon, usual for a patch antenna), select the direction and enter the width yourself: the de-embedded types then become available. The port lies on the copper along that direction, so make sure the line is really there - the plugin gives a warning when it finds none. The type list holds only the types that the geometry permits, and the CPW entry shows the measured gap. For a CPW port the copper at the two sides of the line must be ground: the plugin measures the gap, but it cannot know the net.
 
 A port needs a ground return: copper on the reference layer (the adjacent copper layer) that reaches at least the edge of the pad. Without it the plugin refuses to run. A CPW is the one exception, because its return path is the copper at the sides of the line.
 
@@ -72,10 +73,10 @@ The dialog gives only the types that the geometry permits:
 
 | Type | It needs | Notes |
 |---|---|---|
-| Lumped | nothing | It drives the pad against the reference layer. It operates everywhere. |
-| Microstrip (MSL) | a track that leaves the pad on the x-axis or the y-axis | De-embedded. |
-| Coplanar (CPW) | the same track, and copper at the two sides of it | The plugin measures the gap from the board. |
-| Stripline | the same track, and a plane above the strip and a plane below it | Put the port on an inner layer. |
+| Lumped Port | nothing | It drives the pad against the reference layer. It operates everywhere. |
+| Microstrip (MSL) Port | a track that leaves the pad on the x-axis or the y-axis, or a "Feed" direction and width | De-embedded. |
+| Coplanar (CPW) Port | a track or a "Feed" direction, and copper at the two sides of it | The plugin measures the gap from the board. |
+| Stripline Port | a track or a "Feed" direction, and a plane above the strip and a plane below it | Put the port on an inner layer. |
 
 > **The CPW port and the stripline port are new, and their results are not correct yet.** They find the correct mode, but openEMS v0.37.0-rc1 does not calibrate their probes correctly: the impedance of the line is 20% to 50% too small, and the S-parameters can give out more power than they take in. The plugin gives a warning when it finds this condition. Use these two types to look at the fields and at the mode, and do not use their numbers.
 

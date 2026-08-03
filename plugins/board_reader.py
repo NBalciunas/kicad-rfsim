@@ -500,6 +500,29 @@ def _coplanar_gap(polys, x, y, direction):
     return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
 
 
+def copper_along(polys, x, y, direction):
+    """Tell if copper lies along `direction` from the pad at (x, y).
+
+    The dialog can give a manual feed direction for a pad that has no
+    track (a feed line that the user drew as a shape or as a polygon).
+    An MSL port adds its own strip over the port box. If the board has
+    no copper there, the simulation then contains a line that the board
+    does not have. The test takes the samples of _coplanar_gap: 0.4 mm
+    to 2.0 mm from the pad.
+    """
+    if not direction or not polys:
+        return False
+    axis = 1 if direction[0] else 0
+    dx, dy = direction
+    on = 0
+    for step in (0.4, 0.8, 1.2, 1.6, 2.0):
+        # An odd number of hits shows that the sample point is inside
+        # the copper.
+        on += len(_ray_hits(x + dx * step, y + dy * step, axis, 1,
+                            polys)) % 2
+    return on >= 3
+
+
 def _feed_direction(board, pad):
     """Give the direction of the track that goes out of the pad.
 
@@ -695,7 +718,6 @@ def _port(board, pad, number, copper_layers):
     direction, track_w = _feed_direction(board, pad)
     ext_x = _mm(bbox.GetWidth())
     ext_y = _mm(bbox.GetHeight())
-    along_y = bool(direction and direction[0] == 0)
     fp = pad.GetParentFootprint()
     return {
         "number": number,
@@ -709,8 +731,11 @@ def _port(board, pad, number, copper_layers):
         "height": height,        # strip to each plane, mm; None = no stripline
         "asymmetry": round(asym, 4),
         "gap": None,             # the coplanar gap; extract() measures it
-        "width": ext_x if along_y else ext_y,     # extent across the feed
-        "length": ext_y if along_y else ext_x,    # extent along the feed
+        # On the axes of the board: length is the pad extent in x, and
+        # width is the pad extent in y. The lumped port box of the runner
+        # and the port marks of the GUI read them in that way.
+        "width": ext_y,
+        "length": ext_x,
         "direction": direction,
         "track_width": track_w,
         "type": "lumped",  # overwritten from the settings dialog
@@ -807,8 +832,15 @@ def extract(board, pads, margin_mm, substrate=None):
     # exist first, thus this operation comes after the extraction of the
     # polygons. A port that has a gap can use a CPW port.
     for p in ports:
-        p["gap"] = _coplanar_gap(polygons.get(p["layer"], []),
-                                 p["x"], p["y"], p["direction"])
+        polys_l = polygons.get(p["layer"], [])
+        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        if not p["direction"]:
+            # The gap of each candidate direction, for the manual feed
+            # of the dialog. A drawn CPW has no track, and the dialog
+            # offers the CPW type only for a direction that has a gap.
+            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
+                         for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
+                                        ("+y", [0, 1]), ("-y", [0, -1]))}
         if p["height"] and p["asymmetry"] > 0.25:
             warnings.append(
                 "Port %d (%s): the strip is not centered between %s and %s "
@@ -835,14 +867,18 @@ def extract(board, pads, margin_mm, substrate=None):
         else:
             # A CPW carries its return current on the coplanar ground of
             # its own layer. Thus a board with no plane below the pad is
-            # correct for a CPW port, and the guard must not stop it.
-            if p["gap"]:
+            # correct for a CPW port, and the guard must not stop it. A
+            # drawn CPW has no track: then the gap of a candidate
+            # direction counts too.
+            g = p["gap"] or next((v for v in (p.get("gaps") or {}).values()
+                                  if v), None)
+            if g:
                 warnings.append(
                     "Port %d (%s): no copper on reference layer %s, but "
                     "there is coplanar copper %.3f mm from the feed line. "
                     "Set this port to \"Coplanar (CPW)\": a Lumped or "
                     "Microstrip port has no return path here."
-                    % (p["number"], p["label"], p["ref_layer"], p["gap"]))
+                    % (p["number"], p["label"], p["ref_layer"], g))
                 continue
             raise ValueError(
                 "Port %d (%s): no copper on reference layer %s under the "
@@ -920,7 +956,12 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
     # A ray that goes exactly through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
-    print("geometry OK (%d cases)" % (len(_GEO) + 1))
+    # The copper test for a manual feed direction: the strip goes to +x
+    # from the origin, thus +x is on copper and -x is empty board.
+    assert copper_along([_STRIP], 0.0, 0.0, [1, 0]), "copper_along +x"
+    assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
+    assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
+    print("geometry OK (%d cases)" % (len(_GEO) + 4))
 
     _PKGS = [("R_0402_1005Metric", "0402"), ("C_0603_1608Metric", "0603"),
              ("R_0201_0603Metric", "0201"), ("L_1210_3225Metric", "1210"),

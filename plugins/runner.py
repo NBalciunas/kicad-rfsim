@@ -90,6 +90,51 @@ def _time_step_factor(model):
     return min(1.0, 1.0 / (max(ind) * 1e9) ** 0.5)
 
 
+def _cell_count(fdtd):
+    """Give the number of mesh cells of a model that build() made."""
+    grid = fdtd.GetCSX().GetGrid()
+    n = 1
+    for axis in "xyz":
+        n *= grid.GetQtyLines(axis)
+    return n
+
+
+def _threads(s, cells):
+    """Give the number of threads for the engine.
+
+    settings["threads"] has priority. A value of None (the "Auto" item of
+    the dialog) gives the value that this function calculates.
+
+    openEMS keeps the "fastest" engine if the caller names no engine, and
+    that engine leaves the largest part of the machine idle. The
+    multithreaded engine gives one slice of the domain to each thread,
+    and it synchronizes the threads at each timestep. Thus the slowest
+    thread controls the speed of all the others, and a thread that gets a
+    small slice costs more than it gives.
+
+    The count must therefore follow the size of the model. These are
+    measurements on an i7-12700K (8 performance cores, 4 efficiency
+    cores), in MCells/s:
+
+        cells      2 thr   4 thr   8 thr   12 thr
+        62 k        27.6    35.4    28.4    20.8
+        147 k       34.7    52.5    59.4    50.6
+        504 k       44.2    74.3   105.9   104.9
+        1.62 M      56.1    94.6   135.3   145.1
+
+    Thus a small model is fastest at 4 threads, and 8 threads make it 20%
+    slower. Above about 150 k cells, 8 threads is the best value that a
+    usual desktop gives. More than 8 gives little: the efficiency cores
+    take a slice of the same size as a performance core, and each
+    performance core then waits for them at every timestep.
+    """
+    n = s.get("threads")
+    if n:
+        return max(1, int(n))
+    cap = min(8, os.cpu_count() or 1)
+    return min(cap, 4) if cells < 150000 else cap
+
+
 def _parasitic_components(e):
     """Give the parasitic components of the body of a part.
 
@@ -168,14 +213,17 @@ def _port_geometry(model, res):
         need = {"cpw": "gap", "stripline": "height"}.get(p["type"])
         if (p["type"] in TL_PORTS and p["direction"]
                 and (need is None or p.get(need))):
-            w = p.get("track_width") or p["width"]
+            d = p["direction"]
+            # width and length are on the axes of the board. The extent
+            # across the feed is width for a feed on x, and length for a
+            # feed on y.
+            w = p.get("track_width") or (p["width"] if d[0] else p["length"])
             length = max(3.0 * w, 6.0 * res)
             if len(plist) == 2:
                 q = plist[1 - (p["number"] - 1)]
                 dist = max(abs(q["x"] - p["x"]), abs(q["y"] - p["y"]))
                 if dist > 0:
                     length = min(length, 0.3 * dist)
-            d = p["direction"]
             # Only a microstrip port goes down to the reference plane.
             z_far = z_ref if p["type"] == "msl" else z_top
             if d[0]:
@@ -645,7 +693,14 @@ def main(model_path, outdir):
         print("[rfsim] === excitation %d/%d (port %d) ==="
               % (step + 1, len(exc), k + 1), flush=True)
         fdtd, ports, ff = build(model, k, res, want_ff=True)
-        fdtd.Run(sim_path, cleanup=True)
+        if step == 0:
+            # The mesh is the same for each excitation. Thus calculate the
+            # thread count one time, and tell the user which value it is.
+            threads = _threads(s, _cell_count(fdtd))
+            print("[rfsim] engine: multithreaded, %d thread(s)" % threads,
+                  flush=True)
+        fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
+                 numThreads=threads)
         bad = _diverged(sim_path)
         if bad:
             tsf = _time_step_factor(model) or 1.0
