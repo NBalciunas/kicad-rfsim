@@ -203,7 +203,7 @@ def _port_geometry(model, res):
     z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
     ports = []
     plist = model["ports"]
-    for p in plist:
+    for i_p, p in enumerate(plist):
         z_top = z_of[p["layer"]]
         z_ref = z_of[p["ref_layer"]]
         g = dict(p, z_top=z_top, z_ref=z_ref)
@@ -220,7 +220,11 @@ def _port_geometry(model, res):
             w = p.get("track_width") or (p["width"] if d[0] else p["length"])
             length = max(3.0 * w, 6.0 * res)
             if len(plist) == 2:
-                q = plist[1 - (p["number"] - 1)]
+                # The OTHER port, by list position. Do not index with
+                # p["number"]: a hand-edited model.json can hold numbers
+                # that are not 1..N in list order, and that gives the
+                # wrong port with no message.
+                q = plist[1 - i_p]
                 dist = max(abs(q["x"] - p["x"]), abs(q["y"] - p["y"]))
                 if dist > 0:
                     length = min(length, 0.3 * dist)
@@ -280,8 +284,15 @@ def _mesh(model, ports, res):
             xs.update((min(px), max(px)))
             ys.update((min(py), max(py)))
     for v in model["vias"]:
-        xs.update((v["x"] - v["r"], v["x"] + v["r"]))
-        ys.update((v["y"] - v["r"], v["y"] + v["r"]))
+        # The CENTER line is necessary, and not only the two edges.
+        # openEMS makes a metal primitive into PEC on the edges of the
+        # Yee grid, thus a mesh NODE must lie inside the barrel. The two
+        # edge lines put the nodes exactly on the surface of the cylinder
+        # and leave the inside empty. openEMS then writes "Unused
+        # primitive (type: Cylinder)" and the via conducts nothing: the
+        # planes stay separate and the model is incorrect with no error.
+        xs.update((v["x"] - v["r"], v["x"], v["x"] + v["r"]))
+        ys.update((v["y"] - v["r"], v["y"], v["y"] + v["r"]))
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
@@ -310,6 +321,31 @@ def _mesh(model, ports, res):
                 # domain do not correct it.
                 pos = c + side * (hw + g["gap"])
                 step = g["gap"] / CPW_GAP_CELLS
+                while step < res:
+                    pos += side * step
+                    across.add(pos)
+                    step *= 1.4
+        elif g["type"] == "stripline":
+            # A stripline needs the same treatment as the strip of a CPW
+            # port. Before, only the CPW branch existed, thus the mesh
+            # step across a stripline came from the WAVELENGTH: the strip
+            # of 0.6 mm of validation/ is narrower than one cell of
+            # 2.355 mm at the coarse preset. That board measured 19.4 ohm
+            # against 38.9 ohm from IPC-2141; with these cells it gives
+            # 39.2 ohm at the SAME preset, and the mesh grows only from
+            # 57x39x48 lines to 57x57x48. The medium mesh gave 34.6 ohm
+            # without them, which is how the mesh was found to be the
+            # cause.
+            across = ys if g["prop_dir"] == "x" else xs
+            c = g["y"] if g["prop_dir"] == "x" else g["x"]
+            hw = 0.5 * g["msl_width"]
+            half = max(1, CPW_STRIP_CELLS // 2)
+            for side in (-1, 1):
+                for i in range(1, half + 1):
+                    across.add(c + side * hw * i / half)
+                # Grade outward from the edge of the strip, as the CPW
+                # branch grades outward from the gap.
+                pos, step = c + side * hw, hw / half
                 while step < res:
                     pos += side * step
                     across.add(pos)
@@ -343,6 +379,13 @@ def _mesh(model, ports, res):
                 zs.update((c["z"] + k * step, c["z"] - k * step))
 
     tol = min(res / 8.0, margin / 20.0)
+    # The cells across a stripline strip are much smaller than the mesh
+    # step. Thus the merge would remove them again, in the same way as it
+    # would remove the lines of a CPW gap.
+    strips = [g["msl_width"] for g in ports
+              if g["type"] == "stripline" and g.get("msl_width")]
+    if strips:
+        tol = min(tol, 0.25 * min(strips) / CPW_STRIP_CELLS)
     gaps = [g["gap"] for g in ports if g["type"] == "cpw" and g["gap"]]
     if gaps:
         # A CPW gap is usually much smaller than the mesh step. Thus the
@@ -397,11 +440,17 @@ def build(model, excite_idx, res, want_ff=False):
                    [br["x1"], br["y1"], d["z_top"]], priority=1)
 
     copper_prop = {}
+    port_layers = {p["layer"] for p in model["ports"]}
     for c in model["copper_layers"]:
+        polys = model["polygons"].get(c["name"], [])
+        # A layer with no copper needs no property. A property with no
+        # primitive makes openEMS print "No primitives found".
+        if not polys and c["name"] not in port_layers:
+            continue
         prop = csx.AddConductingSheet("cu_" + c["name"], conductivity=5.8e7,
                                       thickness=max(c["thickness"], 1e-4) * 1e-3)
         copper_prop[c["name"]] = prop
-        for poly in model["polygons"].get(c["name"], []):
+        for poly in polys:
             pts = np.array(poly).T  # shape (2, N)
             prop.AddLinPoly(pts, "z", c["z"], 0, priority=10)
 
@@ -740,17 +789,20 @@ def main(model_path, outdir):
 
     # A passive structure cannot give out more power than it takes in.
     # Thus the sum of |S|^2 down an excited column must not go above 1.
-    # A value above 1 shows that the voltage probes or the current probes
-    # of the port are not calibrated: the S-parameters are then incorrect,
-    # and not only inexact. Refer to NOTES.md, "The impedance of a CPW
+    # A value above 1 shows that the S-parameters are incorrect, and not
+    # only inexact. On a CPW port or a stripline port the usual cause is
+    # a mesh that is too coarse across the line: the measurement on the
+    # stripline board gave sum|S|^2 = 1.71 at the coarse preset and 1.05
+    # at the medium preset. Refer to NOTES.md, "The impedance of a CPW
     # port and of a stripline port is too small".
     for k in exc:
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
         if power.max() > 1.05:
             print("[rfsim] WARNING: port %d gives out more power than it "
                   "takes in (max sum|S|^2 = %.2f). The S-parameters of this "
-                  "port are NOT reliable. This occurs with the CPW port and "
-                  "the stripline port of openEMS v0.37.0-rc1."
+                  "port are NOT reliable. On a CPW port or a stripline port "
+                  "the usual cause is a mesh that is too coarse across the "
+                  "line. Run again at the medium or the fine preset."
                   % (k + 1, power.max()), flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)

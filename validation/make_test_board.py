@@ -18,6 +18,13 @@ BOARD = (0.0, 0.0, 40.0, 20.0)
 # with eps_eff 2.88, on a dielectric of 1.53 mm and er 4.5.
 CPW_W, CPW_GAP = 1.5, 0.3
 SL_W = 0.6      # the strip of the stripline board, on In1.Cu of 4 layers
+# The stitching vias of via_fence(), which no validation board calls.
+# A real CPW and a real stripline tie their reference conductors
+# together, but a measurement showed that the stitching does NOT change
+# the impedance on these boards: refer to via_fence(). The drill is
+# large on purpose, because the mesh puts a line at each side of a via
+# and at its center: a small drill makes thin cells and a slow run.
+VIA_DRILL, VIA_PITCH, VIA_OFFSET = 0.6, 3.0, 3.0
 
 
 def _pad_fp(board, ref, x, y, net, size=None):
@@ -47,6 +54,40 @@ def _edge_cuts(board, corners):
         e.SetLayer(pcbnew.Edge_Cuts)
         e.SetWidth(FromMM(0.1))
         board.Add(e)
+
+
+def via_fence(board, net, offset=VIA_OFFSET):
+    """Put a row of through vias at each side of the line.
+
+    The vias tie all the copper layers of `net` together. Call this
+    function BEFORE the zone filler, thus each zone connects to them.
+
+    No validation board calls it, and a board does not need it to give
+    the correct impedance: a stitched board and the board with no via
+    give the SAME value at the medium mesh (34.3 against 34.6 ohm). The
+    error of the stripline board was the MESH, and `runner._mesh` now
+    corrects it. Refer to NOTES.md, "The impedance of a CPW port and of
+    a stripline port is too small".
+
+    Two traps if you use this function. A THROUGH via puts an annular
+    ring on EVERY copper layer, and that includes the layer of the strip;
+    `SetRemoveUnconnected(True)` with `SetKeepStartEnd(True)` keeps the
+    ring off a layer that has no copper of this net. And a via that is
+    small against the mesh step makes thin cells beside coarse ones,
+    which is its own error.
+    """
+    x = X0 - 2.0
+    while x <= X1 + 2.0 + 1e-9:
+        for y in (TRACE_Y - offset, TRACE_Y + offset):
+            v = pcbnew.PCB_VIA(board)
+            v.SetPosition(VECTOR2I(FromMM(x), FromMM(y)))
+            v.SetDrill(FromMM(VIA_DRILL))
+            v.SetWidth(FromMM(VIA_DRILL + 0.3))
+            v.SetViaType(pcbnew.VIATYPE_THROUGH)
+            v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+            v.SetNetCode(net.GetNetCode())
+            board.Add(v)
+        x += VIA_PITCH
 
 
 def _zone(board, layer, net, corners):
@@ -155,7 +196,13 @@ def make_stripline(path):
     pads = []
     for ref, x in (("P1", X0), ("P2", X1)):
         pad = _pad_fp(board, ref, x, TRACE_Y, rf, size=SL_W)
-        pad.SetLayer(pcbnew.In1_Cu)  # LSET does not take a list in KiCad 10
+        # The layer SET must hold In1.Cu, and not only the item layer:
+        # SaveBoard writes the set, and PAD.GetLayer() of a board that
+        # comes from a file always gives F.Cu. LSET does not take a list
+        # in KiCad 10, thus the code adds the layer to an empty set.
+        lset = pcbnew.LSET()
+        lset.AddLayer(pcbnew.In1_Cu)
+        pad.SetLayerSet(lset)
         pads.append(pad)
 
     t = pcbnew.PCB_TRACK(board)

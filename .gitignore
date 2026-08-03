@@ -4,4 +4,8 @@ NOTES.md
 __pycache__/
 .venv/
 validation/out_*/
+# make_test_board.py writes the board, and KiCad writes the .kicad_pro
+# and .kicad_prl beside it.
 validation/*.kicad_pcb
+validation/*.kicad_pro
+validation/*.kicad_prl

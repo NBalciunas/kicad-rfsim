@@ -78,13 +78,13 @@ The dialog gives only the types that the geometry permits:
 | Coplanar (CPW) Port | a track or a "Feed" direction, and copper at the two sides of it | The plugin measures the gap from the board. |
 | Stripline Port | a track or a "Feed" direction, and a plane above the strip and a plane below it | Put the port on an inner layer. |
 
-> **The CPW port and the stripline port are new, and their results are not correct yet.** They find the correct mode, but openEMS v0.37.0-rc1 does not calibrate their probes correctly: the impedance of the line is 20% to 50% too small, and the S-parameters can give out more power than they take in. The plugin gives a warning when it finds this condition. Use these two types to look at the fields and at the mode, and do not use their numbers.
+> **The CPW port gives an impedance that is about 20% too small.** It finds the correct mode, and its eps_eff agrees with the theory, but the value of Z0 does not, and a finer mesh does not correct it. Use the CPW port to look at the fields and at the mode, and treat its impedance as approximate. The microstrip port and the stripline port agree with closed-form theory. The plugin gives a warning when a column of the S-matrix gives out more power than it takes in, which shows S-parameters that you must not use.
 
 Each excited port costs one full FDTD run. Port 1 supplies the field views and the far-field views.
 
 ### The impedance of a line
 
-A de-embedded port measures the impedance of the line and its effective permittivity from its own probes. The results window shows them in the "Line impedance" view, and the solver writes `lines.json`. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
+A de-embedded port measures the impedance of the line and its effective permittivity from its own probes. The results window shows the real part and the imaginary part of the impedance in the "Line Impedance" view, and the solver writes all the values, the effective permittivity included, to `lines.json`. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
 
 The coarse preset gives a value that is too small: the microstrip of `validation/` gives 44 ohm at coarse, 47 ohm at medium, and the theory gives 50 ohm. Use medium or fine when the number is important.
 
@@ -148,7 +148,9 @@ Used to validate R, L and C against the theory for a series impedance between tw
 * **`run_lumped.py [mesh]`**  
 Used to validate the lumped elements: a series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the ideal resistive divider. A gap that stays open gives about 0 dB.
 * **`run_cpw.py [mesh] [cpw|stripline]`**  
-Used to validate the CPW port and the stripline port against closed-form theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory. The test does not hold the impedance of the line: refer to the note about the two new port types above.
+Used to validate the CPW port and the stripline port against closed-form theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory. The stripline holds its impedance against the theory too. The CPW holds its impedance only against the value that the pipeline gives today: refer to the note about the CPW port above.
+* **`test_ports.py`**  
+Used to validate the geometry of the ports and the mesh: the box of each of the four types, the fallback to a lumped port, and the mesh line at the center of each via. It needs no KiCad and no solver, thus it takes some seconds. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
 Used to validate the full path from the board to the Touchstone file. A microstrip line of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  

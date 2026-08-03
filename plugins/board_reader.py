@@ -89,6 +89,24 @@ def _lname(layer_id):
     return pcbnew.BOARD.GetStandardLayerName(layer_id)
 
 
+def _pad_layer_id(pad):
+    """Give the id of the copper layer of a pad.
+
+    PAD.GetLayer() gives F.Cu for each pad that comes from a file, also
+    for a pad on an inner layer or on the back. Thus it cannot find a
+    stripline. The layer set of the pad keeps the real layer. A pad on
+    more than one copper layer, for example a through-hole pad, has no
+    single layer: then use GetLayer(), as before.
+    """
+    cu = [lid for lid in pad.GetLayerSet().Seq() if pcbnew.IsCopperLayer(lid)]
+    return cu[0] if len(cu) == 1 else pad.GetLayer()
+
+
+def _pad_layer(pad):
+    """Give the name of the copper layer of a pad."""
+    return _lname(_pad_layer_id(pad))
+
+
 def _mm(v):
     return round(pcbnew.ToMM(int(v)), 5)
 
@@ -523,6 +541,30 @@ def copper_along(polys, x, y, direction):
     return on >= 3
 
 
+def _touches(polys, box):
+    """Tell if any polygon of `polys` overlaps the box (x0, y0, x1, y1).
+
+    This is a test of the bounding boxes. An antenna feed pad is at the
+    EDGE of the ground pour, thus a test on the center of the pad is too
+    strict. Refer to the guard for the ground return in extract().
+    """
+    px0, py0, px1, py1 = box
+    for poly in polys:
+        xs = [pt[0] for pt in poly]
+        ys = [pt[1] for pt in poly]
+        if (min(xs) <= px1 and max(xs) >= px0
+                and min(ys) <= py1 and max(ys) >= py0):
+            return True
+    return False
+
+
+def _pad_box(pad):
+    """Give the bounding box of a pad as (x0, y0, x1, y1) in model mm."""
+    bb = pad.GetBoundingBox()
+    return (_mm(bb.GetLeft()), -_mm(bb.GetBottom()),
+            _mm(bb.GetRight()), -_mm(bb.GetTop()))
+
+
 def _feed_direction(board, pad):
     """Give the direction of the track that goes out of the pad.
 
@@ -536,7 +578,7 @@ def _feed_direction(board, pad):
     for t in board.GetTracks():
         if isinstance(t, pcbnew.PCB_VIA) or t.GetNetCode() != pad.GetNetCode():
             continue
-        if not t.IsOnLayer(pad.GetLayer()):
+        if not t.IsOnLayer(_pad_layer_id(pad)):
             continue
         for a, b in ((t.GetStart(), t.GetEnd()), (t.GetEnd(), t.GetStart())):
             if bbox.Contains(a):
@@ -639,8 +681,8 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             warnings.append("%s: not an SMD part (THT barrel not modeled) "
                             "-> not modeled" % ref)
             continue
-        layer = _lname(pads[0].GetLayer())
-        if layer not in z_of or _lname(pads[1].GetLayer()) != layer:
+        layer = _pad_layer(pads[0])
+        if layer not in z_of or _pad_layer(pads[1]) != layer:
             warnings.append("%s: pads not both on one copper layer -> not "
                             "modeled" % ref)
             continue
@@ -687,7 +729,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
 
 
 def _port(board, pad, number, copper_layers):
-    layer_name = _lname(pad.GetLayer())
+    layer_name = _pad_layer(pad)
     names = [c["name"] for c in copper_layers]
     if layer_name not in names:
         raise ValueError("Pad of port %d is not on a copper layer in the stackup"
@@ -831,9 +873,22 @@ def extract(board, pads, margin_mm, substrate=None):
     # Measure the coplanar gap of each port. The copper of the layer must
     # exist first, thus this operation comes after the extraction of the
     # polygons. A port that has a gap can use a CPW port.
-    for p in ports:
+    for p, pad in zip(ports, pads):
         polys_l = polygons.get(p["layer"], [])
         p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        # A stripline needs copper on the two planes. _port reads the
+        # stackup only, thus it gives a height for each strip on an inner
+        # layer, also when the second plane is empty above the pad. The
+        # port would then put its voltage probes into open board. The
+        # guard below tests the reference layer; this test is for the
+        # second plane.
+        if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
+                                        _pad_box(pad)):
+            warnings.append(
+                "Port %d (%s): no copper on %s above the pad, so this is "
+                "not a stripline. The Stripline port type is not offered."
+                % (p["number"], p["label"], p["ref_layer2"]))
+            p["height"], p["ref_layer2"], p["asymmetry"] = None, None, 0.0
         if not p["direction"]:
             # The gap of each candidate direction, for the manual feed
             # of the dialog. A drawn CPW has no track, and the dialog
@@ -855,16 +910,7 @@ def extract(board, pads, margin_mm, substrate=None):
     # point-in-polygon test if pours with unusual shapes give incorrect
     # results.
     for p, pad in zip(ports, pads):
-        bb = pad.GetBoundingBox()
-        px0, px1 = _mm(bb.GetLeft()), _mm(bb.GetRight())
-        py0, py1 = -_mm(bb.GetBottom()), -_mm(bb.GetTop())
-        for poly in polygons.get(p["ref_layer"], []):
-            xs = [pt[0] for pt in poly]
-            ys = [pt[1] for pt in poly]
-            if (min(xs) <= px1 and max(xs) >= px0
-                    and min(ys) <= py1 and max(ys) >= py0):
-                break
-        else:
+        if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
             # A CPW carries its return current on the coplanar ground of
             # its own layer. Thus a board with no plane below the pad is
             # correct for a CPW port, and the guard must not stop it. A

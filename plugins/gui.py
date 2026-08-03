@@ -988,7 +988,7 @@ class ResultsFrame(wx.Frame):
         except Exception:
             pass
         if self._lines and self._lines.get("ports"):
-            plots.append("Line impedance")
+            plots.append("Line Impedance")
         self._field = {}
         self._anim = None
         if self.model:
@@ -1052,7 +1052,7 @@ class ResultsFrame(wx.Frame):
 
         if sel.startswith("Board layout"):
             self._plot_board(ax)
-        elif sel.startswith("Line impedance"):
+        elif sel.startswith("Line Impedance"):
             self._plot_lines(ax)
         elif sel.startswith(("E-Field", "H-Field")):
             self._plot_field(ax, sel[0], pnum)
@@ -1127,47 +1127,45 @@ class ResultsFrame(wx.Frame):
         _draw_board(ax, self.model)
 
     def _plot_lines(self, ax):
-        """Draw the impedance of the line and eps_eff of each port.
+        """Draw the real part and the imaginary part of Z0 of each port.
 
         These values come from the voltage probes and the current probes
         of a de-embedded port. Thus they are the impedance of the real
         track on the real stackup, and not the reference impedance of the
         system. A lumped port has no line, thus it is not in this view.
 
+        A good line gives an almost real Z0: Im(Z0) stays near zero and
+        it is a little below it. A large Im(Z0) shows a bad extraction,
+        or a lossy line.
+
         The formula divides by the field at the measurement plane. Thus
         the values are noisy where the excitation has little energy,
-        usually at the two ends of the sweep. The limits of the axes use
+        usually at the two ends of the sweep. The limits of the axis use
         percentiles, and not the extreme values.
         """
         import numpy as np
         d = self._lines
         f_ghz = np.asarray(d["freq_hz"], float) / 1e9
-        ax2 = ax.twinx()
-        z_all, e_all = [], []
-        for num in sorted(d["ports"], key=int):
+        z_all = []
+        nums = sorted(d["ports"], key=int)
+        for num in nums:
             p = d["ports"][num]
-            z, e = np.asarray(p["Z0_real"], float), np.asarray(p["eps_eff"],
-                                                               float)
-            z_all.append(z)
-            e_all.append(e)
-            ln, = ax.plot(f_ghz, z, label="Port %s: Re(Z0)" % num)
-            ax2.plot(f_ghz, e, "--", lw=1.0, color=ln.get_color(),
-                     label="Port %s: eps_eff" % num)
+            re, im = (np.asarray(p["Z0_real"], float),
+                      np.asarray(p["Z0_imag"], float))
+            z_all += [re, im]
+            # One port needs no tag in the legend, because the name of the
+            # port adds nothing.
+            tag = " (Port %s)" % num if len(nums) > 1 else ""
+            ln, = ax.plot(f_ghz, re, label="Re(Z0)" + tag)
+            ax.plot(f_ghz, im, "--", lw=1.0, color=ln.get_color(),
+                    label="Im(Z0)" + tag)
 
-        def limits(vals, floor):
-            lo, hi = np.percentile(np.concatenate(vals), [2, 98])
-            pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
-            return max(floor, lo - pad), hi + pad
-
-        ax.set_ylim(*limits(z_all, 0.0))
-        ax2.set_ylim(*limits(e_all, 1.0))
-        ax.set_ylabel("Line impedance Re(Z0) / ohm")
-        ax2.set_ylabel("Effective permittivity")
-        ax2.grid(False)
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        ax.legend(h1 + h2, l1 + l2, fontsize=8)
-        ax.set_title("Transmission line impedance")
+        lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
+        pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_ylabel("Impedance / ohm")
+        ax.legend(fontsize=8)
+        ax.set_title("Line Impedance")
 
     def _plot_field(self, ax, kind, port=None):
         """Show an animation of the wave on the mid-plane of the substrate.
