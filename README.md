@@ -145,6 +145,8 @@ set KIPY="C:\Program Files\KiCad\10.0\bin\python.exe"
 Used to validate R, L and C against the theory for a series impedance between two Z0 lines. |S21| stays flat for R, it decreases for L, and it increases for C. The opposite slopes cannot come from an element that the solver ignored.
 * **`run_lumped.py [mesh]`**  
 Used to validate the lumped elements: a series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the ideal resistive divider. A gap that stays open gives about 0 dB.
+* **`run_shunt.py [mesh] [packages|two]`**  
+Used to validate the package parasitics: a capacitor in shunt to ground makes a deep notch in |S21| at its series resonance. The tool measures the frequency of the notch with no body inductance and with it, and the difference of the two must give the body inductance back. A frequency does not change with a scale error of the amplitude, thus this test can measure a part that is smaller than 1 nH. With `packages` it does this for each of the 8 chip packages that the plugin knows, on the land pattern of KiCad for that package. With `two` it puts two parts in series to ground, thus it tests two elements that have an effect on each other.
 * **`run_cpw.py [mesh] [cpw|stripline]`**  
 Used to validate the CPW port and the stripline port against closed-form theory. Each type holds its effective permittivity and its impedance against the theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory.
 * **`test_ports.py`**  

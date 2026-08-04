@@ -255,6 +255,94 @@ def test_lumped_element_keeps_its_cells():
     print("lumped element cells OK (%d cases, both axes)" % len(cases))
 
 
+def test_shunt_element_and_its_via():
+    """A part in SHUNT keeps its cells, and its via keeps its center line.
+
+    The board of `run_lumped.make_shunt` puts a via in the ground copper
+    below the part, thus the lines of the via and the faces of the
+    element are on the same axis. Two rules must hold TOGETHER: the faces
+    of the box do not move (the anchors, refer to the test above), and
+    the via keeps a line at its center, or it conducts nothing and
+    openEMS calls it an unused primitive.
+
+    The cases are the land patterns of the libraries of KiCad 10, which
+    `run_lumped.SHUNT_LAND` holds; this file keeps its own copy of the
+    numbers, because it must not import pcbnew. The 0201 gap of 0.18 mm
+    is the smallest box that any board here makes.
+
+    **Why the via is not IN the ground pad.** The annular ring of a via
+    is copper in the model. A drill of 0.6 mm gives a ring of 0.9 mm,
+    which is wider than the 0.46 mm pad of an 0201, thus the ring would
+    bridge a gap of 0.18 mm. The via goes SHUNT_VIA_DROP below the pad
+    for every package, thus the distance from the via to the face of the
+    box is a full pad plus that drop, and no tolerance of the merge can
+    reach it. This test holds that distance.
+    """
+    drop = 0.75   # run_lumped.SHUNT_VIA_DROP
+    # (the length of a pad, the gap, the name)
+    cases = [(1.000, 0.50, "the land with no package"),
+             (0.460, 0.18, "0201"),
+             (0.540, 0.48, "0402"),
+             (1.125, 1.80, "1206"),
+             (1.225, 4.70, "2512")]
+    for pad_l, gap, name in cases:
+        m = model("msl")
+        y0 = -12.7 - gap
+        e = lumped(gap, 1.0, x0=19.5, y0=y0, ny="y")
+        m["lumped_elements"] = [e]
+        # The lower face of the box is the top edge of pad 2. The via is
+        # one pad and one drop below it.
+        vy = y0 - pad_l - drop
+        m["vias"] = [{"x": 20.0, "y": vy, "r": 0.3, "z0": 0.0, "z1": 1.46}]
+        e, (_, in_y) = box_lines(m, RES)
+        assert len(in_y) >= 2, \
+            "%s: %d mesh line(s) in the box on y, want 2 or more" \
+            % (name, len(in_y))
+        for want in (e["start"][1], e["stop"][1]):
+            assert near(in_y, want, 1e-9), "%s: the face at y=%g moved" \
+                % (name, want)
+        _, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+        assert near(ys, vy, 1e-9), \
+            "%s: the via lost the line at its center, thus it conducts " \
+            "nothing" % name
+    print("shunt element and via OK (%d land patterns)" % len(cases))
+
+
+def test_two_elements_near_each_other():
+    """TWO element boxes on one axis must each keep their cells.
+
+    The board of `run_lumped.make_shunt2` puts a C and an L in series
+    from the line to ground, thus two boxes lie on the y axis with one
+    pad between them. `_mesh` gives the faces of EVERY element to
+    `_merge_close` as anchors, and this test holds that the second
+    element does not lose its cells to the first.
+
+    The separations go down to 0.20 mm, which is smaller than any pad
+    that a real board has between two parts. The tolerance comes from
+    one quarter of the smallest box, thus a box of 0.5 mm gives 0.125 mm
+    and the two elements stay apart.
+    """
+    for sep in (2.00, 1.00, 0.50, 0.20):
+        m = model("msl")
+        gap = 0.5
+        a = lumped(gap, 1.0, x0=19.5, y0=-12.7, ny="y")
+        b = lumped(gap, 1.0, x0=19.5, y0=-12.7 - gap - sep, ny="y")
+        b["ref"] = "L1"
+        m["lumped_elements"] = [a, b]
+        _, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+        for e in (a, b):
+            lo, hi = e["start"][1], e["stop"][1]
+            inside = [v for v in ys if lo - 1e-9 <= v <= hi + 1e-9]
+            assert len(inside) >= 2, \
+                "a separation of %.2f mm: %s has %d mesh line(s) in its box" \
+                % (sep, e["ref"], len(inside))
+            for want in (lo, hi):
+                assert near(ys, want, 1e-9), \
+                    "a separation of %.2f mm: the face of %s at y=%g moved" \
+                    % (sep, e["ref"], want)
+    print("two elements near each other OK (4 separations)")
+
+
 def test_lumped_element_does_not_wreck_the_mesh():
     """The clamp for the elements must not make a very fine mesh.
 
@@ -278,5 +366,7 @@ if __name__ == "__main__":
     test_strip_cells()
     test_cpw_z_cells()
     test_lumped_element_keeps_its_cells()
+    test_shunt_element_and_its_via()
+    test_two_elements_near_each_other()
     test_lumped_element_does_not_wreck_the_mesh()
     print("PASS")
