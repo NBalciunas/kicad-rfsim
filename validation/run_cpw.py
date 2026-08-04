@@ -174,8 +174,8 @@ def main(mesh="coarse", kind="cpw"):
     assert power.max() <= 1.15, (
         "the power goes to %.3f. A passive line cannot give out more power "
         "than it takes in, thus the S-parameters of this port are incorrect "
-        "and not only inexact. Refer to NOTES.md, \"The mesh of a CPW port "
-        "and of a stripline port\"." % power.max())
+        "and not only inexact. The mesh across the line is the usual "
+        "cause." % power.max())
     print("PASS (eps_eff, the geometry and Z0)")
 
 

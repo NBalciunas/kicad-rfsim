@@ -38,8 +38,9 @@ RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
 # The port types that openEMS de-embeds. Each one gives the impedance of
 # the line and the propagation constant. A lumped port does not.
 TL_PORTS = ("msl", "cpw", "stripline")
-# The number of mesh cells across each gap of a CPW port, and across the
-# strip. Refer to NOTES.md, "The mesh of a CPW port".
+# The number of mesh cells across each gap of a CPW port, and across
+# the strip. The voltage probe of the port integrates E over the cells
+# in the gap, thus the wavelength must not control that step.
 CPW_GAP_CELLS = 4
 CPW_STRIP_CELLS = 8
 
@@ -174,18 +175,36 @@ def _diverged(sim_path):
     return None
 
 
-def _merge_close(vals, tol):
+def _merge_close(vals, tol, anchors=()):
     """Sort the coordinates and merge those that are nearer than tol.
 
     This prevents very thin mesh cells.
+
+    A value in `anchors` does NOT move: the merged line takes the value
+    of the anchor, and not the mean of the two. A lumped element is a box
+    between two mesh lines and it has no line of its own inside, thus a
+    face that the mean moves can leave the box with no cell at all.
+
+    The failure is measured, and it is not an open circuit: the copper of
+    the two pads meets on that one line, thus the gap CLOSES and the run
+    gives a piece of line. A series 50 ohm in a 50 ohm line gave S21
+    -0.16 dB in the place of -4.5 dB, and S11 -17.4 dB in the place of
+    -10.3 dB. openEMS gives NO warning for it.
     """
+    keep = set(round(a, 9) for a in anchors)
     vals = sorted(vals)
     out = [vals[0]]
+    held = [round(vals[0], 9) in keep]
     for v in vals[1:]:
         if v - out[-1] < tol:
-            out[-1] = 0.5 * (out[-1] + v)
+            if round(v, 9) in keep and not held[-1]:
+                out[-1] = v          # the anchor takes the place of the mean
+                held[-1] = True
+            elif not held[-1]:
+                out[-1] = 0.5 * (out[-1] + v)
         else:
             out.append(v)
+            held.append(round(v, 9) in keep)
     return out
 
 
@@ -301,9 +320,8 @@ def _mesh(model, ports, res):
             # the current probe goes around the strip. The E field has a
             # peak at each edge of the strip. Thus the mesh step across
             # the line must come from the gap, and not from the
-            # wavelength: a gap of 0.3 mm with a step of 2.4 mm gives an
-            # impedance that is about 30% too small. Refer to NOTES.md,
-            # "The mesh of a CPW port".
+            # wavelength: a gap of 0.3 mm with a step of 2.4 mm gives
+            # an impedance that is about 30% too small.
             across = ys if g["prop_dir"] == "x" else xs
             c = g["y"] if g["prop_dir"] == "x" else g["x"]
             hw = 0.5 * g["msl_width"]
@@ -389,9 +407,8 @@ def _mesh(model, ports, res):
         # board of 1.6 mm), which is much larger than a usual gap of
         # 0.3 mm. The capacitance of the line then comes out about 27% too
         # large, and the impedance about 21% too small. The value does NOT
-        # converge with the mesh preset, thus the fault does not look like
-        # a mesh fault. Refer to NOTES.md, "The mesh of a CPW port and of
-        # a stripline port". The step is the step of the gap cells, thus
+        # converge with the mesh preset, thus the fault does not look
+        # like a mesh fault. The step is the step of the gap cells, thus
         # it makes no cell smaller than the y mesh of the gap already is.
         st = g["gap"] / CPW_GAP_CELLS
         for side in (-1, 1):
@@ -439,7 +456,28 @@ def _mesh(model, ports, res):
     tol_z = min(tol, 0.05)
     if gaps:
         tol_z = min(tol_z, 0.25 * min(gaps) / CPW_GAP_CELLS)
-    return (_merge_close(xs, tol), _merge_close(ys, tol),
+    # The box of a lumped element has 2 lines only: its faces. Thus the
+    # merge must keep them apart, in the same way as it keeps the lines
+    # of a CPW gap apart. An element whose box is smaller than tol keeps
+    # ONE line, the copper of its two pads then meets on that line, and
+    # the part becomes a piece of track with no message. Measured at the
+    # coarse preset with a margin of 4 mm, where tol is 0.200 mm: a
+    # series 50 ohm in a gap of 0.15 mm gave S21 -0.16 dB, against
+    # -4.50 dB with the clamp and -3.5 dB from the theory. A part with a
+    # gap of 0.5 mm is not affected (-4.56 dB with and without it). The
+    # anchors below then hold the two faces on their own coordinates,
+    # because a face that the mean moves can also leave the box with no
+    # cell.
+    le_x, le_y = [], []
+    for e in model.get("lumped_elements", []):
+        le_x += [e["start"][0], e["stop"][0]]
+        le_y += [e["start"][1], e["stop"][1]]
+    boxes = [abs(b - a) for a, b in zip(le_x[::2], le_x[1::2])]
+    boxes += [abs(b - a) for a, b in zip(le_y[::2], le_y[1::2])]
+    boxes = [b for b in boxes if b > 0]
+    if boxes:
+        tol = min(tol, 0.25 * min(boxes))
+    return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
             _merge_close(zs, tol_z))
 
 
@@ -520,6 +558,15 @@ def build(model, excite_idx, res, want_ff=False):
             print("[rfsim] WARNING: this openEMS build has no LEtype; the "
                   "package parasitics are OFF (ideal elements)", flush=True)
         for e in model.get("lumped_elements", []):
+            # A part whose refdes does not give the type comes out of
+            # the extraction with type None and value None, and the
+            # dialog removes it when the user models nothing. A
+            # model.json that a person edits can still hold one.
+            if not e.get("type") or e.get("value") is None:
+                print("[rfsim] WARNING: lumped %s has no type or no value; "
+                      "not modeled (the gap between its pads stays open)"
+                      % e.get("ref", "?"), flush=True)
+                continue
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(
                     e["start"], e["stop"], priority=15)
@@ -840,9 +887,8 @@ def main(model_path, outdir):
     # only inexact. On a CPW port or a stripline port the usual cause is
     # a mesh that is too coarse near the line: the measurement on the
     # stripline board gave sum|S|^2 = 1.71 at the coarse preset and 1.05
-    # at the medium preset, and the CPW board gave 1.08 before it had its
-    # cells above and below the plane of the line. Refer to NOTES.md,
-    # "The mesh of a CPW port and of a stripline port".
+    # at the medium preset, and the CPW board gave 1.08 before it had
+    # its cells above and below the plane of the line.
     for k in exc:
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
         if power.max() > 1.05:

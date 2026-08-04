@@ -116,10 +116,9 @@ def test_fallback_to_lumped():
 def test_port_length_uses_list_position():
     """The 2-port length cap must use the list position, not the number.
 
-    NOTES.md tells the user to edit model.json by hand. Such a file can
-    hold numbers that are not 1..N in list order. An index by number then
-    reads the wrong port, or goes past the end of the list, with no
-    message.
+    A user can edit model.json by hand. Such a file can hold numbers
+    that are not 1..N in list order. An index by number then reads the
+    wrong port, or goes past the end of the list, with no message.
     """
     m = model("msl")
     m["ports"][0]["number"], m["ports"][1]["number"] = 7, 3
@@ -164,8 +163,7 @@ def test_cpw_z_cells():
     within about one gap width of the surface. With the step of the
     dielectric rule alone (0.38 mm on a board of 1.6 mm, against a gap of
     0.3 mm) the capacitance came out about 27% too large and the
-    impedance 21% too small, at EVERY preset. Refer to NOTES.md,
-    "The mesh of a CPW port and of a stripline port".
+    impedance 21% too small, at EVERY preset.
     """
     m = model("cpw", gap=0.3)
     _, _, zs = runner._mesh(m, runner._port_geometry(m, RES), RES)
@@ -198,6 +196,80 @@ def test_cpw_z_cells():
     print("CPW z cells OK (%g mm above and below, planes kept)" % want)
 
 
+def lumped(gap, width, x0=20.0, y0=-10.0, ny="x"):
+    """Give an element box of `gap` along ny and `width` across it."""
+    a, b = (gap, width) if ny == "x" else (width, gap)
+    return {"ref": "C1", "type": "C", "value": 1e-12, "ny": ny,
+            "layer": "In1.Cu", "package": "0402", "esl": 0.25e-9, "esr": 0.03,
+            "start": [x0, y0, 0.973333], "stop": [x0 + a, y0 + b, 0.973333],
+            "pads": [[x0 - 0.5, y0], [x0 + a + 0.5, y0]]}
+
+
+def box_lines(m, res, margin=4.0):
+    """Give the mesh lines that lie ON or IN the box of element 0."""
+    m = dict(m, settings=dict(m["settings"], margin_mm=margin))
+    xs, ys, _ = runner._mesh(m, runner._port_geometry(m, res), res)
+    e = m["lumped_elements"][0]
+    out = []
+    for lines, k in ((xs, 0), (ys, 1)):
+        lo, hi = e["start"][k], e["stop"][k]
+        out.append([v for v in lines if lo - 1e-9 <= v <= hi + 1e-9])
+    return e, out
+
+
+def test_lumped_element_keeps_its_cells():
+    """The box of a lumped element must hold a cell, at every mesh.
+
+    _mesh adds the two faces of the box and nothing else, and
+    _merge_close joined the lines that are nearer to each other than
+    min(res/8, margin/20). Thus an element whose box was smaller than
+    that tolerance kept ONE line and its box held no cell. The copper of
+    the two pads then meets on that line: the gap CLOSES and the part
+    becomes a piece of track. A run of the solver measured it - a series
+    50 ohm in a gap of 0.15 mm gave S21 -0.16 dB, against -4.50 dB with
+    the correction - and openEMS gave no warning at all.
+    """
+    m = model("msl")
+    # (the gap of the part, the width, res, margin, the name)
+    cases = [(0.50, 0.50, 2.355, 4.0, "0402 at 6 GHz, margin 4"),
+             (0.30, 0.30, 2.355, 8.0, "0201 at 6 GHz, margin 8"),
+             (0.20, 0.30, 2.355, 8.0, "01005 at 6 GHz, margin 8"),
+             (0.50, 0.50, 7.070, 20.0, "0402 at 2 GHz, margin 20"),
+             (0.30, 0.30, 7.070, 20.0, "0201 at 2 GHz, margin 20")]
+    for gap, w, res, margin, name in cases:
+        for ny in ("x", "y"):
+            m["lumped_elements"] = [lumped(gap, w, ny=ny)]
+            e, (in_x, in_y) = box_lines(m, res, margin)
+            for k, inside, axis in ((0, in_x, "x"), (1, in_y, "y")):
+                assert len(inside) >= 2, \
+                    "%s (%s-axis): %d mesh line(s) in the box on %s, want 2 " \
+                    "or more; the element is not in the model" \
+                    % (name, ny, len(inside), axis)
+                # The faces must stay where the part is. A face that the
+                # merge MOVES makes the element larger or smaller than
+                # the gap between the pads.
+                for want in (e["start"][k], e["stop"][k]):
+                    assert near(inside, want, 1e-9), \
+                        "%s (%s-axis): the face at %s=%g moved" \
+                        % (name, ny, axis, want)
+    print("lumped element cells OK (%d cases, both axes)" % len(cases))
+
+
+def test_lumped_element_does_not_wreck_the_mesh():
+    """The clamp for the elements must not make a very fine mesh.
+
+    The tolerance comes down to one quarter of the smallest box. Thus a
+    small part must not multiply the number of lines of the full mesh.
+    """
+    m = model("msl")
+    n0 = [len(a) for a in runner._mesh(m, runner._port_geometry(m, RES), RES)]
+    m["lumped_elements"] = [lumped(0.2, 0.3)]
+    n1 = [len(a) for a in runner._mesh(m, runner._port_geometry(m, RES), RES)]
+    assert all(b <= a + 6 for a, b in zip(n0, n1)), \
+        "the element changed the mesh from %s to %s lines" % (n0, n1)
+    print("lumped element mesh cost OK (%s -> %s lines)" % (n0, n1))
+
+
 if __name__ == "__main__":
     test_via_center_line()
     test_flat_and_vertical_ports()
@@ -205,4 +277,6 @@ if __name__ == "__main__":
     test_port_length_uses_list_position()
     test_strip_cells()
     test_cpw_z_cells()
+    test_lumped_element_keeps_its_cells()
+    test_lumped_element_does_not_wreck_the_mesh()
     print("PASS")

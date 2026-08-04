@@ -103,7 +103,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
                                  preview.get("lumped_elements", []),
                                  preview=preview,
-                                 packages=board_reader.package_presets())
+                                 packages=board_reader.package_presets(),
+                                 esr=board_reader.esr_presets())
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
@@ -133,13 +134,23 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             v = para.get(e["ref"])
             if v:
                 e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
+                # A part whose refdes does not give the type comes back
+                # from extract() with type None and value None. The user
+                # selected them in the dialog, thus they go in here. A
+                # part that the board describes keeps its own values,
+                # and the dialog gives None for both.
+                if v.get("type"):
+                    e["type"] = v["type"]
+                if v.get("value") is not None:
+                    e["value"] = v["value"]
         # A part whose Model checkbox is off does not go into the model at
         # all. Its pads stay in the copper, thus the gap between them stays
         # open. This is the same result as the old checkbox for all the
         # parts, and the runner needs no test of its own.
         model["lumped_elements"] = [
             e for e in model["lumped_elements"]
-            if para.get(e["ref"], {}).get("model", True)]
+            if para.get(e["ref"], {}).get("model", True)
+            and e.get("type") and e.get("value") is not None]
         for p, t, f in zip(model["ports"], port_types, port_feed):
             p["type"] = t
             if f and not p["direction"]:

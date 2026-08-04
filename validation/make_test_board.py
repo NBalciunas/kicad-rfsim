@@ -67,8 +67,7 @@ def via_fence(board, net, offset=VIA_OFFSET):
     give the SAME value at the medium mesh (34.3 against 34.6 ohm). A
     solid wall between the two ground conductors of a CPW gave the same
     result on 2026-08-04. The error of both boards was the MESH, and
-    `runner._mesh` now corrects it. Refer to NOTES.md, "The impedance of
-    a CPW port and of a stripline port was too small".
+    `runner._mesh` now corrects it.
 
     Two traps if you use this function. A THROUGH via puts an annular
     ring on EVERY copper layer, and that includes the layer of the strip;

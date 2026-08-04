@@ -5,8 +5,7 @@ JSON file: floats in mm, right-handed coordinates (the y axis points in
 the opposite direction to the y axis of the screen coordinates of KiCad),
 and z=0 at the bottom of the board. The module uses the pcbnew SWIG
 bindings of KiCad 10. The IPC API is not an alternative yet: IPC has no
-function that makes polygons from tracks, arcs or text (refer to
-NOTES.md, "The IPC API").
+function that makes polygons from tracks, arcs or text.
 """
 import math
 import os
@@ -42,6 +41,16 @@ _ESR_OHM = {"C": 0.03, "L": 0.10}
 # match is the correct one. The tests for a digit on each side prevent a
 # match inside the metric code.
 _PKG_RE = re.compile(r"(?<!\d)(%s)(?!\d)" % "|".join(_ESL_NH))
+# These two codes are an imperial size AND a metric size, thus a name
+# that holds one of them alone can be either. A library that puts the
+# metric code first and does not write "Metric" gives an incorrect
+# value, and not "unknown": "C_0603" is an imperial 0603 in the usual
+# libraries, and a metric 0603 (= an imperial 0201) in some others. Each
+# of the other metric codes (1005, 1608, 2012, 3216) is not in the
+# table, thus it gives "unknown", which is safe. The name of KiCad always
+# carries the metric code beside the imperial one, thus the absence of
+# "Metric" is the signal.
+_AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 
 # The largest gap that the code accepts as a coplanar gap, in mm. A gap of
 # a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
@@ -268,7 +277,7 @@ def _stackup(board, substrate=None):
 # function of PAD needed the ERROR_LOC enum, which SWIG did not wrap.
 # KiCad 10 has pcbnew.ERROR_INSIDE. Thus
 # BOARD.ConvertBrdLayerToPolygonalContours can replace all of this code
-# and can also include the text. Refer to the backlog in NOTES.md.
+# and can also include the text.
 
 def _add_outline(ps, pts):
     ps.NewOutline()
@@ -607,35 +616,60 @@ def package_presets():
     return {k: v * 1e-9 for k, v in _ESL_NH.items()}
 
 
-def _package(fp):
-    """Give the imperial package code of a footprint, or give None.
+def esr_presets():
+    """Give the body ESR of each type of part, in ohm.
 
-    The function reads the name of the footprint, for example
-    "R_0402_1005Metric".
+    The dialog needs it for a part whose type the USER selects: the ESR
+    comes from the type, in the same way as it does for a part that the
+    refdes describes. The table stays in this module only.
+    """
+    return dict(_ESR_OHM)
+
+
+def _package(name):
+    """Give (the imperial package code, a warning) for a footprint name.
+
+    The name is the library item name, for example "R_0402_1005Metric".
+    The code is None when the name holds no size that the table knows.
+    The warning is None, or the text of an AMBIGUOUS name: the value that
+    such a name gives is incorrect, and not absent, thus the user must
+    see it.
+    """
+    m = _PKG_RE.search(name or "")
+    if not m:
+        return None, None
+    pkg = m.group(1)
+    if pkg not in _AMBIGUOUS_PKG or "metric" in (name or "").lower():
+        return pkg, None
+    twin, twin_esl = _AMBIGUOUS_PKG[pkg]
+    other = ("an imperial %s (ESL %.2f nH)" % (twin, twin_esl) if twin_esl
+             else "an imperial %s, which this code does not know" % twin)
+    return pkg, ('the footprint "%s" gives the size %s with no metric code '
+                 'beside it, thus that size can be imperial or metric. The '
+                 'model uses the imperial %s (ESL %.2f nH). A METRIC %s is '
+                 '%s: give the values by hand in the dialog if the part is '
+                 'that one.'
+                 % (name, pkg, pkg, _ESL_NH[pkg], pkg, other))
+
+
+def _parasitics(fp, kind):
+    """Give (package, ESL in H, ESR in ohm, warning) for the body of a part.
+
+    An ideal element gives incorrect results above about 1 GHz: the ESL of
+    an 0402 capacitor puts its self-resonance inside a usual sweep. The
+    solver puts these values in series with the value of the part.
     """
     try:
         name = fp.GetFPID().GetUniStringLibItemName()
     except Exception:
-        return None
-    m = _PKG_RE.search(name or "")
-    return m.group(1) if m else None
-
-
-def _parasitics(fp, kind):
-    """Give (package, ESL in H, ESR in ohm) for the body of a part.
-
-    An ideal element gives incorrect results above about 1 GHz: the ESL of
-    an 0402 capacitor puts its self-resonance inside a usual sweep. The
-    solver puts these values in series with the value of the part. Refer
-    to NOTES.md, "Package parasitics".
-    """
-    pkg = _package(fp)
+        name = None
+    pkg, warn = _package(name)
     esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
-    return pkg, esl, _ESR_OHM.get(kind, 0.0)
+    return pkg, esl, _ESR_OHM.get(kind, 0.0), warn
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):
-    """Find the R/L/C parts that have 2 pads in `region`.
+    """Find each part with 2 terminals in `region`.
 
     The result is (elements, warnings). Each element is a box that
     bridges the gap between the two pads of the part. The box is parallel
@@ -644,13 +678,23 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     the parts in `skip_refs`, which hold a port pad. It gives a warning
     for a part that has an unknown value, or that is not on one copper
     layer.
+
+    A refdes that starts with R, L or C gives the TYPE of the part, and
+    the Value field gives its value. **Each other part with 2 terminals
+    also comes back**, with `type` = None and `value` = None: a diode, a
+    ferrite bead, a crystal or a footprint of your own is a 2-terminal
+    part that a user can model as an R, an L or a C. The dialog shows
+    such a part as "Unknown" with its Model checkbox OFF, thus it changes
+    no simulation until the user gives it a type and a value.
     """
     z_of = {c["name"]: c["z"] for c in copper_layers}
     elements, warnings = [], []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         kind = ref[:1].upper()
-        if kind not in ("R", "L", "C") or ref in skip_refs:
+        if kind not in ("R", "L", "C"):
+            kind = None          # the user gives the type in the dialog
+        if ref in skip_refs:
             continue
         if not fp.GetBoundingBox().Intersects(region):
             continue  # not in the simulated area: ignore it, with no warning
@@ -671,23 +715,32 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             # "REF**", or a connector with a name that starts with R,
             # stays quiet. But a real 50-ohm part that has 3 terminals
             # gives a warning.
-            if _parse_value(fp.GetValue(), kind) is not None:
+            # A part whose type the refdes does not give stays quiet
+            # here: a connector, a mounting hole or a footprint of your
+            # own has any number of pads, and a warning for each one is
+            # noise. The same rule holds for the three tests below.
+            if kind and _parse_value(fp.GetValue(), kind) is not None:
                 warnings.append(
                     "%s (value \"%s\") has %d numbered pad(s), not 2 -> not "
                     "modeled. A lumped element bridges exactly two terminals."
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
-            warnings.append("%s: not an SMD part (THT barrel not modeled) "
-                            "-> not modeled" % ref)
+            if kind:
+                warnings.append("%s: not an SMD part (THT barrel not modeled) "
+                                "-> not modeled" % ref)
             continue
         layer = _pad_layer(pads[0])
         if layer not in z_of or _pad_layer(pads[1]) != layer:
-            warnings.append("%s: pads not both on one copper layer -> not "
-                            "modeled" % ref)
+            if kind:
+                warnings.append("%s: pads not both on one copper layer -> not "
+                                "modeled" % ref)
             continue
-        val = _parse_value(fp.GetValue(), kind)
-        if val is None:
+        # A part with no type has no value either: the Value field of a
+        # diode holds a part number, and not a quantity. The dialog asks
+        # the user for both.
+        val = _parse_value(fp.GetValue(), kind) if kind else None
+        if kind and val is None:
             warnings.append("%s: value \"%s\" not understood -> not modeled"
                             % (ref, fp.GetValue()))
             continue
@@ -714,13 +767,16 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             hw = 0.5 * min(_mm(b1.GetWidth()), _mm(b2.GetWidth()))
             start, stop = [c - hw, g0, z], [c + hw, g1, z]
         if g1 - g0 <= 0:
-            warnings.append("%s: pads overlap (no gap to bridge) -> not "
-                            "modeled" % ref)
+            if kind:
+                warnings.append("%s: pads overlap (no gap to bridge) -> not "
+                                "modeled" % ref)
             continue
-        if min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
+        if kind and min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
             warnings.append("%s is placed off-axis; approximated as a %s-axis "
                             "element" % (ref, ny))
-        pkg, esl, esr = _parasitics(fp, kind)
+        pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
+        if pkg_warn:
+            warnings.append("%s: %s" % (ref, pkg_warn))
         elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
                          "layer": layer, "start": start, "stop": stop,
                          "pads": [list(c1), list(c2)],
@@ -835,7 +891,7 @@ def extract(board, pads, margin_mm, substrate=None):
     # _copper_polys does not model the text on copper. Give a warning; do
     # not remove the copper with no message. KiCad 10 can correct this: it
     # has ERROR_INSIDE, and ConvertBrdLayerToPolygonalContours includes
-    # the text. Refer to the backlog in NOTES.md.
+    # the text.
     warnings = []
     if clipped:
         warnings.append(
@@ -1009,11 +1065,23 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
     print("geometry OK (%d cases)" % (len(_GEO) + 4))
 
-    _PKGS = [("R_0402_1005Metric", "0402"), ("C_0603_1608Metric", "0603"),
-             ("R_0201_0603Metric", "0201"), ("L_1210_3225Metric", "1210"),
-             ("C_1005", None), ("SOT-23", None), ("R_2512_6332Metric", "2512")]
-    for _name, _want in _PKGS:
-        _m = _PKG_RE.search(_name)
-        _got = _m.group(1) if _m else None
+    # (the name, the code, does it give a warning?). A name that carries
+    # the metric code is not ambiguous, also when the imperial code is
+    # 0402 or 0603. A bare "C_0603" IS ambiguous: it can be an imperial
+    # 0603 (0.35 nH) or a metric 0603, which is an imperial 0201
+    # (0.20 nH). A bare code that is not also a metric size, such as
+    # 1206, is not ambiguous.
+    _PKGS = [("R_0402_1005Metric", "0402", False),
+             ("C_0603_1608Metric", "0603", False),
+             ("R_0201_0603Metric", "0201", False),
+             ("L_1210_3225Metric", "1210", False),
+             ("C_1005", None, False), ("SOT-23", None, False),
+             ("R_2512_6332Metric", "2512", False),
+             ("C_0603", "0603", True), ("R_0402", "0402", True),
+             ("C_1206", "1206", False), ("", None, False)]
+    for _name, _want, _warn in _PKGS:
+        _got, _msg = _package(_name)
         assert _got == _want, "%s -> %r, want %r" % (_name, _got, _want)
+        assert bool(_msg) == _warn, \
+            "%s -> warning %r, want %s" % (_name, _msg, _warn)
     print("package OK (%d cases)" % len(_PKGS))

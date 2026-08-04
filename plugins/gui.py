@@ -18,10 +18,33 @@ MESH_LEVELS = ["coarse", "medium", "fine"]
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
 KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor"}
-KIND_UNITS = {"R": "ohm", "C": "F", "L": "H"}
-# The multipliers for a value that a person reads, the largest first.
-_ENG = ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""),
-        (1e-3, "m"), (1e-6, "u"), (1e-9, "n"), (1e-12, "p"))
+# The name of the quantity, for the label in front of the value of a part.
+KIND_QUANTITY = {"R": "Resistance", "C": "Capacitance", "L": "Inductance"}
+# The first entry of the type choice, for a part whose refdes does not
+# say what it is (a diode, a ferrite bead, a footprint of your own).
+UNKNOWN_KIND = "Unknown"
+KIND_ORDER = [None] + list(KIND_NAMES)   # the index in the type choice
+# The unit of the field that the user fills in. A number and no prefix,
+# in the same way as the ESR and the ESL fields. The value goes into
+# model.json in SI units.
+ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
+ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
+
+
+def _qty_label(kind):
+    """Give the label in front of the value of a part."""
+    return KIND_QUANTITY.get(kind, "Value") + ":"
+
+
+def _entry_text(kind, value_si):
+    """Give the text of the value field: a number in the unit of the row.
+
+    The unit is ohm, nH or pF. Thus 4.7 kohm becomes "4700" and 10 nH
+    becomes "10". A part with no type has an empty field.
+    """
+    if kind not in ENTRY_SCALE or value_si is None:
+        return ""
+    return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
 SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
@@ -30,33 +53,6 @@ SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
 # The colours of the top view. The preview in the settings dialog and the
 # view in the results window both use them.
 CU_COLORS = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
-
-
-def _badge(parent, text):
-    """Give a small box that holds `text`, for the name or the value of a
-    part.
-
-    The function gives no size to the box. Add it to the grid with
-    wx.EXPAND: then each box fills its column, thus all the boxes of one
-    column have the same width. The colour comes from the system, thus it
-    obeys a dark theme.
-    """
-    t = wx.StaticText(parent, label=text,
-                      style=wx.BORDER_SIMPLE | wx.ALIGN_CENTRE_HORIZONTAL)
-    t.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE))
-    return t
-
-
-def _eng(value, unit):
-    """Give a value with its multiplier, for example "4.7 kohm" or "3.3 nH"."""
-    if value is None:
-        return ""
-    if value == 0:
-        return "0 " + unit
-    for scale, prefix in _ENG:
-        if abs(value) >= scale:
-            return "%g %s%s" % (value / scale, prefix, unit)
-    return "%g %s" % (value, unit)
 
 
 def _port_choices(p):
@@ -207,19 +203,22 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None):
+                 packages=None, esr=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
-        # {the code of the package: the ESL in H}. board_reader keeps the
-        # table, thus there is one source of truth. This module must not
-        # import it: board_reader imports pcbnew.
+        # {the code of the package: the ESL in H} and {the type of the
+        # part: the ESR in ohm}. board_reader keeps both tables, thus
+        # there is one source of truth. This module must not import it:
+        # board_reader imports pcbnew.
         self._packages = dict(packages or {})
+        self._esr = dict(esr or {})
         self._pkg_values = []
+        self.part_rows = []
         self._build(ports, default_outdir, lumped, preview)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(self, label="RFsim v1.0")
+        title = wx.StaticText(self, label="RFsim v1.1")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
@@ -328,8 +327,7 @@ class SettingsDialog(wx.Dialog):
             # with no track can still sit on a line that the user drew
             # as a shape or as a polygon (the feed of a patch antenna,
             # for example): the user then gives the two values, and a
-            # de-embedded port becomes possible. Refer to NOTES.md,
-            # backlog item 16.
+            # de-embedded port becomes possible.
             note = wx.BoxSizer(wx.HORIZONTAL)
             dch = wx.Choice(self, choices=["No Line", "+x (→)", "-x (←)",
                                            "+y (↑)", "-y (↓)"])
@@ -401,44 +399,76 @@ class SettingsDialog(wx.Dialog):
             labels += [CUSTOM_PKG, NO_PARASITICS]
             # One grid for all the rows, and not one sizer for each row.
             # Thus each part of a row stays in a column that agrees from
-            # row to row. The name of the box already says "Lumped
-            # elements", thus a row does not say it again: it starts with
-            # the type and the reference, in the same way as a port row
-            # starts with the name of its pad. Column 2 is an empty
-            # column that grows, thus it holds the two boxes at the left
-            # and the parasitics at the right.
-            lg = wx.FlexGridSizer(cols=12, vgap=6, hgap=8)
-            lg.AddGrowableCol(2, 1)
+            # row to row. A row reads as a sentence:
+            #
+            #   Element "R1"  [Resistor v]  Resistance: [50 v] ohm
+            #       ... Parasitics: [0402 Package v] ESR: [] ESL: [] [x] Model
+            #
+            # Column 5 is an empty column that GROWS, thus the part
+            # stays at the left and the parasitics stay at the right end.
+            lg = wx.FlexGridSizer(cols=15, vgap=6, hgap=8)
+            lg.AddGrowableCol(5, 1)
             lbox.Add(lg, 0, wx.ALL | wx.EXPAND, 6)
             mid = wx.ALIGN_CENTER_VERTICAL
             for e in lumped:
                 i = len(self.para_rows)
                 pkg = e.get("package")
+                kind = e.get("type") or None
                 cb = wx.CheckBox(self, label="Model")
-                cb.SetValue(True)
+                # A part whose type the board does not give starts OFF.
+                # Thus a diode, a ferrite bead or a footprint of your own
+                # changes no simulation until the user selects a type and
+                # gives a value.
+                cb.SetValue(kind is not None)
                 ch = wx.Choice(self, choices=labels)
-                # A package that the code did not read gives "Custom", and
-                # not "No parasitics": the parasitics are on by default.
-                ch.SetSelection(names.index(pkg) if pkg in names
-                                else names.index(CUSTOM_PKG))
-                esl = wx.TextCtrl(self, value="%g" % (
-                    1e9 * (e.get("esl") or 0.0)), size=(55, -1))
-                esr = wx.TextCtrl(self, value="%g" % (e.get("esr") or 0.0),
-                                  size=(55, -1))
-                kind = e.get("type", "")
-                # wx.EXPAND, and no ALIGN: then each box fills its column
-                # and all the boxes of one column are the same width.
-                lg.Add(_badge(self, '%s "%s"' % (KIND_NAMES.get(kind) or "Part",
-                                                 e["ref"])), 0, wx.EXPAND)
-                lg.Add(_badge(self, _eng(e.get("value"),
-                                         KIND_UNITS.get(kind, ""))),
-                       0, wx.EXPAND)
+                # A package that the code did not read gives "Custom" for
+                # a part that the board describes: the parasitics of an
+                # R, an L or a C are on by default, and _ESL_DEFAULT_NH
+                # is the value. A part with NO type gets **"No
+                # parasitics"**: the code knows nothing about its body,
+                # thus it must not invent an ESL for it.
+                start_pkg = (pkg if pkg in names
+                             else CUSTOM_PKG if kind else NO_PARASITICS)
+                ch.SetSelection(names.index(start_pkg))
+                esl0 = "%g" % (1e9 * (e.get("esl") or 0.0))
+                esr0 = "%g" % (e.get("esr") or 0.0)
+                if start_pkg == NO_PARASITICS:
+                    esl0 = esr0 = "0"
+                esl = wx.TextCtrl(self, value=esl0, size=(55, -1))
+                esr = wx.TextCtrl(self, value=esr0, size=(55, -1))
+                # The refdes gives the type and the Value field gives the
+                # number, and the row SHOWS what the parser read. But
+                # both controls stay open: the user knows the part, and
+                # the board does not always say what it is. A refdes
+                # that names no type starts at "Unknown" with an empty
+                # value, because the Value field of a diode holds a part
+                # number and not a quantity.
+                kinds = wx.Choice(self, choices=[UNKNOWN_KIND]
+                                  + list(KIND_NAMES.values()), size=(110, -1))
+                kinds.SetSelection(KIND_ORDER.index(kind) if kind in KIND_ORDER
+                                   else 0)
+                # The unit of the field is fixed (ohm, nH or pF), in the
+                # same way as the ESR and the ESL fields. Thus the user
+                # gives a number and no prefix, and the unit follows the
+                # TYPE alone and not the size of the value.
+                value = wx.TextCtrl(self, value=_entry_text(kind,
+                                                            e.get("value")),
+                                    size=(90, -1))
+                value.Enable(kind is not None)
+                qty = wx.StaticText(self, label=_qty_label(kind))
+                uni = wx.StaticText(self, label=ENTRY_UNITS.get(kind, ""))
+                lg.Add(wx.StaticText(self, label='Element "%s"' % e["ref"]),
+                       0, mid)
+                lg.Add(kinds, 0, mid)
+                lg.Add(qty, 0, mid | wx.LEFT, 6)
+                lg.Add(value, 0, mid)
+                lg.Add(uni, 0, mid)
                 lg.Add((0, 0))   # the empty column that grows
                 lg.Add(wx.StaticText(self, label="Parasitics:"), 0, mid)
                 lg.Add(ch, 0, mid)
                 # R before L, in the sequence of "RLC". There is no third
-                # field: a series capacitance is not a parasitic of these
-                # parts. Refer to NOTES.md, "Package parasitics".
+                # field: a series capacitance is not a parasitic of
+                # these parts.
                 for label, ctrl, unit in (("ESR:", esr, "ohm"),
                                           ("ESL:", esl, "nH")):
                     lg.Add(wx.StaticText(self, label=label), 0, mid | wx.LEFT, 6)
@@ -453,13 +483,17 @@ class SettingsDialog(wx.Dialog):
                 for c in (esl, esr):
                     c.Bind(wx.EVT_TEXT,
                            lambda evt, k=i: self._on_para_edit(k, evt))
+                kinds.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_kind(k))
                 self.para_rows.append((e["ref"], cb, ch, esl, esr))
-            lbox.Add(wx.StaticText(
-                self, label="The values are for the part BODY only: the loop "
-                "of the pads and the tracks is already in the mesh. A preset "
-                "sets the ESL; the ESR comes from the type of the part. Pick "
-                "\"No parasitics\" for an ideal element."),
-                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+                # The controls of the PART itself. They stay beside
+                # para_rows, thus the code that reads the parasitics does
+                # not change.
+                # "esl0" and "esr0" are the values that come back when a
+                # row leaves "No parasitics", which writes 0 over them.
+                self.part_rows.append({"ref": e["ref"], "kind": kinds,
+                                       "value": value, "qty": qty,
+                                       "unit": uni, "last_pkg": start_pkg,
+                                       "esl0": esl0, "esr0": esr0})
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -531,9 +565,9 @@ class SettingsDialog(wx.Dialog):
             # full figure, because there are no labels that need space.
             self._prev_fig = Figure(figsize=(4.9, 2.9))
             self._prev_canvas = FigureCanvasWxAgg(self, -1, self._prev_fig)
-            # FigureCanvasWxAgg gives the native pixel size of the figure
-            # as its minimum size for wx, and this clips the figure. Refer
-            # to the wx problems in NOTES.md.
+            # FigureCanvasWxAgg gives the native pixel size of the
+            # figure as its minimum size for wx, and this clips the
+            # figure. Thus give the canvas a small minimum size.
             self._prev_canvas.SetMinSize((480, 285))
         except Exception:
             self._prev_fig = None
@@ -635,7 +669,7 @@ class SettingsDialog(wx.Dialog):
         Parasitics of a part that the model does not contain have no
         meaning. Thus the fields of a row go off with its Model checkbox.
         """
-        for _, cb, ch, esl, esr in self.para_rows:
+        for i, (_, cb, ch, esl, esr) in enumerate(self.para_rows):
             # A part that the model does not contain has no parasitics.
             # "No parasitics" makes an ideal element, thus its two fields
             # have no meaning either.
@@ -643,6 +677,11 @@ class SettingsDialog(wx.Dialog):
             ch.Enable(on)
             for c in (esl, esr):
                 c.Enable(on and self._pkg_of(ch) != NO_PARASITICS)
+            # The type stays on with the Model off, thus the user can
+            # select it first and model the part after it. The value
+            # needs a type: the unit comes from it.
+            self.part_rows[i]["value"].Enable(
+                on and self._kind_of(i) is not None)
         self._redraw_preview()
         if evt is not None:
             evt.Skip()
@@ -693,6 +732,26 @@ class SettingsDialog(wx.Dialog):
                 "ESL and ESR must be numbers, and not negative.)",
                 "RFsim", wx.ICON_ERROR)
             return
+        # A part that the user models needs a type and a value. A part
+        # whose refdes does not give the type starts with "Unknown" and
+        # with its Model checkbox off, thus this test speaks only when
+        # the user turned that part on and gave it nothing.
+        for i, r in enumerate(self.part_rows):
+            if not self.para_rows[i][1].GetValue():
+                continue
+            if self._kind_of(i) is None:
+                wx.MessageBox(
+                    'Element "%s" has no type. Select Resistor, Capacitor '
+                    "or Inductor, or clear its Model checkbox."
+                    % r["ref"], "RFsim", wx.ICON_ERROR)
+                return
+            v = self._part_value(i)
+            if v is None or v <= 0:
+                wx.MessageBox(
+                    'Element "%s" needs a value in %s: a positive number.'
+                    % (r["ref"], ENTRY_UNITS[self._kind_of(i)]),
+                    "RFsim", wx.ICON_ERROR)
+                return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
             wx.MessageBox("Each pad needs a unique port number.",
@@ -736,21 +795,89 @@ class SettingsDialog(wx.Dialog):
         return float(ctrl.GetValue()) * scale
 
     def _on_package(self, i):
-        """Put the ESL of the package into the field of that row.
+        """Put the values of the package into the fields of that row.
 
-        ChangeValue sends no EVT_TEXT, thus the choice stays on the
-        package. Custom changes nothing: the values of the user stay.
+        Each write uses ChangeValue, which sends no EVT_TEXT. Thus the
+        choice stays where the user put it: SetValue would send the
+        event and _on_para_edit would move the row to "Custom".
+
+        "No parasitics" writes 0 into the two fields and greys them, thus
+        the row shows exactly what the solver gets: an ideal element. The
+        values come back when the row takes a package again - the ESL
+        from the preset, and the ESR from the type of the part.
         """
-        _, _, ch, esl, _ = self.para_rows[i]
+        r = self.part_rows[i]
+        _, _, ch, esl, esr = self.para_rows[i]
         pkg = self._pkg_of(ch)
-        if pkg in self._packages:
-            esl.ChangeValue("%g" % (1e9 * self._packages[pkg]))
+        if pkg == NO_PARASITICS:
+            for c in (esl, esr):
+                c.ChangeValue("0")
+        else:
+            if r["last_pkg"] == NO_PARASITICS:   # the row comes back
+                esl.ChangeValue(r["esl0"])
+                esr.ChangeValue(r["esr0"])
+            if pkg in self._packages:
+                esl.ChangeValue("%g" % (1e9 * self._packages[pkg]))
+        r["last_pkg"] = pkg
         self._on_lumped(None)   # "No parasitics" turns the fields off
 
+    def _kind_of(self, i):
+        """Give the type letter of a row, or None for "Unknown"."""
+        r = self.part_rows[i]
+        return KIND_ORDER[r["kind"].GetSelection()]
+
+    def _on_kind(self, i):
+        """The user selected the type of a part.
+
+        The label of the quantity and the unit follow the type, and the
+        field for the value goes on. "Unknown" turns it off again, and
+        the text stays: the value of the user comes back if the user
+        selects a type again. The NUMBER does not change with the type,
+        thus 50 becomes 50 ohm, 50 nH or 50 pF. The unit beside it says
+        which one.
+        """
+        r = self.part_rows[i]
+        kind = self._kind_of(i)
+        r["qty"].SetLabel(_qty_label(kind))
+        r["unit"].SetLabel(ENTRY_UNITS.get(kind, ""))
+        r["value"].Enable(kind is not None
+                          and self.para_rows[i][1].GetValue())
+        # The ESR of the body comes from the TYPE of the part, in the
+        # same way as it does for a part that the board describes. A row
+        # that is on "No parasitics" keeps its 0 and takes this value
+        # when it goes back to a package. ChangeValue sends no EVT_TEXT,
+        # thus the package choice of that row stays where it is.
+        r["esr0"] = "%g" % self._esr.get(kind, 0.0)
+        if self._pkg_of(self.para_rows[i][2]) != NO_PARASITICS:
+            self.para_rows[i][4].ChangeValue(r["esr0"])
+        self.Layout()
+
+    def _part_value(self, i):
+        """Give the value of a row in SI units, or give None.
+
+        Every row is open, thus the value of every row comes from its
+        field: model.json then holds what the dialog showed, and it
+        stays the one source of truth. The field starts with the value
+        that the Value field of the part gave.
+        """
+        kind = self._kind_of(i)
+        try:
+            return float(self.part_rows[i]["value"].GetValue()) \
+                * ENTRY_SCALE[kind]
+        except (ValueError, KeyError):
+            return None
+
     def _on_para_edit(self, i, evt):
-        """Move the choice of that row to Custom when the user types."""
+        """Move the choice of that row to Custom when the user types.
+
+        Select CUSTOM_PKG by its index, and not the LAST entry:
+        `_pkg_values` ends with "Custom" and then "No parasitics". The
+        last entry gave "No parasitics", thus `_para_value` gave 0 for
+        the ESR and for the ESL and the part became IDEAL, with no
+        message.
+        """
         ch = self.para_rows[i][2]
-        ch.SetSelection(ch.GetCount() - 1)
+        ch.SetSelection(self._pkg_values.index(CUSTOM_PKG))
         evt.Skip()
 
     def get_settings(self):
@@ -790,12 +917,19 @@ class SettingsDialog(wx.Dialog):
             # "Custom" goes through as it is. Thus the log of the solver
             # tells the difference between a value that the user selected
             # and a package that the code could not read.
+            # Every row gives its type and its value, also a row that
+            # the user did not touch: the dialog SHOWS what the parser
+            # read, thus what the dialog shows is what model.json holds.
+            # "type" is None for a row that stays at "Unknown", and
+            # rfsim.py then drops that part.
             "lumped_parasitics": {
                 ref: {"model": cb.GetValue(),
                       "package": self._pkg_of(ch),
                       "esl": self._para_value(ch, esl, 1e-9),
-                      "esr": self._para_value(ch, esr)}
-                for ref, cb, ch, esl, esr in self.para_rows},
+                      "esr": self._para_value(ch, esr),
+                      "type": self._kind_of(i),
+                      "value": self._part_value(i)}
+                for i, (ref, cb, ch, esl, esr) in enumerate(self.para_rows)},
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             # ponytail: these two limits are constant. Put them in the
