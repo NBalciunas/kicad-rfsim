@@ -64,31 +64,26 @@ def _port_choices(p):
 
     A lumped port always operates. Each de-embedded port needs a feed
     direction (a track, or the manual "Feed" control). A CPW port also
-    needs a coplanar gap, and its entry shows the measured gap. A
-    stripline port needs a plane above the strip and a plane below it.
-    The label of the port row names what the geometry does not give.
+    needs a coplanar gap. A stripline port needs a plane above the strip
+    and a plane below it. Each of those two entries carries its measured
+    value in brackets: a value in brackets comes from the board, and the
+    user cannot change it. Both values keep three decimals. The two
+    entries are adjacent, thus a different count of decimals looks
+    arbitrary. Three decimals are also necessary: a stackup that comes
+    from mil gives 0.127 mm and 0.254 mm, and two decimals make the two
+    values equal. The label of the port row names what the geometry does
+    not give.
     """
     out = [PORT_TYPES[0]]
     if p.get("direction"):
         out.append(PORT_TYPES[1])
         if p.get("gap"):
-            out.append(("%s [Coplanar Gap: %.2f mm]"
+            out.append(("%s [Coplanar Gap: %.3f mm]"
                         % (PORT_TYPES[2][0], p["gap"]), "cpw"))
         if p.get("height"):
-            out.append(PORT_TYPES[3])
+            out.append(("%s [Strip to Plane: %.3f mm]"
+                        % (PORT_TYPES[3][0], p["height"]), "stripline"))
     return out
-
-
-def _port_note(p):
-    """Give what the geometry of a port ADDS.
-
-    The label of the port holds the problem tags ("[No Track]"), and
-    the CPW entry of the type choice holds the gap. Thus this text
-    holds only the stripline distance.
-    """
-    if p.get("height"):
-        return "stripline: %.3f mm to each plane" % p["height"]
-    return ""
 
 
 def _use_wxagg():
@@ -207,7 +202,7 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
         ax.legend(handles=handles, loc="upper right", fontsize=8)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("Board layout")
+        ax.set_title("Board Layout")
 
 
 class SettingsDialog(wx.Dialog):
@@ -365,10 +360,6 @@ class SettingsDialog(wx.Dialog):
                      mid | wx.LEFT, 6)
             note.Add(wtc, 0, mid | wx.LEFT, 4)
             note.Add(wx.StaticText(self, label="mm"), 0, mid | wx.LEFT, 2)
-            extra = _port_note(p)
-            if extra:
-                note.Add(wx.StaticText(self, label=extra), 0,
-                         mid | wx.LEFT, 8)
             prg.Add(label, 0, mid)
             prg.Add((0, 0))   # the empty column that grows
             prg.Add(note, 0, mid)
@@ -393,7 +384,7 @@ class SettingsDialog(wx.Dialog):
             # part of the port. There is no checkbox for all the parts:
             # each row has its own "Model" checkbox, in the same way as
             # the "Excite" checkbox of a port.
-            lbox = section("Lumped elements")
+            lbox = section("Lumped Elements")
             # One row for each part. The code reads the package from the
             # name of the footprint. A name that has no code gives
             # "Custom", and the user then puts in the values. "No
@@ -616,23 +607,22 @@ class SettingsDialog(wx.Dialog):
         return ([[1, 0], [-1, 0], [0, 1], [0, -1]][sel - 1], w)
 
     def _refresh_port_badges(self):
-        """Put "Port N" and its problem tags into the label of each port.
+        """Put "Port N" and its problem tag into the label of each port.
 
         N is the number that the choice of that row gives now, and not the
         number of the selection. Two rows can hold the same number for a
-        short time; _on_ok refuses that. The tags name what the geometry
-        does not give: "[No Track]", "[No Coplanar Gap]".
+        short time; _on_ok refuses that. A tag names what stops every
+        de-embedded type: "[No Track]". A coplanar gap that is absent gets
+        no tag. It stops the CPW type alone, and a board that is not a CPW
+        is the usual case. The type choice already shows the measured gap,
+        or leaves the CPW entry out.
         """
         for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
                                  self.port_badges):
-            parts = ["Port %d" % (num.GetSelection() + 1)]
+            label = "Port %d" % (num.GetSelection() + 1)
             if not p.get("direction"):
-                parts.append("[No Track]")
-                if not any((p.get("gaps") or {}).values()):
-                    parts.append("[No Coplanar Gap]")
-            elif not p.get("gap"):
-                parts.append("[No Coplanar Gap]")
-            badge.SetLabel(" ".join(parts))
+                label += " [No Track]"
+            badge.SetLabel(label)
         self.Layout()
 
     def _any_modelled(self):
@@ -996,7 +986,7 @@ class ResultsFrame(wx.Frame):
             f_hz = s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
                                         if "f_start" in s else None)
             ftag = " (f=%g GHz)" % (f_hz / 1e9) if f_hz else ""
-            plots.append("Board layout")
+            plots.append("Board Layout")
             fports = sorted({p for _, p in self.field_h5s})
             for k in ("E", "H"):
                 for p in fports:
@@ -1050,7 +1040,7 @@ class ResultsFrame(wx.Frame):
         m = re.search(r" \(Port (\d+)\)$", sel)
         pnum, base = (int(m.group(1)), sel[:m.start()]) if m else (None, sel)
 
-        if sel.startswith("Board layout"):
+        if sel.startswith("Board Layout"):
             self._plot_board(ax)
         elif sel.startswith("Line Impedance"):
             self._plot_lines(ax)

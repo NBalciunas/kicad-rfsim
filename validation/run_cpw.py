@@ -10,11 +10,8 @@ at each side with a gap of 0.3 mm, and a full plane on B.Cu.
 between a plane on F.Cu and a plane on In2.Cu.
 
 The test compares the measurement of the port against closed-form theory.
-The stripline holds eps_eff AND the impedance of the line against the
-theory. The CPW holds eps_eff against the theory, and its impedance only
-against the value that this pipeline gives today: refer to NOTES.md,
-"The impedance of a CPW port and of a stripline port is too small". The
-eps_eff of a stripline must be exactly er, thus that test is the most
+Each type holds eps_eff AND the impedance of the line against the theory.
+The eps_eff of a stripline must be exactly er, thus that test is the most
 exact one in this directory.
 
 A lumped port or a microstrip port on the same board gives a different
@@ -36,16 +33,11 @@ import make_test_board  # noqa: E402
 import solverenv  # noqa: E402
 
 ER, H = 4.5, 1.53  # the FR4 default values of board_reader, 1.6 mm - 2 * 35 um
-# The stripline port agrees with the theory since the mesh correction of
-# 2026-08-03 (10): _mesh now puts cells ACROSS the strip, as it always
-# did for a CPW port. The test holds the THEORY for that type.
-Z_TOL = {"stripline": 0.08}
-# The CPW port does not agree yet, thus the test holds the value that
-# this pipeline measures now. A change of this band shows a change of the
-# behaviour: examine it, and do not only make the numbers larger. Refer
-# to NOTES.md, "The impedance of a CPW port and of a stripline port is
-# too small".
-Z_TODAY = {"cpw": (36.0, 48.0)}
+# The two types agree with the theory since the mesh corrections of
+# 2026-08-03 (10) and 2026-08-04: _mesh puts cells ACROSS the strip for a
+# stripline port, and cells ABOVE and BELOW the plane of the line for a
+# CPW port. Thus the test holds the THEORY for both types.
+Z_TOL = {"stripline": 0.08, "cpw": 0.08}
 # eps_eff of a stripline must be exactly er. The value sits near +2%,
 # thus the band is 3% and not 2%: a small change of the mesh must not
 # make the test flap.
@@ -155,23 +147,11 @@ def main(mesh="coarse", kind="cpw"):
         assert abs(e / e_th - 1.0) < E_TOL[kind], \
             "eps_eff does not agree with the theory: the port measures the " \
             "incorrect mode"
-        if kind in Z_TOL:
-            assert abs(z / z_th - 1.0) < Z_TOL[kind], (
-                "Z0 %.1f ohm does not agree with the theory %.1f ohm "
-                "(%+.0f%%, band %.0f%%)"
-                % (z, z_th, 100.0 * (z / z_th - 1.0), 100.0 * Z_TOL[kind]))
-        else:
-            lo, hi = Z_TODAY[kind]
-            assert lo <= z <= hi, (
-                "Z0 %.1f ohm is outside the band that this pipeline gives "
-                "today (%.0f to %.0f). Refer to NOTES.md, \"The impedance of "
-                "a CPW port and of a stripline port is too small\"."
-                % (z, lo, hi))
-    if kind in Z_TOL:
-        print("VALIDATED AGAINST THEORY: eps_eff and Z0.")
-    else:
-        print("NOTE: Z0 does not agree with the theory. This is a known open "
-              "item; only eps_eff and the geometry are validated.")
+        assert abs(z / z_th - 1.0) < Z_TOL[kind], (
+            "Z0 %.1f ohm does not agree with the theory %.1f ohm "
+            "(%+.0f%%, band %.0f%%)"
+            % (z, z_th, 100.0 * (z / z_th - 1.0), 100.0 * Z_TOL[kind]))
+    print("VALIDATED AGAINST THEORY: eps_eff and Z0.")
 
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))
     m11 = np.abs(rows[:, 1] + 1j * rows[:, 2])
@@ -184,12 +164,19 @@ def main(mesh="coarse", kind="cpw"):
     power = m11 ** 2 + m21 ** 2
     print("power |S11|^2+|S21|^2: %.3f .. %.3f (a passive line cannot go "
           "above 1)" % (power.min(), power.max()))
+    # The measurements of 2026-08-04: the CPW board gives 1.049 at
+    # the coarse preset and 0.995 at the medium preset, and the stripline
+    # board gives 1.00. Thus a value above 1.05 is a note, and a value
+    # above 1.15 is a defect: the broken stripline gave 1.71 and 1.88.
     if power.max() > 1.05:
-        print("NOTE: the power goes above 1. Thus the S-parameters of this "
-              "port are also incorrect, and not only its impedance. This is "
-              "the same open item.")
-    print("PASS (eps_eff, the geometry and Z0)" if kind in Z_TOL
-          else "PASS (eps_eff and the geometry only)")
+        print("NOTE: the power goes a little above 1. The usual cause is the "
+              "mesh near the line, and the coarse preset sits at 1.05.")
+    assert power.max() <= 1.15, (
+        "the power goes to %.3f. A passive line cannot give out more power "
+        "than it takes in, thus the S-parameters of this port are incorrect "
+        "and not only inexact. Refer to NOTES.md, \"The mesh of a CPW port "
+        "and of a stripline port\"." % power.max())
+    print("PASS (eps_eff, the geometry and Z0)")
 
 
 if __name__ == "__main__":

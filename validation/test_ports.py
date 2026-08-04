@@ -156,10 +156,53 @@ def test_strip_cells():
           % (len(inside), len(out)))
 
 
+def test_cpw_z_cells():
+    """A CPW port needs cells ABOVE and BELOW the plane of the line.
+
+    A CPW has no plane below the strip that holds the field: the field
+    goes from the strip across the two gaps, thus it is at its largest
+    within about one gap width of the surface. With the step of the
+    dielectric rule alone (0.38 mm on a board of 1.6 mm, against a gap of
+    0.3 mm) the capacitance came out about 27% too large and the
+    impedance 21% too small, at EVERY preset. Refer to NOTES.md,
+    "The mesh of a CPW port and of a stripline port".
+    """
+    m = model("cpw", gap=0.3)
+    _, _, zs = runner._mesh(m, runner._port_geometry(m, RES), RES)
+    gap, z_strip = 0.3, 0.973333
+    want = gap / runner.CPW_GAP_CELLS
+    for side in (-1, 1):
+        # The band of one gap width at that side of the plane of the line.
+        out = sorted((z for z in zs if 1e-9 < side * (z - z_strip) <= gap),
+                     reverse=side < 0)
+        steps = [abs(b - a) for a, b in zip([z_strip] + out, out)]
+        assert len(out) >= runner.CPW_GAP_CELLS, \
+            "only %d lines within one gap on the %s side, want %d" \
+            % (len(out), side, runner.CPW_GAP_CELLS)
+        # The band holds 1.5 times the gap cell and not exactly the gap
+        # cell: a line of the dielectric rule can fall between two lines
+        # of this chain, and _merge_close then joins the two that are the
+        # nearest. That moves a line by less than the merge tolerance.
+        assert max(steps) <= 1.5 * want, \
+            "a cell of %g mm on the %s side, want the gap cell %g mm" \
+            % (max(steps), side, want)
+
+    # The chain must NOT move the line of a copper plane. _merge_close
+    # takes the mean of two lines that are near each other, thus a line
+    # of this chain that lands beside a plane pulls the plane off its own
+    # z. openEMS then writes "Unused primitive (type: LinPoly)" and that
+    # copper is not metal, in the same way as the vias of 2026-08-03 (10).
+    for c in m["copper_layers"]:
+        assert near(zs, c["z"], 1e-9), \
+            "the plane %s at z=%g has no mesh line" % (c["name"], c["z"])
+    print("CPW z cells OK (%g mm above and below, planes kept)" % want)
+
+
 if __name__ == "__main__":
     test_via_center_line()
     test_flat_and_vertical_ports()
     test_fallback_to_lumped()
     test_port_length_uses_list_position()
     test_strip_cells()
+    test_cpw_z_cells()
     print("PASS")

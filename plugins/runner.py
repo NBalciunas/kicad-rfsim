@@ -377,6 +377,47 @@ def _mesh(model, ports, res):
         for c in model["copper_layers"]:
             for k in (1, 2):
                 zs.update((c["z"] + k * step, c["z"] - k * step))
+    for g in ports:
+        if g["type"] != "cpw" or not g["gap"]:
+            continue
+        # A CPW port also needs its own cells ABOVE and BELOW the plane of
+        # the line, and their step must come from the GAP. The line of a
+        # CPW has no plane below it that holds the field: the field goes
+        # from the strip across the two gaps, thus it is at its largest
+        # within about one gap width of the surface. The step of the rule
+        # above comes from the thickness of the dielectric (0.38 mm on a
+        # board of 1.6 mm), which is much larger than a usual gap of
+        # 0.3 mm. The capacitance of the line then comes out about 27% too
+        # large, and the impedance about 21% too small. The value does NOT
+        # converge with the mesh preset, thus the fault does not look like
+        # a mesh fault. Refer to NOTES.md, "The mesh of a CPW port and of
+        # a stripline port". The step is the step of the gap cells, thus
+        # it makes no cell smaller than the y mesh of the gap already is.
+        st = g["gap"] / CPW_GAP_CELLS
+        for side in (-1, 1):
+            # Stop at the next copper plane on that side. A line of this
+            # chain that lands NEAR the plane is worse than no line at
+            # all: _merge_close would join the two and MOVE the line of
+            # the plane, and a copper sheet that has no line on it is not
+            # metal. openEMS then writes "Unused primitive (type:
+            # LinPoly)" and the plane conducts nothing, in the same way as
+            # the vias of 2026-08-03 (10).
+            nxt = [c["z"] for c in model["copper_layers"]
+                   if side * (c["z"] - g["z_top"]) > 0]
+            limit = (min(nxt) if side > 0 else max(nxt)) if nxt else None
+            pos, step, n = g["z_top"], st, 0
+            while True:
+                pos += side * step
+                if limit is not None and side * (pos - limit) > -0.25 * st:
+                    break
+                zs.add(pos)
+                n += 1
+                # Grade outward after the cells of the gap, as the branch
+                # across the line does.
+                if n >= CPW_GAP_CELLS:
+                    step *= 1.4
+                if step >= res:
+                    break
 
     tol = min(res / 8.0, margin / 20.0)
     # The cells across a stripline strip are much smaller than the mesh
@@ -392,8 +433,14 @@ def _mesh(model, ports, res):
         # merge can remove the lines in the gap, and the voltage probes
         # of the port then measure across the wrong cells.
         tol = min(tol, 0.25 * min(gaps) / CPW_GAP_CELLS)
+    # The cells above and below the plane of a CPW have the same step as
+    # the cells in the gap. Thus the z merge needs the same tolerance, or
+    # it removes them again.
+    tol_z = min(tol, 0.05)
+    if gaps:
+        tol_z = min(tol_z, 0.25 * min(gaps) / CPW_GAP_CELLS)
     return (_merge_close(xs, tol), _merge_close(ys, tol),
-            _merge_close(zs, min(tol, 0.05)))
+            _merge_close(zs, tol_z))
 
 
 def build(model, excite_idx, res, want_ff=False):
@@ -791,10 +838,11 @@ def main(model_path, outdir):
     # Thus the sum of |S|^2 down an excited column must not go above 1.
     # A value above 1 shows that the S-parameters are incorrect, and not
     # only inexact. On a CPW port or a stripline port the usual cause is
-    # a mesh that is too coarse across the line: the measurement on the
+    # a mesh that is too coarse near the line: the measurement on the
     # stripline board gave sum|S|^2 = 1.71 at the coarse preset and 1.05
-    # at the medium preset. Refer to NOTES.md, "The impedance of a CPW
-    # port and of a stripline port is too small".
+    # at the medium preset, and the CPW board gave 1.08 before it had its
+    # cells above and below the plane of the line. Refer to NOTES.md,
+    # "The mesh of a CPW port and of a stripline port".
     for k in exc:
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
         if power.max() > 1.05:

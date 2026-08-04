@@ -63,7 +63,7 @@ CSXCAD.
 
 ### Ports
 
-The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. The label of a port names what the geometry does not give, for example `Port N [No Track]` or `Port N [No Coplanar Gap]`. Each port shows a "Feed" control with the direction and the width of its line. A routed track fills the two values and locks them. If the feed line is drawn copper (a graphic shape or a polygon, usual for a patch antenna), select the direction and enter the width yourself: the de-embedded types then become available. The port lies on the copper along that direction, so make sure the line is really there - the plugin gives a warning when it finds none. The type list holds only the types that the geometry permits, and the CPW entry shows the measured gap. For a CPW port the copper at the two sides of the line must be ground: the plugin measures the gap, but it cannot know the net.
+The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. The label of a port names what stops every de-embedded type, for example `Port N [No Track]`. Each port shows a "Feed" control with the direction and the width of its line. A routed track fills the two values and locks them. If the feed line is drawn copper (a graphic shape or a polygon, usual for a patch antenna), select the direction and enter the width yourself: the de-embedded types then become available. The port lies on the copper along that direction, so make sure the line is really there - the plugin gives a warning when it finds none. The type list holds only the types that the geometry permits, and each de-embedded entry shows its measured value: the CPW entry shows the gap, and the stripline entry shows `Stripline Port [Strip to Plane: 0.254 mm]`. A value in brackets comes from the board, and you cannot change it. For a CPW port the copper at the two sides of the line must be ground: the plugin measures the gap, but it cannot know the net.
 
 A port needs a ground return: copper on the reference layer (the adjacent copper layer) that reaches at least the edge of the pad. Without it the plugin refuses to run. A CPW is the one exception, because its return path is the copper at the sides of the line.
 
@@ -76,7 +76,7 @@ The dialog gives only the types that the geometry permits:
 | Coplanar (CPW) Port | a track or a "Feed" direction, and copper at the two sides of it | The plugin measures the gap from the board. |
 | Stripline Port | a track or a "Feed" direction, and a plane above the strip and a plane below it | Put the port on an inner layer. |
 
-> **The CPW port gives an impedance that is about 20% too small.** It finds the correct mode, and its eps_eff agrees with the theory, but the value of Z0 does not, and a finer mesh does not correct it. Use the CPW port to look at the fields and at the mode, and treat its impedance as approximate. The microstrip port and the stripline port agree with closed-form theory. The plugin gives a warning when a column of the S-matrix gives out more power than it takes in, which shows S-parameters that you must not use.
+> All three de-embedded types agree with closed-form theory: the microstrip, the CPW and the stripline. The plugin gives a warning when a column of the S-matrix gives out more power than it takes in, which shows S-parameters that you must not use. Run again at the medium or the fine preset when you see it.
 
 Each excited port costs one full FDTD run. Port 1 supplies the field views and the far-field views.
 
@@ -98,7 +98,7 @@ The coarse preset is for a first look. A small lumped element reads too large at
 
 The plugin adds the parasitics of the package to each R/L/C part: an ESL from the package code of the footprint, and an ESR. The values are for the body of the part only, because the mesh already contains the loop of the pads and the tracks. A capacitor becomes ESR + ESL + C, which is the usual model of a real capacitor. An inductor gets its DCR, but the model does not give its self-resonance. Select "No parasitics" in the row of a part for an ideal element, or change `esl` and `esr` in `model.json`.
 
-The "Lumped elements" part of the dialog gives one row for each R/L/C part. Each row shows what the part is and what value the plugin read from the board:
+The "Lumped Elements" part of the dialog gives one row for each R/L/C part. Each row shows what the part is and what value the plugin read from the board:
 
 ```
 [ Resistor "R1"  ] [ 50 ohm ]     Parasitics: [ Custom       ]  ESR: [ 0    ] ohm  ESL: [ 0.4  ] nH  [x] Model
@@ -146,9 +146,9 @@ Used to validate R, L and C against the theory for a series impedance between tw
 * **`run_lumped.py [mesh]`**  
 Used to validate the lumped elements: a series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the ideal resistive divider. A gap that stays open gives about 0 dB.
 * **`run_cpw.py [mesh] [cpw|stripline]`**  
-Used to validate the CPW port and the stripline port against closed-form theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory. The stripline holds its impedance against the theory too. The CPW holds its impedance only against the value that the pipeline gives today: refer to the note about the CPW port above.
+Used to validate the CPW port and the stripline port against closed-form theory. Each type holds its effective permittivity and its impedance against the theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory.
 * **`test_ports.py`**  
-Used to validate the geometry of the ports and the mesh: the box of each of the four types, the fallback to a lumped port, and the mesh line at the center of each via. It needs no KiCad and no solver, thus it takes some seconds. Run it with the python of the solver.
+Used to validate the geometry of the ports and the mesh: the box of each of the four types, the fallback to a lumped port, the mesh line at the center of each via, and the cells that a CPW port and a stripline port need near the line. It needs no KiCad and no solver, thus it takes some seconds. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
 Used to validate the full path from the board to the Touchstone file. A microstrip line of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  
