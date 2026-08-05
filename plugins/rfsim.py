@@ -132,6 +132,13 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                      substrate)
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
+            if v and e.get("rlc"):
+                # The "rfsim" field gives the WHOLE part. The row of the
+                # dialog can only turn it off, thus its package, its ESL
+                # and its ESR must not go over the values from the
+                # field: that would add a body on top of a part that the
+                # user described in full.
+                continue
             if v:
                 e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
                 # A part whose refdes does not give the type comes back
@@ -147,10 +154,14 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         # all. Its pads stay in the copper, thus the gap between them stays
         # open. This is the same result as the old checkbox for all the
         # parts, and the runner needs no test of its own.
+        # An element that the "rfsim" field of the footprint describes
+        # holds R, L and C together and it needs no type and no single
+        # value: it stays when its Model checkbox is on.
         model["lumped_elements"] = [
             e for e in model["lumped_elements"]
             if para.get(e["ref"], {}).get("model", True)
-            and e.get("type") and e.get("value") is not None]
+            and (e.get("rlc")
+                 or (e.get("type") and e.get("value") is not None))]
         for p, t, f in zip(model["ports"], port_types, port_feed):
             p["type"] = t
             if f and not p["direction"]:
@@ -163,6 +174,13 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y",
                        (0, -1): "-y"}[tuple(p["direction"])]
                 p["gap"] = (p.get("gaps") or {}).get(key)
+                # `extract()` measured the copper run for the direction
+                # of a TRACK, and this pad had none. Measure it for the
+                # direction that the user gave, or the runner cannot cap
+                # the length of the port (problem 13).
+                p["copper_run"] = board_reader.copper_run(
+                    model["polygons"].get(p["layer"], []),
+                    p["x"], p["y"], p["direction"])
                 if (t in ("msl", "cpw", "stripline")
                         and not board_reader.copper_along(
                             model["polygons"].get(p["layer"], []),

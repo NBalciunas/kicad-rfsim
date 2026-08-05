@@ -63,6 +63,10 @@ CSXCAD.
 
 ### Ports
 
+**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** It is not at the edge of the board. The box of the port covers the whole pad in x and y, and the whole substrate in z, down to the reference layer:
+
+![The geometry of a lumped port](docs/port-geometry.png)
+
 The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. The label of a port names what stops every de-embedded type, for example `Port N [No Track]`. Each port shows a "Feed" control with the direction and the width of its line. A routed track fills the two values and locks them. If the feed line is drawn copper (a graphic shape or a polygon, usual for a patch antenna), select the direction and enter the width yourself: the de-embedded types then become available. The port lies on the copper along that direction, so make sure the line is really there - the plugin gives a warning when it finds none. The type list holds only the types that the geometry permits, and each de-embedded entry shows its measured value: the CPW entry shows the gap, and the stripline entry shows `Stripline Port [Strip to Plane: 0.254 mm]`. A value in brackets comes from the board, and you cannot change it. For a CPW port the copper at the two sides of the line must be ground: the plugin measures the gap, but it cannot know the net.
 
 A port needs a ground return: copper on the reference layer (the adjacent copper layer) that reaches at least the edge of the pad. Without it the plugin refuses to run. A CPW is the one exception, because its return path is the copper at the sides of the line.
@@ -71,10 +75,10 @@ The dialog gives only the types that the geometry permits:
 
 | Type | It needs | Notes |
 |---|---|---|
-| Lumped Port | nothing | It drives the pad against the reference layer. It operates everywhere. |
-| Microstrip (MSL) Port | a track that leaves the pad on the x-axis or the y-axis, or a "Feed" direction and width | De-embedded. |
-| Coplanar (CPW) Port | a track or a "Feed" direction, and copper at the two sides of it | The plugin measures the gap from the board. |
-| Stripline Port | a track or a "Feed" direction, and a plane above the strip and a plane below it | Put the port on an inner layer. |
+| Lumped Port | nothing | At the pad, from the pad down to the reference layer. It operates everywhere. It has no measurement plane. |
+| Microstrip (MSL) Port | a track that leaves the pad on the x-axis or the y-axis, or a "Feed" direction and width | De-embedded. It goes along the track FROM the pad, and its measurement plane is at the middle of that length. |
+| Coplanar (CPW) Port | a track or a "Feed" direction, and copper at the two sides of it | De-embedded, along the track from the pad. The plugin measures the gap from the board. |
+| Stripline Port | a track or a "Feed" direction, and a plane above the strip and a plane below it | De-embedded, along the track from the pad. Put the port on an inner layer. |
 
 > All three de-embedded types agree with closed-form theory: the microstrip, the CPW and the stripline. The plugin gives a warning when a column of the S-matrix gives out more power than it takes in, which shows S-parameters that you must not use. Run again at the medium or the fine preset when you see it.
 

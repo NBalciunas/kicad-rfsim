@@ -129,6 +129,81 @@ def make(path):
     return board, [pad1, pad2]
 
 
+def make_zone_holes(path, void=True):
+    """The microstrip board, with a HOLE in the ground zone under the line.
+
+    A filled zone that has holes is the one geometry that reached
+    `extract()` and never reached the SOLVER. `Fracture` changes each
+    hole into a slit with no width, and nobody had shown that CSXCAD
+    makes correct raster data from such a polygon: a slit that closes
+    would join the copper across the hole, and a slit that opens too far
+    would cut the plane. The board of `run_headless.py` has a plain
+    rectangle on B.Cu, thus it cannot show either.
+
+    **The hole is DIRECTLY under the line, and it is large.** That is
+    the point of the board: a hole at the side of the line changes the
+    impedance by so little that a slit which closed and a slit which
+    worked give the SAME number, and the test then shows nothing. The
+    ground under the line carries the return current, thus a void there
+    must raise the impedance by a large step. `void=False` gives the
+    same board with NO hole, and that is the control: the difference of
+    the two runs is the measurement.
+
+    Three vias of another net stay in the pour in both boards. They make
+    the small clearance holes that a real board has, and they keep the
+    two boards identical in every other way.
+    """
+    board = pcbnew.NewBoard(path)
+    rf = pcbnew.NETINFO_ITEM(board, "RF")
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    other = pcbnew.NETINFO_ITEM(board, "OTHER")
+    for n in (rf, gnd, other):
+        board.Add(n)
+
+    pad1 = _pad_fp(board, "P1", X0, TRACE_Y, rf)
+    pad2 = _pad_fp(board, "P2", X1, TRACE_Y, rf)
+
+    t = pcbnew.PCB_TRACK(board)
+    t.SetStart(VECTOR2I(FromMM(X0), FromMM(TRACE_Y)))
+    t.SetEnd(VECTOR2I(FromMM(X1), FromMM(TRACE_Y)))
+    t.SetWidth(FromMM(TRACE_W))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetNetCode(rf.GetNetCode())
+    board.Add(t)
+
+    # The vias of the other net. They are BELOW the line in y, thus they
+    # do not touch the track on F.Cu, and their annular ring on B.Cu
+    # makes the pour keep a clearance: that clearance is the hole.
+    for x in (13.0, 20.0, 27.0):
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(VECTOR2I(FromMM(x), FromMM(TRACE_Y + 3.5)))
+        v.SetDrill(FromMM(VIA_DRILL))
+        v.SetWidth(FromMM(VIA_DRILL + 0.6))
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        v.SetNetCode(other.GetNetCode())
+        board.Add(v)
+
+    x0, y0, x1, y1 = BOARD
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    _edge_cuts(board, corners)
+    z = _zone(board, pcbnew.B_Cu, gnd, corners)
+    if void:
+        # A hole in the OUTLINE of the zone, under the middle of the
+        # line. The filler keeps it, thus the pour has a true void and
+        # not only a clearance. 8 x 6 mm against a line of 2.9 mm: the
+        # return current must go around it.
+        hx0, hx1 = 0.5 * (X0 + X1) - 4.0, 0.5 * (X0 + X1) + 4.0
+        hy0, hy1 = TRACE_Y - 3.0, TRACE_Y + 3.0
+        h = z.Outline().NewHole(0)
+        for cx, cy in ((hx0, hy0), (hx1, hy0), (hx1, hy1), (hx0, hy1)):
+            z.Outline().Append(FromMM(cx), FromMM(cy), 0, h)
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+
+    pcbnew.SaveBoard(path, board)
+    return board, [pad1, pad2]
+
+
 def make_cpw(path):
     """Make the grounded CPW board: a line of 30 mm with a ground at each
     side, and a full plane on B.Cu.

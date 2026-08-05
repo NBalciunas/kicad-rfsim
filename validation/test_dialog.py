@@ -303,6 +303,43 @@ def test_the_rows_scroll_and_the_dialog_stops_growing():
     print("the rows scroll OK (the height stops at %d px)" % heights[20])
 
 
+def test_the_whole_dialog_scrolls_and_keeps_the_run_button():
+    """A short dialog must still show the Run button.
+
+    The rows of the parts scrolled since 2026-08-05, and the dialog was
+    still 1084 px tall with ONE part against about 1040 px of client
+    area on a screen of 1920x1080 (problem 10). The whole dialog scrolls
+    now, and the Run button is OUTSIDE the scrolled body: a button that
+    scrolls out of view is the defect that the scroll must not make.
+    """
+    d = dialog([unknown("D%d" % k) for k in range(9)])
+    # Search the children of THIS dialog. `wx.Window.FindWindowById` is
+    # a STATIC method in wxPython: it searches every window of the
+    # process and it gives back the button of a dialog that an earlier
+    # test made and did not destroy yet.
+    run = [c for c in d.GetChildren()
+           if isinstance(c, wx.Button) and c.GetId() == wx.ID_OK]
+    assert run, "the Run button must be a child of the dialog, not of " \
+                "the scrolled body: a button that scrolls away is of no use"
+    run = run[0]
+    for height in (1000, 700, 400):
+        d.SetSize((d.GetSize().GetWidth(), height))
+        d.Layout()
+        bottom = run.GetPosition().y + run.GetSize().GetHeight()
+        client = d.GetClientSize().GetHeight()
+        assert bottom <= client + 1, \
+            "at %d px the Run button ends at %d px, past the client area " \
+            "of %d px" % (height, bottom, client)
+    # The body must scroll, or the controls above simply disappear.
+    scrolls = [c for c in d.GetChildren()
+               if isinstance(c, wx.ScrolledWindow) and c is not d.part_area]
+    assert scrolls, "the dialog has no scrolled body"
+    assert scrolls[0].GetScrollPixelsPerUnit()[1] > 0, \
+        "the body of the dialog does not scroll in y"
+    d.Destroy()
+    print("the whole dialog scrolls OK (the Run button stays at 400 px)")
+
+
 def test_the_inductor_warning_follows_the_value():
     """A lumped inductor multiplies the run time, and the dialog says so.
 
@@ -328,6 +365,83 @@ def test_the_inductor_warning_follows_the_value():
     assert "10.0 times longer" in text, text
     d.Destroy()
     print("the inductor warning OK (%s)" % text)
+
+
+def test_a_part_with_r_l_and_c_together():
+    """The "rfsim" field of a footprint gives R, L and C in ONE element.
+
+    A PIN diode that is off is C_T in series with L_s and R_s, and no
+    refdes of R, L or C describes it. openEMS puts the three components
+    of one element in series (LEtype=1), thus the engine could always do
+    this; the limit was the way in which the plugin reads a part. The
+    row SHOWS the three values and does not let the user change them:
+    the footprint is the source, thus the board and the simulation
+    cannot disagree.
+    """
+    rlc = {"R": 1.5, "L": 0.6e-9, "C": 0.3e-12}
+    e = dict(unknown("D1"), rlc=rlc, type="RLC",
+             package=board_reader.CUSTOM_RLC_PKG, esl=0.0, esr=0.0)
+    d = dialog([e])
+    r = d.part_rows[1]
+    assert r["rlc"] == rlc, r.get("rlc")
+    assert r["kind"].GetStringSelection() == gui.RLC_KIND, \
+        r["kind"].GetStringSelection()
+    assert not r["kind"].IsEnabled(), "the type of such a row must be fixed"
+    shown = r["value"].GetValue()
+    for want in ("1.5 ohm", "0.6 nH", "0.3 pF"):
+        assert want in shown, "the row does not show %s: %r" % (want, shown)
+    assert not r["value"].IsEditable(), "the values come from the footprint"
+    # _on_ok must NOT refuse it: it has no type and no single value.
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        d.para_rows[1][1].SetValue(True)      # Model on
+        d._on_lumped(None)
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert not stopped, "the dialog refused an rfsim part: %s" % stopped
+    finally:
+        wx.MessageBox = old_box
+    d.Destroy()
+    print("a part with R, L and C together OK (%s)" % shown)
+
+
+def test_the_substrate_comes_from_the_board():
+    """The dialog fills er, tan d, h and cu_t from the stackup.
+
+    Problem 8: a Rogers board simulated as FR4 until 2026-08-05, because
+    the dialog started at its own default values and said nothing. The
+    values must come from the FILE only: the fallback of board_reader is
+    FR4 as well, and to fill the fields from that would show the default
+    values of the code as if the board gave them.
+    """
+    board = pcbnew.LoadBoard(BOARD)
+    pads = [p for fp in board.GetFootprints()
+            if fp.GetReference() in ("P1", "P2") for p in fp.Pads()]
+    pre = board_reader.extract(board, pads, 1.0)
+    src = pre.get("stackup_source")
+    assert src in ("file", "default"), src
+    d = dialog()
+    got = (d.er.GetValue(), d.tand.GetValue(), d.h.GetValue(),
+           d.cu_t.GetValue())
+    note = d.stack_note.GetLabel()
+    if src == "file":
+        d0 = pre["dielectric_layers"][0]
+        assert float(got[0]) == d0["epsilon"], (got, d0)
+        assert float(got[1]) == d0["loss_tangent"], (got, d0)
+        assert float(got[3]) == pre["copper_layers"][0]["thickness"], got
+        assert "stackup of the board" in note, note
+    else:
+        # No stackup in the file: the fields keep the defaults of the
+        # dialog, and the label SAYS that the board gave nothing.
+        assert got == ("4.2", "0.02", "1.6", "0.035"), got
+        assert "no stackup" in note, note
+    # get_settings must give what the fields show, whatever the source.
+    s = d.get_settings()
+    assert s["er"] == float(got[0]) and s["tand"] == float(got[1]), s
+    assert s["h"] == float(got[2]) and s["cu_t"] == float(got[3]), s
+    d.Destroy()
+    print("the substrate comes from the board OK (source %r, er %s)"
+          % (src, got[0]))
 
 
 def test_the_run_limits_reach_the_settings():
@@ -378,6 +492,9 @@ if __name__ == "__main__":
     test_unknown_part_takes_a_type_and_a_value()
     test_unknown_part_without_a_value_cannot_run()
     test_the_rows_scroll_and_the_dialog_stops_growing()
+    test_the_whole_dialog_scrolls_and_keeps_the_run_button()
     test_the_inductor_warning_follows_the_value()
+    test_a_part_with_r_l_and_c_together()
+    test_the_substrate_comes_from_the_board()
     test_the_run_limits_reach_the_settings()
     print("PASS")

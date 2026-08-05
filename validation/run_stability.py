@@ -65,12 +65,26 @@ def thicken(model, k):
     return model
 
 
-def variant(src, l_h, box=None, thick=None):
+def set_epsilon(model, er):
+    """Give the substrate a different permittivity.
+
+    This moves the mesh as well as the physics: `res` follows
+    1/sqrt(er), thus a large er gives a finer mesh and a smaller Courant
+    step, and the cells of the dielectric rule follow it.
+    """
+    for d in model["dielectric_layers"]:
+        d["epsilon"] = er
+    return model
+
+
+def variant(src, l_h, box=None, thick=None, er=None):
     """Give the model of one row of the matrix, with the inductor in it."""
     with open(src) as fh:
         model = json.load(fh)
     if thick:
         thicken(model, thick)
+    if er:
+        set_epsilon(model, er)
     e = model["lumped_elements"][0]
     e.update(type="L", value=l_h, esl=0.0, esr=0.0, package="Custom")
     if box is not None:
@@ -124,6 +138,11 @@ def main():
         ("a box of 1.0 mm", src, {"box": 1.0}),
         ("a board of 3.2 mm", src, {"thick": 2.0}),
         ("a board of 6.4 mm", src, {"thick": 4.0}),
+        # A different permittivity moves the mesh AND the physics: `res`
+        # follows 1/sqrt(er). PTFE at 2.2 and a ceramic at 10.2 are the
+        # two ends of what a user puts on a board.
+        ("a substrate of er 2.2", src, {"er": 2.2}),
+        ("a substrate of er 10.2", src, {"er": 10.2}),
     ]
     tmp = os.path.join(HERE, "out_stability_tmp")
     print("the largest stable time_step_factor, %d steps, ladder to 1.4\n"

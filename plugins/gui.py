@@ -35,6 +35,20 @@ ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
 ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
 
 
+UNKNOWN_RLC = "R+L+C"        # the type that the row shows for such a part
+RLC_KIND = UNKNOWN_RLC
+RLC_FIELD_NAME = "rfsim"     # it must agree with board_reader.RLC_FIELD
+# The unit of each component of an "rfsim" field, for the row that shows
+# it. The values in the model are SI.
+_RLC_UNITS = (("R", 1.0, "ohm"), ("L", 1e-9, "nH"), ("C", 1e-12, "pF"))
+
+
+def _rlc_text(rlc):
+    """Give "1.5 ohm + 0.6 nH + 0.3 pF" for the row of the dialog."""
+    return " + ".join("%g %s" % (rlc[k] / scale, unit)
+                      for k, scale, unit in _RLC_UNITS if rlc.get(k))
+
+
 def _qty_label(kind):
     """Give the label in front of the value of a part."""
     return KIND_QUANTITY.get(kind, "Value") + ":"
@@ -467,6 +481,13 @@ class SettingsDialog(wx.Dialog):
                                   + list(KIND_NAMES.values()), size=(110, -1))
                 kinds.SetSelection(KIND_ORDER.index(kind) if kind in KIND_ORDER
                                    else 0)
+                # A part that the "rfsim" field of the footprint
+                # describes holds R, L and C together. The row SHOWS the
+                # three values and it does not let the user change them:
+                # the footprint is the source, thus the board and the
+                # simulation cannot disagree. The row keeps its Model
+                # checkbox, thus the part can still go out of the run.
+                rlc = e.get("rlc")
                 # The unit of the field is fixed (ohm, nH or pF), in the
                 # same way as the ESR and the ESL fields. Thus the user
                 # gives a number and no prefix, and the unit follows the
@@ -477,6 +498,25 @@ class SettingsDialog(wx.Dialog):
                 value.Enable(kind is not None)
                 qty = wx.StaticText(pane, label=_qty_label(kind))
                 uni = wx.StaticText(pane, label=ENTRY_UNITS.get(kind, ""))
+                if rlc:
+                    kinds.Set([RLC_KIND])
+                    kinds.SetSelection(0)
+                    kinds.Enable(False)
+                    qty.SetLabel("In series:")
+                    value.ChangeValue(_rlc_text(rlc))
+                    # The three values need more room than one number:
+                    # "1.5 ohm + 0.6 nH + 0.3 pF" does not fit the width
+                    # of a value field, and a value that is cut off is
+                    # of no use to a reader.
+                    value.SetMinSize((190, -1))
+                    value.SetEditable(False)
+                    value.Enable(False)
+                    value.SetToolTip(
+                        "The \"%s\" field of the footprint gives these three "
+                        "values, and they go in series in ONE element. "
+                        "Change the field on the board to change them."
+                        % RLC_FIELD_NAME)
+                    uni.SetLabel("")
                 lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
                        0, mid)
                 lg.Add(kinds, 0, mid)
@@ -518,7 +558,8 @@ class SettingsDialog(wx.Dialog):
                 self.part_rows.append({"ref": e["ref"], "kind": kinds,
                                        "value": value, "qty": qty,
                                        "unit": uni, "last_pkg": start_pkg,
-                                       "esl0": esl0, "esr0": esr0})
+                                       "esl0": esl0, "esr0": esr0,
+                                       "rlc": rlc})
             # A lumped inductor makes the FDTD unstable at the full
             # Courant step, thus the runner divides the step by
             # sqrt(L[nH]) and multiplies the number of steps by the same
@@ -543,6 +584,22 @@ class SettingsDialog(wx.Dialog):
                      wx.TextCtrl(self, value="1.6"), "mm")
         self.cu_t = row(sg, "Copper thickness:",
                         wx.TextCtrl(self, value="0.035"), "mm")
+        # **Fill the fields from the stackup of the BOARD.** A Rogers
+        # board simulated as FR4 until 2026-08-05, because the dialog
+        # started at its own default values and the user had to type the
+        # stackup again. Nothing said so (problem 8).
+        #
+        # The values come only from a stackup that the FILE holds. The
+        # fallback of `board_reader` is FR4 as well, and to fill the
+        # fields from THAT would show the default values of the code as
+        # if the board gave them. `model["stackup_source"]` tells the
+        # two apart, and the label below the fields says which one it
+        # is: a number that a user does not question must be a number
+        # that names where it came from.
+        self.stack_note = wx.StaticText(self, label="")
+        self.stack_note.SetFont(self.stack_note.GetFont().Smaller())
+        sbox.Add(self.stack_note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._fill_substrate_from_board(preview)
         self.preset.Bind(wx.EVT_CHOICE, self._on_preset)
         for c in (self.er, self.tand):
             c.Bind(wx.EVT_TEXT, self._on_substrate_edit)
@@ -607,12 +664,42 @@ class SettingsDialog(wx.Dialog):
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
-        top.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
         # The rows must have their size before the dialog takes its own.
         self._fit_rows()
-        self.SetSizerAndFit(top)
-        self.SetMinSize((520, -1))
+        # **The WHOLE dialog scrolls.** The rows of the parts scrolled
+        # since 2026-08-05, and that stopped the dialog from GROWING
+        # without a limit; it did not make it fit. The dialog is 1084 px
+        # tall with ONE part, and a screen of 1920x1080 gives about
+        # 1040 px of client area, thus the Run button was under the edge
+        # of the screen on a usual machine (problem 10).
+        #
+        # Every control above is a child of the dialog, thus this moves
+        # them into a scrolled body afterwards, in the place of a change
+        # to each of the 60 constructors. The Run button stays OUTSIDE
+        # the body: a button that scrolls out of view is the defect that
+        # this corrects.
+        body = wx.ScrolledWindow(self, style=wx.VSCROLL)
+        body.SetScrollRate(0, 12)
+        for child in list(self.GetChildren()):
+            if child is not body and child is not run:
+                child.Reparent(body)
+        body.SetSizer(top)
+        body.FitInside()
+        # A wx.ScrolledWindow does NOT give the size of its sizer as its
+        # best size, thus `Fit()` alone collapses the dialog to its
+        # minimum. Give the body the size of the content for the fit,
+        # and make it small again straight after: `_fit_to_screen` must
+        # be free to cut the height, and `SetSize` cannot go under the
+        # minimum size of a window.
+        content = top.GetMinSize()
+        body.SetInitialSize(content)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(body, 1, wx.EXPAND)
+        outer.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        self.SetSizer(outer)
         self.Fit()
+        body.SetMinSize((content.GetWidth(), 120))
+        self.SetMinSize((520, 240))
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         # The preview needs self.margin and the rows. Thus draw it
@@ -757,7 +844,12 @@ class SettingsDialog(wx.Dialog):
                 c.Enable(on and self._pkg_of(ch) != NO_PARASITICS)
             # The type stays on with the Model off, thus the user can
             # select it first and model the part after it. The value
-            # needs a type: the unit comes from it.
+            # needs a type: the unit comes from it. A row that the
+            # "rfsim" field describes keeps its controls off: the
+            # footprint is the source of its three values.
+            if self.part_rows[i].get("rlc"):
+                ch.Enable(False)
+                continue
             self.part_rows[i]["value"].Enable(
                 on and self._kind_of(i) is not None)
         self._update_lumped_warning()
@@ -794,29 +886,24 @@ class SettingsDialog(wx.Dialog):
         self._one_row = one
 
     def _fit_to_screen(self):
-        """Take the height of the part rows back until the dialog fits.
+        """Hold the dialog inside the screen, and let the body scroll.
 
-        `_fit_rows` gives the rows their limit before the dialog has a
-        size. This runs after the fit, thus it knows the true height.
-        The rows are the only part that can become smaller, and 2 rows
-        is the floor: a scroll bar with no row is of no use.
+        `Fit()` gives the dialog the height of all its content, and that
+        is more than a screen of 1920x1080 gives even with ONE part.
+        This cuts the height to the client area of the display; the
+        scrolled body then shows a scroll bar, and the Run button stays
+        visible because it is outside that body.
         """
-        area = getattr(self, "part_area", None)
-        if area is None:
-            return
         try:
-            avail = wx.Display().GetClientArea().GetHeight()
+            area = wx.Display().GetClientArea()
         except Exception:
             return
-        over = self.GetSize().GetHeight() - avail
-        if over <= 0:
-            return
-        cur = area.GetMinSize().GetHeight()
-        new = max(2.0 * self._one_row, cur - over)
-        if new < cur:
-            area.SetMinSize((area.GetMinSize().GetWidth(), int(new)))
-            area.FitInside()
-            self.Fit()
+        w, h = self.GetSize()
+        # Keep a little space for the frame of the window itself.
+        avail = max(240, area.GetHeight() - 40)
+        if h > avail:
+            self.SetSize((w, avail))
+            self.Layout()
 
     def _update_lumped_warning(self):
         """Show what a lumped inductor costs in run time.
@@ -863,6 +950,53 @@ class SettingsDialog(wx.Dialog):
                     va="center", fontsize=7, transform=ax.transAxes)
         self._prev_canvas.draw_idle()
 
+    def _fill_substrate_from_board(self, model):
+        """Put the stackup of the board into the substrate fields.
+
+        The dialog builds a UNIFORM stackup from these four values, thus
+        a board whose layers differ from each other cannot come back
+        exactly. The function then takes the dielectric that carries the
+        FIRST port, which is the one that the impedance of the line
+        depends on, and it says so in the label.
+
+        `ChangeValue` writes the fields, in the same way as the presets:
+        `SetValue` sends EVT_TEXT and would move the preset choice to
+        "Custom" while the dialog is still being built.
+        """
+        note = self.stack_note
+        if not model or model.get("stackup_source") != "file":
+            note.SetLabel("The board file holds no stackup, thus these are "
+                          "the default values of FR4. Board Setup > "
+                          "Physical Stackup, and save the board.")
+            note.SetForegroundColour(wx.Colour(150, 90, 0))
+            return
+        diel = model.get("dielectric_layers") or []
+        cu = model.get("copper_layers") or []
+        if not diel or not cu:
+            return
+        # The dielectric under the layer of the first port.
+        z_of = {c["name"]: c["z"] for c in cu}
+        z_port = z_of.get((model.get("ports") or [{}])[0].get("layer"),
+                          cu[0]["z"])
+        below = [d for d in diel if d["z_top"] <= z_port + 1e-9]
+        d0 = below[0] if below else diel[0]
+        total = sum(d["z_top"] - d["z_bottom"] for d in diel)
+        for ctrl, value in ((self.er, "%g" % d0["epsilon"]),
+                            (self.tand, "%g" % d0["loss_tangent"]),
+                            (self.h, "%g" % round(total, 4)),
+                            (self.cu_t, "%g" % cu[0]["thickness"])):
+            ctrl.ChangeValue(value)
+        mixed = len({(d["epsilon"], d["loss_tangent"]) for d in diel}) > 1
+        note.SetLabel(
+            ("The stackup of the board gives these values (the layer "
+             "%s). The board has layers that DIFFER, and the simulation "
+             "uses one uniform substrate: check the two numbers."
+             if mixed else
+             "The stackup of the board gives these values (the layer %s).")
+            % d0["name"])
+        note.SetForegroundColour(wx.Colour(150, 90, 0) if mixed
+                                 else wx.Colour(90, 90, 90))
+
     def _on_preset(self, evt):
         _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
         if er is not None:  # ChangeValue sends no EVT_TEXT: the preset stays
@@ -899,6 +1033,10 @@ class SettingsDialog(wx.Dialog):
         # the user turned that part on and gave it nothing.
         for i, r in enumerate(self.part_rows):
             if not self.para_rows[i][1].GetValue():
+                continue
+            # The "rfsim" field of the footprint gives the whole part,
+            # thus such a row needs no type and no single value.
+            if r.get("rlc"):
                 continue
             if self._kind_of(i) is None:
                 wx.MessageBox(
@@ -1473,6 +1611,19 @@ class ResultsFrame(wx.Frame):
         ax.legend(fontsize=8)
         ax.set_title("Line Impedance")
 
+    def _dump_z(self, port):
+        """Give the z of the plane that the field dump lies on, in mm.
+
+        `runner.build` puts the dump at the middle of the substrate
+        between the layer of the EXCITED port and the layer below it:
+        `0.5 * (z_top + z_ref)`. The title of the view names the value,
+        because a field picture with no plane is a picture of nothing.
+        """
+        z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
+        ports = self.model["ports"]
+        p = next((q for q in ports if q["number"] == port), ports[0])
+        return 0.5 * (z_of[p["layer"]] + z_of[p["ref_layer"]])
+
     def _plot_field(self, ax, kind, port=None):
         """Show an animation of the wave on the mid-plane of the substrate.
 
@@ -1483,6 +1634,7 @@ class ResultsFrame(wx.Frame):
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation
+        from matplotlib.patches import Rectangle
         ports = sorted(p for k2, p in self.field_h5s if k2 == kind)
         if port is None:
             port = ports[0]
@@ -1494,22 +1646,53 @@ class ResultsFrame(wx.Frame):
 
         if kind == "E":
             comp = F[..., 2]                 # the vertical E below the track
+            cname = "E_z"
         else:
             hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
             comp = F[..., 0] if hx >= hy else F[..., 1]  # the largest H
+            # **Name the component.** The code selects it from the data,
+            # thus it can change from run to run and from port to port.
+            # It stayed quiet until 2026-08-05, and a reader then could
+            # not know which component the picture showed.
+            cname = "H_x" if hx >= hy else "H_y"
         lim = float(np.percentile(np.abs(comp), 99)) or 1.0
         mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
                              vmin=-lim, vmax=lim, shading="gouraud")
+        # **A colour bar.** The view had none at all, thus the picture
+        # gave the shape of the wave and no scale. The unit is the raw
+        # value of openEMS at the amplitude of the excitation: the
+        # absolute size means nothing, and only the SHAPE and the SIGN
+        # do. The label says so, and it does not invent a unit.
+        bar = self.figure.colorbar(mesh, ax=ax, shrink=0.85)
+        bar.set_label("Re(%s), arbitrary units (the excitation amplitude)"
+                      % cname, fontsize=8)
 
         top = self.model["ports"][0]["layer"]
         for poly in self.model["polygons"].get(top, []):
             ax.plot([p[0] for p in poly] + [poly[0][0]],
                     [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
+        # **The ports, in the same lime as the Board layout view.** The
+        # field views are the pictures that leave the tool, and a
+        # reviewer of 2026-08-03 read the port at the wrong place
+        # because no picture showed it.
+        for p in self.model["ports"]:
+            hl, hw = 0.5 * p["length"], 0.5 * p["width"]
+            ax.add_patch(Rectangle((p["x"] - hl, p["y"] - hw),
+                                   2 * hl, 2 * hw, facecolor="none",
+                                   edgecolor="lime", lw=1.2, zorder=5))
+            ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
+                        color="lime", fontsize=8, ha="center", va="center",
+                        zorder=6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s-Field (f=%g GHz)%s" % (
-            kind, f_hz / 1e9,
-            " (Port %d)" % port if len(ports) > 1 else ""))
+        # The title names the QUANTITY, the PLANE and the frequency. The
+        # plane is the one that `runner.build` dumps: the middle of the
+        # substrate between the layer of the excited port and the layer
+        # below it.
+        ax.set_title("Re(%s), substrate mid-plane z=%.2f mm, f=%g GHz%s"
+                     % (cname, self._dump_z(port), f_hz / 1e9,
+                        ", Port %d" % port if len(ports) > 1 else ""),
+                     fontsize=10)
         ax.set_aspect("equal")
 
         def step(i):
@@ -1581,10 +1764,20 @@ class ResultsFrame(wx.Frame):
         ax.set_zlim(-m, m)
         ax.set_box_aspect((1, 1, 1))
         ax.set_axis_off()
-        ax.set_title("Farfield (f=%g GHz)%s" % (ff["f_hz"] / 1e9, ptag))
+        # **"Directivity (dBi)" and not "Farfield".** A reviewer of
+        # 2026-08-03 read the view as a quantity that has a unit. The
+        # directivity is a RATIO, thus dBi is correct and the title must
+        # say which quantity it is. Dmax and the frequency go with it:
+        # the 3D view had neither.
+        ax.set_title("Directivity (dBi), f=%g GHz, Dmax=%.1f dBi%s"
+                     % (ff["f_hz"] / 1e9, float(D.max()), ptag), fontsize=10)
         sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
         sm.set_array([])
-        self.figure.colorbar(sm, ax=ax, shrink=0.65, label="dBi")
+        # The RADIUS is D - (Dmax - 30): a display transform with a
+        # floor of 30 dB. Without this label a null looks like it
+        # touches the origin.
+        self.figure.colorbar(sm, ax=ax, shrink=0.65,
+                             label="Directivity (dBi), floor at Dmax - 30 dB")
 
     def _plot_farfield(self, ff, cut, ptag=""):
         """Show one polar cut of the directivity in absolute dBi.
@@ -1612,9 +1805,13 @@ class ResultsFrame(wx.Frame):
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))
-        ax.set_title("Farfield Directivity Abs (%s)%s" % (cut, ptag))
-        ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
-                      % ("Theta" if phi_cut else "Phi"))
+        ax.set_title("Directivity (dBi), %s cut, f=%g GHz%s"
+                     % (cut, ff["f_hz"] / 1e9, ptag), fontsize=10)
+        # The radial axis is the directivity in dBi, with a floor 40 dB
+        # under the peak. The angle is the other spherical angle.
+        ax.set_xlabel("%s / \N{DEGREE SIGN}   (radius: directivity in dBi, "
+                      "floor at peak - 40 dB)"
+                      % ("Theta" if phi_cut else "Phi"), fontsize=8)
 
         st = _lobe_stats(ang_deg, D)
         lines = ["Frequency = %g GHz" % (ff["f_hz"] / 1e9),

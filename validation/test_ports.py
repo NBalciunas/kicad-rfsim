@@ -130,6 +130,44 @@ def test_port_length_uses_list_position():
     print("port length cap OK")
 
 
+def test_port_length_is_capped_by_the_copper_run():
+    """A de-embedded port must not go past the end of its feed line.
+
+    Problem 13. The length is `max(3*w, 6*res)`, and `6*res` is 14 mm at
+    the coarse preset. A short feed line is shorter than that: the
+    measurement plane, which is at the MIDDLE of the port, then lies
+    inside the patch that the line feeds, and the metal strip that every
+    de-embedded port adds over its box goes out past the end of the
+    copper. `board_reader.copper_run` measures the run, and the runner
+    caps the length with 0.8 of it.
+    """
+    # No cap: the copper runs further than the limit of the measurement.
+    m = model("msl", copper_run=None)
+    m["ports"] = [m["ports"][0]]          # 1 port, thus no 2-port cap
+    g = runner._port_geometry(m, RES)[0]
+    free = g["msl_len"]
+    assert free > 13.0, "the free length is %.2f mm, want 6*res" % free
+
+    # A feed line of 5 mm: the port must stop inside it.
+    m = model("msl", copper_run=5.0)
+    m["ports"] = [m["ports"][0]]
+    g = runner._port_geometry(m, RES)[0]
+    assert abs(g["msl_len"] - 4.0) < 1e-9, \
+        "a copper run of 5 mm gives a port of %.3f mm, want 4.0" % g["msl_len"]
+    assert g["msl_len"] < free, "the cap did not make the port shorter"
+    # The measurement plane is at the middle, thus it must stay well
+    # inside the copper.
+    assert 0.5 * g["msl_len"] < 5.0, "the measurement plane is past the end"
+
+    # A run that is LONGER than the free length must change nothing.
+    m = model("msl", copper_run=40.0)
+    m["ports"] = [m["ports"][0]]
+    g = runner._port_geometry(m, RES)[0]
+    assert abs(g["msl_len"] - free) < 1e-9, \
+        "a long copper run must not shorten the port: %.3f" % g["msl_len"]
+    print("port length cap by the copper run OK (5 mm run -> 4.0 mm port)")
+
+
 def test_strip_cells():
     """A stripline and a microstrip need cells ACROSS the strip.
 
@@ -374,6 +412,7 @@ if __name__ == "__main__":
     test_flat_and_vertical_ports()
     test_fallback_to_lumped()
     test_port_length_uses_list_position()
+    test_port_length_is_capped_by_the_copper_run()
     test_strip_cells()
     test_cpw_z_cells()
     test_lumped_element_keeps_its_cells()

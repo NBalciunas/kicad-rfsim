@@ -32,7 +32,7 @@ def report(board=None, margin_mm=4.0):
     """Show the result of each test for every R*/L*/C* footprint."""
     board = board or pcbnew.GetBoard()
     out = print
-    copper, _ = br._stackup(board)
+    copper, _, _ = br._stackup(board)
     z_of = {c["name"]: c["z"] for c in copper}
     out("stackup copper: %s" % list(z_of))
 

@@ -72,6 +72,10 @@ MSL_STRIP_CELLS = 4
 # body ESL is under 1 nH, thus the factor stays at 1.0.
 # `validation/run_stability.py` measures the margin again.
 LE_STAB_MARGIN = 0.7
+# The newest version of model.json that this runner can read. It must
+# agree with `board_reader.MODEL_VERSION`, and the two files cannot
+# import each other: board_reader imports pcbnew, and this file must not.
+MODEL_VERSION = 1
 
 
 def _strip_cells(port_type):
@@ -130,8 +134,14 @@ def _time_step_factor(model):
     # largest inductance in the model, whatever its source.
     ind = []
     for e in model.get("lumped_elements", []):
-        if e["type"] == "L" and e["value"] > 0:
+        if e["type"] == "L" and e.get("value"):
             ind.append(e["value"])
+        # An element that the "rfsim" field describes holds its own L,
+        # and that inductance destabilizes the run in the same way as
+        # the value of an inductor. The factor must count it, or a part
+        # with a large L diverges to NaN.
+        if e.get("rlc", {}).get("L"):
+            ind.append(e["rlc"]["L"])
         if s.get("parasitics", True) and e.get("esl"):
             ind.append(e["esl"])
     if not ind:
@@ -286,6 +296,23 @@ def _port_geometry(model, res):
             # feed on y.
             w = p.get("track_width") or (p["width"] if d[0] else p["length"])
             length = max(3.0 * w, 6.0 * res)
+            # **Cap the length with the copper that runs along the feed.**
+            # `6*res` is 14 mm or more at the coarse preset, and a short
+            # feed line (the inset feed of a patch, for example) is
+            # shorter than that. The measurement plane is at the middle
+            # of the port, thus it would lie INSIDE the patch, where the
+            # values of a line have no meaning; and the metal strip that
+            # every de-embedded port adds over its box would go out past
+            # the end of the copper, thus the model would hold a line
+            # that the board does not have. Problem 13.
+            #
+            # The cap keeps a little of the run free, because the port
+            # must not reach the exact end of the copper. `copper_run`
+            # is None when the copper runs further than its limit, and
+            # then nothing caps the length here.
+            run = p.get("copper_run")
+            if run and run > 0:
+                length = min(length, 0.8 * run)
             if len(plist) == 2:
                 # The OTHER port, by list position. Do not index with
                 # p["number"]: a hand-edited model.json can hold numbers
@@ -640,10 +667,30 @@ def build(model, excite_idx, res, want_ff=False):
             # the extraction with type None and value None, and the
             # dialog removes it when the user models nothing. A
             # model.json that a person edits can still hold one.
-            if not e.get("type") or e.get("value") is None:
+            if not e.get("rlc") and (not e.get("type")
+                                     or e.get("value") is None):
                 print("[rfsim] WARNING: lumped %s has no type or no value; "
                       "not modeled (the gap between its pads stays open)"
                       % e.get("ref", "?"), flush=True)
+                continue
+            if e.get("rlc"):
+                # R, L and C TOGETHER in one element, from the "rfsim"
+                # field of the footprint. openEMS puts the three in
+                # series under LEtype=1, thus this needs no new
+                # topology: only a part that the plugin can read. A PIN
+                # diode that is off is the usual case (C_T in series
+                # with L_s and R_s), and no refdes of R, L or C
+                # describes it.
+                comp = {k: v for k, v in e["rlc"].items() if v}
+                csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
+                                     **dict(le_kw, **comp)).AddBox(
+                    e["start"], e["stop"], priority=15)
+                print("[rfsim] lumped %s: %s in series (the \"%s\" field) "
+                      "(%s-axis) at z=%.3f"
+                      % (e["ref"],
+                         ", ".join("%s=%g" % (k, v)
+                                   for k, v in sorted(comp.items())),
+                         "rfsim", e["ny"], e["start"][2]), flush=True)
                 continue
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(
@@ -822,6 +869,30 @@ def _line_data(port, sim_path, freq):
     k0 = 2.0 * np.pi * np.asarray(freq, dtype=float) / C0
     with np.errstate(divide="ignore", invalid="ignore"):
         eps = (np.real(beta) / k0) ** 2
+    # **Do not store the imaginary part of `beta` as the attenuation.**
+    # It is the obvious thing to do, it costs one line, and the number
+    # that comes out is NOISE. Measured on 2026-08-05, on the validation
+    # microstrip at the coarse preset, as dB/m against the frequency:
+    #
+    #   1.0 GHz  -9.4    2.5 GHz   6.0    4.5 GHz  36.0
+    #   1.5 GHz  -6.2    3.0 GHz  11.4    5.0 GHz  64.5
+    #   2.0 GHz  -0.5    3.5 GHz  14.5    5.5 GHz  79.8
+    #                    4.0 GHz  21.3    6.0 GHz  63.0
+    #
+    # A passive line cannot give a NEGATIVE attenuation, and the value
+    # falls again above 5.5 GHz. Re(Z0) and eps_eff stay steady over the
+    # same sweep, thus the mode and the geometry are correct and the
+    # imaginary part alone is bad.
+    #
+    # The cause is the conditioning, and it cannot be corrected here.
+    # `beta` comes from finite differences of the probes along the line,
+    # over a span of about 9 mm. The PHASE turns a large part of a
+    # wavelength over that span, thus the real part is well conditioned.
+    # The LOSS over the same span is 0.105 dB, which is 1.2% of the
+    # amplitude, thus the imaginary part is the difference of two nearly
+    # equal numbers. To measure the loss of a line needs a different
+    # method: two lines of different lengths, or |S21| of a matched line
+    # over a long span. Refer to the log of 2026-08-05 (5).
     return {"Z0_real": np.real(z).tolist(),
             "Z0_imag": np.imag(z).tolist(),
             "eps_eff": np.where(np.isfinite(eps), eps, 0.0).tolist()}
@@ -859,6 +930,19 @@ def write_touchstone(path, freq, S, z0):
 def main(model_path, outdir):
     with open(model_path) as fh:
         model = json.load(fh)
+    # A model that is NEWER than this runner can hold a key that changes
+    # what a value means. The runner would then read the file and give a
+    # number that is incorrect with no message, which is worse than a
+    # stop. A model with no "version" key comes from before 2026-08-05
+    # and it is version 1.
+    version = int(model.get("version", 1))
+    if version > MODEL_VERSION:
+        raise SystemExit(
+            "[rfsim] ERROR: %s is a version %d model, and this runner "
+            "knows version %d. Update the plugin: an older runner can "
+            "read a newer model and give an incorrect result with no "
+            "message." % (os.path.basename(model_path), version,
+                          MODEL_VERSION))
     for w in model.get("warnings", []):
         print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]

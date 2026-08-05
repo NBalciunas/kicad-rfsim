@@ -13,6 +13,20 @@ import re
 
 import pcbnew
 
+# The version of the model dict, which `extract()` writes into
+# model.json. The runner refuses a model that is NEWER than the version
+# it knows, because a key that it does not read gives a silent and
+# incorrect run, and not an error.
+#
+# Raise it when a change makes an OLD runner read a new model
+# incorrectly. Do NOT raise it for a key that is only added: the runner
+# reads each optional key with `.get(key, default)`, thus an old file
+# still runs. The history:
+#
+#   1  2026-08-05  the first number. Every model.json before it has no
+#      "version" key at all, and the runner reads that as version 1.
+MODEL_VERSION = 1
+
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 
@@ -92,6 +106,46 @@ def _parse_value(text, kind):
         return float(tok)
     except ValueError:
         return None
+
+
+RLC_FIELD = "rfsim"          # the footprint field that holds R, L and C
+# The package of an element that the "rfsim" field describes. The user
+# gave the whole part, thus the code must not add a body on top of it.
+CUSTOM_RLC_PKG = "rfsim field"
+_RLC_RE = re.compile(r"\b([RLC])\s*=\s*([^\s,;]+)", re.I)
+
+
+def _parse_rlc(text):
+    """Read "R=1.5 L=0.6n C=0.3p" into {"R": .., "L": .., "C": ..} in SI.
+
+    A part that no single type describes needs all three components at
+    the same time: a PIN diode that is off is C_T in series with L_s and
+    R_s, and a refdes of R, L or C describes none of that. openEMS puts
+    the R, the L and the C of ONE element in series (`LEtype=1`), thus
+    the engine has always been able to do this; the limit was the way in
+    which the plugin reads a part.
+
+    The separator is a space, a comma or a semicolon, and the letter
+    case has no meaning. Each value obeys the same rules as a Value
+    field: `_parse_value` reads RKM notation and the SI prefixes. A
+    value that the function cannot read makes the WHOLE field invalid,
+    because a part that silently loses one of its three components is
+    worse than a part that the plugin refuses.
+
+    It gives None when the text holds no R, L or C at all.
+    """
+    if not text:
+        return None
+    out = {}
+    for letter, value in _RLC_RE.findall(text):
+        k = letter.upper()
+        if k in out:
+            return None                      # the same component two times
+        v = _parse_value(value, k)
+        if v is None or v < 0:
+            return None
+        out[k] = v
+    return out or None
 
 
 def _lname(layer_id):
@@ -241,16 +295,23 @@ def _stackup(board, substrate=None):
     cu_names = [_lname(lid) for lid in cu_ids]
     id_of = dict(zip(cu_names, cu_ids))
 
+    # `source` tells WHERE the values came from, and the dialog needs it:
+    # it fills its substrate fields from a stackup that the FILE gives,
+    # and it must not fill them from the FR4 default values, which would
+    # look like the board and are only a fallback.
     if substrate:  # the values from the user have priority over the file
+        source = "dialog"
         items = _uniform_stackup(cu_names, substrate["h"], substrate["er"],
                                  substrate["tand"], substrate["cu_t"])
     else:
+        source = "file"
         items = _stackup_from_file(board.GetFileName())
         if items:
             file_cu = [it["name"] for it in items if it["kind"] == "copper"]
             if file_cu != cu_names:  # the file does not agree: use defaults
                 items = None
         if not items:
+            source = "default"
             items = _default_stackup(board, cu_names)
 
     z = sum(it["thickness"] for it in items if it["kind"] == "dielectric")
@@ -268,7 +329,7 @@ def _stackup(board, substrate=None):
                 "loss_tangent": max(0.0, it["loss_tangent"]),
             })
             z -= it["thickness"]
-    return copper, diel
+    return copper, diel, source
 
 
 # The code below makes polygons from the tracks, the arcs, the via rings
@@ -550,6 +611,51 @@ def copper_along(polys, x, y, direction):
     return on >= 3
 
 
+def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
+    """Give the distance that copper runs along `direction`, in mm.
+
+    A de-embedded port is `max(3*w, 6*res)` long, and `6*res` is 14 mm
+    or more at the coarse preset. A SHORT feed line is shorter than
+    that: the measurement plane of the port then lies inside the patch
+    that the line feeds, where the values of a line have no meaning, and
+    the strip that the port adds goes out past the end of the copper
+    (problem 13). The runner caps the length of the port with this
+    value.
+
+    The function walks along the direction and gives the distance to the
+    LAST point that is still on copper. An odd number of ray hits shows
+    that a point is inside the copper, which is the standard crossing
+    test. The walk is more robust than one ray: `Fracture` divides the
+    copper into polygons that share an edge, thus a single ray gives a
+    hit where the copper does not in fact end.
+
+    It gives None when the copper runs further than `limit`, and None
+    when the pad itself is not on the copper of that layer.
+    """
+    if not direction or not polys:
+        return None
+    axis = 1 if direction[0] else 0
+    dx, dy = direction
+
+    def on_copper(d):
+        return len(_ray_hits(x + dx * d, y + dy * d, axis, 1, polys)) % 2 == 1
+
+    if not on_copper(0.0):
+        return None
+    d = 0.0
+    while d + step <= limit:
+        if not on_copper(d + step):
+            # Refine the edge between the last point that is on copper
+            # and the first that is not.
+            lo, hi = d, d + step
+            for _ in range(6):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if on_copper(mid) else (lo, mid)
+            return round(lo, 4)
+        d += step
+    return None
+
+
 def _touches(polys, box):
     """Tell if any polygon of `polys` overlaps the box (x0, y0, x1, y1).
 
@@ -739,8 +845,24 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         # A part with no type has no value either: the Value field of a
         # diode holds a part number, and not a quantity. The dialog asks
         # the user for both.
+        # A footprint field "rfsim" holds R, L and C TOGETHER, for a part
+        # that no single type describes. It has priority over the refdes
+        # and over the Value field, and it accepts ANY refdes: the point
+        # of it is a part that is not an R, an L or a C.
+        rlc = None
+        try:
+            if fp.HasFieldByName(RLC_FIELD):
+                raw = fp.GetFieldByName(RLC_FIELD).GetText()
+                rlc = _parse_rlc(raw)
+                if rlc is None and raw.strip():
+                    warnings.append(
+                        "%s: the \"%s\" field %r is not understood -> the "
+                        "part uses its refdes and its Value field. Write it "
+                        "as \"R=1.5 L=0.6n C=0.3p\"." % (ref, RLC_FIELD, raw))
+        except AttributeError:
+            pass          # an older pcbnew with no field API by name
         val = _parse_value(fp.GetValue(), kind) if kind else None
-        if kind and val is None:
+        if kind and val is None and not rlc:
             warnings.append("%s: value \"%s\" not understood -> not modeled"
                             % (ref, fp.GetValue()))
             continue
@@ -777,10 +899,18 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
             warnings.append("%s: %s" % (ref, pkg_warn))
-        elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
-                         "layer": layer, "start": start, "stop": stop,
-                         "pads": [list(c1), list(c2)],
-                         "package": pkg, "esl": esl, "esr": esr})
+        e = {"ref": ref, "type": kind, "value": val, "ny": ny,
+             "layer": layer, "start": start, "stop": stop,
+             "pads": [list(c1), list(c2)],
+             "package": pkg, "esl": esl, "esr": esr}
+        if rlc:
+            # The three components go in series in ONE element. The
+            # parasitics of a package have no meaning here: the user
+            # gave the whole part, thus an ESL on top of it would count
+            # the body two times.
+            e.update(rlc=rlc, type=e["type"] or "RLC", esl=0.0, esr=0.0,
+                     package=CUSTOM_RLC_PKG)
+        elements.append(e)
     return elements, warnings
 
 
@@ -850,7 +980,7 @@ def extract(board, pads, margin_mm, substrate=None):
     are "er", "tand", "h" (the total dielectric thickness in mm) and
     "cu_t" (in mm).
     """
-    copper_layers, diel_layers = _stackup(board, substrate)
+    copper_layers, diel_layers, stack_src = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
 
     first = pads[0].GetBoundingBox()
@@ -932,6 +1062,11 @@ def extract(board, pads, margin_mm, substrate=None):
     for p, pad in zip(ports, pads):
         polys_l = polygons.get(p["layer"], [])
         p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        # How far the copper runs from the pad along the feed. The
+        # runner caps the length of a de-embedded port with it: refer to
+        # `copper_run` and to problem 13. None means "further than the
+        # limit", and the runner then uses its own length.
+        p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
         # A stripline needs copper on the two planes. _port reads the
         # stackup only, thus it gives a height for each strip on an inner
         # layer, also when the second plane is empty above the pad. The
@@ -1002,6 +1137,9 @@ def extract(board, pads, margin_mm, substrate=None):
     for c in copper_layers:
         c.pop("id")
     return {
+        "version": MODEL_VERSION,
+        # "file", "default" or "dialog": refer to _stackup().
+        "stackup_source": stack_src,
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
