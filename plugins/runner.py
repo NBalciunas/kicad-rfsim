@@ -43,6 +43,40 @@ TL_PORTS = ("msl", "cpw", "stripline")
 # in the gap, thus the wavelength must not control that step.
 CPW_GAP_CELLS = 4
 CPW_STRIP_CELLS = 8
+# The same rule for the strip of a MICROSTRIP port, and it has its own
+# number. A microstrip has no gap that fixes the step, thus these cells
+# are the smallest cells of the board and they control the timestep.
+# Measured on 2026-08-05 on the 2.9 mm track of validation/, against
+# 49.8 ohm from Hammerstad and Jensen:
+#
+#   cells   Z0 coarse   Z0 medium   cells in the model
+#   none      44.3        47.2         60865   (it did not converge)
+#   4         47.7        47.8         67445
+#   8         49.3        49.3         80605
+#
+# 8 cells give the more exact impedance, and 4 are the value here. With
+# 8, the y mesh near a lumped element becomes so much finer than the x
+# mesh at the COARSE preset that `run_shunt.py coarse` reads a body ESL
+# 24% to 31% too large (the medium preset stays correct). 4 cells keep
+# that rig correct and they still remove the error that does not
+# converge, which is what a mesh rule must do. Raise this to 8 for a
+# more exact microstrip when no board holds a lumped element.
+MSL_STRIP_CELLS = 4
+# The safety margin of the timestep rule for a lumped inductor. The
+# largest stable factor follows 1/sqrt(L[nH]), and the measurement of
+# 2026-08-05 over 6 geometries gives a margin of 1.0 to 2.7 for the bare
+# law. 1.0 is no margin at all: on a board of 6.4 mm an inductor of 1 nH
+# sits exactly on the boundary. This coefficient takes the worst
+# geometry back to about 1.5. It costs 1/0.7 = 1.43 times more timesteps
+# on a board that holds a real inductor, and NOTHING on a usual board: a
+# body ESL is under 1 nH, thus the factor stays at 1.0.
+# `validation/run_stability.py` measures the margin again.
+LE_STAB_MARGIN = 0.7
+
+
+def _strip_cells(port_type):
+    """Give the number of mesh cells across the strip of a line port."""
+    return MSL_STRIP_CELLS if port_type == "msl" else CPW_STRIP_CELLS
 
 
 def _has_lumped_rlc():
@@ -63,13 +97,27 @@ def _time_step_factor(model):
     A lumped inductor makes the FDTD unstable if the timestep is too
     large. On the geometry of validation/run_rlc.py, 1 nH is stable at
     the full Courant step, but 10, 100 and 300 nH diverge to NaN. The
-    largest stable factor is near 1.8/sqrt(L[nH]). Thus 1/sqrt(L[nH])
-    keeps a margin of about 1.8.
+    largest stable factor follows 1/sqrt(L[nH]) over 300 times in L.
 
-    This is an approximation from one geometry only. The true criterion
-    also includes the cell size and the box of the element. Thus a run
-    can diverge. The runner finds this condition and tells the user to
-    set settings["time_step_factor"], which has priority over this value.
+    **The MARGIN of that law is not the same on every board**, and
+    2026-08-05 measured it on 6 geometries: the mesh preset, the box of
+    the element and the thickness of the board.
+    `validation/run_stability.py` holds the measurement, and the log of
+    that day holds the numbers. The margin runs from 2.7 down to **1.0**,
+    and the worst case is a THICK board: the cells at the element grow
+    with the substrate, and a board of 6.4 mm puts 1 nH exactly ON the
+    boundary. Thus `LE_STAB_MARGIN` divides the law, and the worst
+    geometry then keeps a margin of about 1.5.
+
+    The mesh preset alone changes nothing, and that is not luck: the two
+    faces of the element box are anchored mesh lines with nothing between
+    them, thus the box itself sets the smallest cell of the board as soon
+    as the preset becomes coarse. A rule on the FACTOR is tied to the
+    same geometry that controls the stability.
+
+    This stays an approximation. Thus `_diverged()` examines the port
+    data for NaN after each run and tells the user to set
+    settings["time_step_factor"], which has priority over this value.
     """
     s = model["settings"]
     if s.get("time_step_factor"):
@@ -88,7 +136,7 @@ def _time_step_factor(model):
             ind.append(e["esl"])
     if not ind:
         return None
-    return min(1.0, 1.0 / (max(ind) * 1e9) ** 0.5)
+    return min(1.0, LE_STAB_MARGIN / (max(ind) * 1e9) ** 0.5)
 
 
 def _cell_count(fdtd):
@@ -343,21 +391,31 @@ def _mesh(model, ports, res):
                     pos += side * step
                     across.add(pos)
                     step *= 1.4
-        elif g["type"] == "stripline":
-            # A stripline needs the same treatment as the strip of a CPW
-            # port. Before, only the CPW branch existed, thus the mesh
-            # step across a stripline came from the WAVELENGTH: the strip
-            # of 0.6 mm of validation/ is narrower than one cell of
-            # 2.355 mm at the coarse preset. That board measured 19.4 ohm
-            # against 38.9 ohm from IPC-2141; with these cells it gives
-            # 39.2 ohm at the SAME preset, and the mesh grows only from
-            # 57x39x48 lines to 57x57x48. The medium mesh gave 34.6 ohm
-            # without them, which is how the mesh was found to be the
-            # cause.
+        elif g["type"] in ("stripline", "msl"):
+            # A stripline and a microstrip need the same treatment as the
+            # strip of a CPW port. Before, only the CPW branch existed,
+            # thus the mesh step across the strip came from the
+            # WAVELENGTH: the stripline of 0.6 mm of validation/ is
+            # narrower than one cell of 2.355 mm at the coarse preset.
+            # That board measured 19.4 ohm against 38.9 ohm from
+            # IPC-2141; with these cells it gives 39.2 ohm at the SAME
+            # preset, and the mesh grows only from 57x39x48 lines to
+            # 57x57x48. The medium mesh gave 34.6 ohm without them, which
+            # is how the mesh was found to be the cause.
+            #
+            # A microstrip is the same geometry with the return path
+            # below it, and it got the rule on 2026-08-05. Its track of
+            # 2.9 mm is WIDER than one coarse cell, thus its error was
+            # smaller and it looked like the usual mesh error that
+            # converges: 44.3 ohm at coarse and 47.2 at medium, against
+            # 49.8 from Hammerstad and Jensen. It was not that. With
+            # MSL_STRIP_CELLS cells the same board gives 47.7 at coarse
+            # and 47.8 at medium: the 2.9 ohm between the two presets
+            # goes away, which is what the rule must do.
             across = ys if g["prop_dir"] == "x" else xs
             c = g["y"] if g["prop_dir"] == "x" else g["x"]
             hw = 0.5 * g["msl_width"]
-            half = max(1, CPW_STRIP_CELLS // 2)
+            half = max(1, _strip_cells(g["type"]) // 2)
             for side in (-1, 1):
                 for i in range(1, half + 1):
                     across.add(c + side * hw * i / half)
@@ -397,6 +455,14 @@ def _mesh(model, ports, res):
                 zs.update((c["z"] + k * step, c["z"] - k * step))
     for g in ports:
         if g["type"] != "cpw" or not g["gap"]:
+            # A MICROSTRIP port does NOT need this rule, and it was
+            # measured on 2026-08-05: the same chain of z lines on the
+            # validation board (a track of 2.9 mm on a substrate of
+            # 1.53 mm) moves Z0 by 0.05 ohm, which is 0.1%, and it costs
+            # 8.6% more cells. The plane below the strip holds the field,
+            # thus the dielectric rule of 4 cells already covers it. A
+            # NARROW line is a different case and it is not settled:
+            # refer to Problems, problem 16.
             continue
         # A CPW port also needs its own cells ABOVE and BELOW the plane of
         # the line, and their step must come from the GAP. The line of a
@@ -437,13 +503,14 @@ def _mesh(model, ports, res):
                     break
 
     tol = min(res / 8.0, margin / 20.0)
-    # The cells across a stripline strip are much smaller than the mesh
-    # step. Thus the merge would remove them again, in the same way as it
-    # would remove the lines of a CPW gap.
-    strips = [g["msl_width"] for g in ports
-              if g["type"] == "stripline" and g.get("msl_width")]
+    # The cells across the strip of a stripline port or of a microstrip
+    # port are much smaller than the mesh step. Thus the merge would
+    # remove them again, in the same way as it would remove the lines of
+    # a CPW gap.
+    strips = [g["msl_width"] / _strip_cells(g["type"]) for g in ports
+              if g["type"] in ("stripline", "msl") and g.get("msl_width")]
     if strips:
-        tol = min(tol, 0.25 * min(strips) / CPW_STRIP_CELLS)
+        tol = min(tol, 0.25 * min(strips))
     gaps = [g["gap"] for g in ports if g["type"] == "cpw" and g["gap"]]
     if gaps:
         # A CPW gap is usually much smaller than the mesh step. Thus the
@@ -477,6 +544,17 @@ def _mesh(model, ports, res):
     boxes = [b for b in boxes if b > 0]
     if boxes:
         tol = min(tol, 0.25 * min(boxes))
+    # The number of CELLS in the box of an element does not change the
+    # value that the engine models, and this was measured on 2026-08-05
+    # in both directions. Along the current: a rule that removed the
+    # lines inside the box took the shunt board from 2 cells back to 1,
+    # and the body ESL that the notch gave moved from 0.3105 nH to
+    # 0.3104 nH. Across the current: the cells across the strip of a
+    # microstrip port took the box of the series board from 2 cells to 8,
+    # and `run_rlc.py` gives R, L and C back against the closed form as
+    # before. Thus openEMS scales R, L and C correctly over the box, and
+    # this code needs no rule for the cell count. Only the two FACES
+    # matter, and the anchors above hold them.
     return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
             _merge_close(zs, tol_z))
 

@@ -318,13 +318,20 @@ def two(mesh="coarse"):
         if abs(got - lval) > max(L_PART_TOL * lval, ESL_FLOOR_H):
             fails.append("the pair gives %.4f nH for an inductor of %.4f nH"
                          % (got * 1e9, lval * 1e9))
-    # Each value reads HIGH, and the excess follows the inductor and not
-    # the geometry: +0.100 nH on 2 nH and +0.376 nH on 5 nH at the coarse
-    # preset. Two probes excluded the two other explanations - the
-    # timestep and a branch inductance that follows the frequency - thus
-    # the excess belongs to the lumped inductor itself. Refer to the log
-    # of 2026-08-04 (10). The test holds the SIGN, because a value that
-    # reads LOW would be a different defect.
+    # Each value reads HIGH, and the excess is PROPORTIONAL to the
+    # inductor: it is a percentage and not a constant of the geometry.
+    # Measured on 2026-08-05 with 4 values at the coarse preset, of which
+    # 3 are inside the power guard: +4.2%, +5.2% and +4.2% on 0.5, 1 and
+    # 2 nH. A straight line through the excess gives a slope of
+    # +0.041 nH/nH and an intercept of +0.005 nH, and the intercept is
+    # under the scatter of this rig (0.01 nH). An additive term of the
+    # geometry would give the opposite: an intercept and no slope. Two
+    # probes of 2026-08-04 (10) had already excluded the timestep and a
+    # branch inductance that follows the frequency. Thus the excess
+    # belongs to the lumped inductor itself. The numbers that the log of
+    # (10) used for this conclusion came from a 5 nH run OUTSIDE the
+    # guard; these come from inside it. The test holds the SIGN, because
+    # a value that reads LOW would be a different defect.
     print("\n   the excess is %+.4f nH and %+.4f nH: a lumped inductor of "
           "its own reads high" % (excess[0] * 1e9, excess[1] * 1e9))
     if min(excess) < -ESL_FLOOR_H:

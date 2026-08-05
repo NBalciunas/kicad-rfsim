@@ -15,6 +15,10 @@ import wx
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
+# The rows of the R/L/C parts that the dialog shows without a scroll.
+# Each row is about 29 px tall, and the dialog is already 1053 px tall
+# with one part on a screen of 1920x1080.
+MAX_PART_ROWS = 6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
 KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor"}
@@ -406,21 +410,37 @@ class SettingsDialog(wx.Dialog):
             #
             # Column 5 is an empty column that GROWS, thus the part
             # stays at the left and the parasitics stay at the right end.
+            #
+            # The rows go into a SCROLLED window, and their parent is
+            # that window and not the dialog. Each row is about 29 px
+            # tall, thus a board with many parts made a dialog that was
+            # taller than the screen: 1053 px with one part on a screen
+            # of 1920x1080, which is already the full height. _fit_rows
+            # gives the window its height limit after the rows exist.
+            #
+            # The parent is the static box and not the dialog: wx gives a
+            # warning for a window of a wxStaticBoxSizer that is a child
+            # of the dialog, and a scrolled window is a real container.
+            self.part_area = wx.ScrolledWindow(lbox.GetStaticBox(),
+                                               style=wx.VSCROLL)
+            self.part_area.SetScrollRate(0, 10)
             lg = wx.FlexGridSizer(cols=15, vgap=6, hgap=8)
             lg.AddGrowableCol(5, 1)
-            lbox.Add(lg, 0, wx.ALL | wx.EXPAND, 6)
+            self.part_area.SetSizer(lg)
+            lbox.Add(self.part_area, 0, wx.ALL | wx.EXPAND, 6)
+            pane = self.part_area
             mid = wx.ALIGN_CENTER_VERTICAL
             for e in lumped:
                 i = len(self.para_rows)
                 pkg = e.get("package")
                 kind = e.get("type") or None
-                cb = wx.CheckBox(self, label="Model")
+                cb = wx.CheckBox(pane, label="Model")
                 # A part whose type the board does not give starts OFF.
                 # Thus a diode, a ferrite bead or a footprint of your own
                 # changes no simulation until the user selects a type and
                 # gives a value.
                 cb.SetValue(kind is not None)
-                ch = wx.Choice(self, choices=labels)
+                ch = wx.Choice(pane, choices=labels)
                 # A package that the code did not read gives "Custom" for
                 # a part that the board describes: the parasitics of an
                 # R, an L or a C are on by default, and _ESL_DEFAULT_NH
@@ -434,8 +454,8 @@ class SettingsDialog(wx.Dialog):
                 esr0 = "%g" % (e.get("esr") or 0.0)
                 if start_pkg == NO_PARASITICS:
                     esl0 = esr0 = "0"
-                esl = wx.TextCtrl(self, value=esl0, size=(55, -1))
-                esr = wx.TextCtrl(self, value=esr0, size=(55, -1))
+                esl = wx.TextCtrl(pane, value=esl0, size=(55, -1))
+                esr = wx.TextCtrl(pane, value=esr0, size=(55, -1))
                 # The refdes gives the type and the Value field gives the
                 # number, and the row SHOWS what the parser read. But
                 # both controls stay open: the user knows the part, and
@@ -443,7 +463,7 @@ class SettingsDialog(wx.Dialog):
                 # that names no type starts at "Unknown" with an empty
                 # value, because the Value field of a diode holds a part
                 # number and not a quantity.
-                kinds = wx.Choice(self, choices=[UNKNOWN_KIND]
+                kinds = wx.Choice(pane, choices=[UNKNOWN_KIND]
                                   + list(KIND_NAMES.values()), size=(110, -1))
                 kinds.SetSelection(KIND_ORDER.index(kind) if kind in KIND_ORDER
                                    else 0)
@@ -451,29 +471,29 @@ class SettingsDialog(wx.Dialog):
                 # same way as the ESR and the ESL fields. Thus the user
                 # gives a number and no prefix, and the unit follows the
                 # TYPE alone and not the size of the value.
-                value = wx.TextCtrl(self, value=_entry_text(kind,
+                value = wx.TextCtrl(pane, value=_entry_text(kind,
                                                             e.get("value")),
                                     size=(90, -1))
                 value.Enable(kind is not None)
-                qty = wx.StaticText(self, label=_qty_label(kind))
-                uni = wx.StaticText(self, label=ENTRY_UNITS.get(kind, ""))
-                lg.Add(wx.StaticText(self, label='Element "%s"' % e["ref"]),
+                qty = wx.StaticText(pane, label=_qty_label(kind))
+                uni = wx.StaticText(pane, label=ENTRY_UNITS.get(kind, ""))
+                lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
                        0, mid)
                 lg.Add(kinds, 0, mid)
                 lg.Add(qty, 0, mid | wx.LEFT, 6)
                 lg.Add(value, 0, mid)
                 lg.Add(uni, 0, mid)
                 lg.Add((0, 0))   # the empty column that grows
-                lg.Add(wx.StaticText(self, label="Parasitics:"), 0, mid)
+                lg.Add(wx.StaticText(pane, label="Parasitics:"), 0, mid)
                 lg.Add(ch, 0, mid)
                 # R before L, in the sequence of "RLC". There is no third
                 # field: a series capacitance is not a parasitic of
                 # these parts.
                 for label, ctrl, unit in (("ESR:", esr, "ohm"),
                                           ("ESL:", esl, "nH")):
-                    lg.Add(wx.StaticText(self, label=label), 0, mid | wx.LEFT, 6)
+                    lg.Add(wx.StaticText(pane, label=label), 0, mid | wx.LEFT, 6)
                     lg.Add(ctrl, 0, mid)
-                    lg.Add(wx.StaticText(self, label=unit), 0, mid)
+                    lg.Add(wx.StaticText(pane, label=unit), 0, mid)
                 lg.Add(cb, 0, mid | wx.LEFT, 12)
                 # A preset writes the ESL with ChangeValue, which sends no
                 # EVT_TEXT. Thus the choice stays on the package. An edit
@@ -484,6 +504,11 @@ class SettingsDialog(wx.Dialog):
                     c.Bind(wx.EVT_TEXT,
                            lambda evt, k=i: self._on_para_edit(k, evt))
                 kinds.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_kind(k))
+                # The value of an inductor changes the timestep, thus the
+                # warning must follow the field.
+                value.Bind(wx.EVT_TEXT,
+                           lambda evt: (self._update_lumped_warning(),
+                                        evt.Skip()))
                 self.para_rows.append((e["ref"], cb, ch, esl, esr))
                 # The controls of the PART itself. They stay beside
                 # para_rows, thus the code that reads the parasitics does
@@ -494,6 +519,17 @@ class SettingsDialog(wx.Dialog):
                                        "value": value, "qty": qty,
                                        "unit": uni, "last_pkg": start_pkg,
                                        "esl0": esl0, "esr0": esr0})
+            # A lumped inductor makes the FDTD unstable at the full
+            # Courant step, thus the runner divides the step by
+            # sqrt(L[nH]) and multiplies the number of steps by the same
+            # value. The run time goes up with it, and nothing said so
+            # before this label: a user who typed 100 nH got a run that
+            # was 10 times longer with no message.
+            # The parent is the static box, in the same way as the window
+            # of the rows: one sizer cannot hold two different parents.
+            self.lumped_warn = wx.StaticText(lbox.GetStaticBox(), label="")
+            self.lumped_warn.SetForegroundColour(wx.Colour(150, 90, 0))
+            lbox.Add(self.lumped_warn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -528,14 +564,56 @@ class SettingsDialog(wx.Dialog):
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+        # A structure with a high Q rings for a long time. The run then
+        # stops at the step limit before the energy comes down to the end
+        # criteria, and the S-parameters are not correct. The two limits
+        # were constant at 300k and 1e-4 before this.
+        #
+        # The three fields go on ONE row, in the same way as the two
+        # frequencies. Three rows of the grid would make the dialog
+        # 84 px taller, and it is already 1053 px with one part: refer
+        # to MAX_PART_ROWS and to problem 10 of NOTES.
+        self.max_steps = wx.TextCtrl(self, value="300000", size=(70, -1))
+        self.max_steps.SetToolTip(
+            "The run stops at this number of timesteps. A structure with "
+            "a high Q (a narrowband filter, a resonator) needs more, "
+            "because its energy comes down slowly.")
+        self.end_crit = wx.TextCtrl(self, value="1e-4", size=(55, -1))
+        self.end_crit.SetToolTip(
+            "The run stops when the energy comes down to this part of its "
+            "maximum. A smaller value gives a longer run and a more exact "
+            "result.")
+        # An empty field gives None, and the runner then selects the
+        # value itself from the largest inductance in the model.
+        self.tsf = wx.TextCtrl(self, value="", size=(55, -1))
+        self.tsf.SetToolTip(
+            "The part of the Courant timestep that the run uses. Leave it "
+            "EMPTY for the automatic value, which a lumped inductor needs "
+            "for stability. A value here has priority over the automatic "
+            "one. A smaller value gives a longer run.")
+        lim = wx.BoxSizer(wx.HORIZONTAL)
+        for label, ctrl in (("Max steps:", self.max_steps),
+                            ("End criteria:", self.end_crit),
+                            ("Timestep:", self.tsf)):
+            if lim.GetChildren():
+                lim.AddSpacer(12)
+            lim.Add(wx.StaticText(self, label=label), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+            lim.Add(ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        rg.Add(wx.StaticText(self, label="Run limits:"), 0,
+               wx.ALIGN_CENTER_VERTICAL)
+        rg.Add(lim, 0, wx.EXPAND)
         self.outdir = row(rg, "Output directory:", wx.DirPickerCtrl(
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
         top.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        # The rows must have their size before the dialog takes its own.
+        self._fit_rows()
         self.SetSizerAndFit(top)
         self.SetMinSize((520, -1))
         self.Fit()
+        self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
@@ -682,9 +760,92 @@ class SettingsDialog(wx.Dialog):
             # needs a type: the unit comes from it.
             self.part_rows[i]["value"].Enable(
                 on and self._kind_of(i) is not None)
+        self._update_lumped_warning()
         self._redraw_preview()
         if evt is not None:
             evt.Skip()
+
+    def _fit_rows(self):
+        """Give the window of the part rows its height limit.
+
+        The dialog was 1053 px tall with ONE part on a screen of
+        1920x1080, and each part after it added 29 px. Thus a board with
+        15 parts made a dialog that no screen shows. The window now stops
+        at MAX_PART_ROWS rows, or at one quarter of the screen if that is
+        less, and the rest of the rows come with the scroll bar.
+        """
+        area = getattr(self, "part_area", None)
+        if area is None:
+            return
+        rows = max(1, len(self.part_rows))
+        best = area.GetSizer().GetMinSize()
+        one = best.GetHeight() / float(rows)
+        try:
+            screen = wx.Display().GetClientArea().GetHeight()
+        except Exception:
+            screen = 1080
+        cap = max(2.0 * one, min(MAX_PART_ROWS * one, 0.25 * screen))
+        # The scroll bar takes some width, thus the rows do not lose a
+        # column when it appears.
+        w = best.GetWidth() + (wx.SystemSettings.GetMetric(
+            wx.SYS_VSCROLL_X) if best.GetHeight() > cap else 0)
+        area.SetMinSize((w, int(min(best.GetHeight(), cap)) + 2))
+        area.FitInside()
+        self._one_row = one
+
+    def _fit_to_screen(self):
+        """Take the height of the part rows back until the dialog fits.
+
+        `_fit_rows` gives the rows their limit before the dialog has a
+        size. This runs after the fit, thus it knows the true height.
+        The rows are the only part that can become smaller, and 2 rows
+        is the floor: a scroll bar with no row is of no use.
+        """
+        area = getattr(self, "part_area", None)
+        if area is None:
+            return
+        try:
+            avail = wx.Display().GetClientArea().GetHeight()
+        except Exception:
+            return
+        over = self.GetSize().GetHeight() - avail
+        if over <= 0:
+            return
+        cur = area.GetMinSize().GetHeight()
+        new = max(2.0 * self._one_row, cur - over)
+        if new < cur:
+            area.SetMinSize((area.GetMinSize().GetWidth(), int(new)))
+            area.FitInside()
+            self.Fit()
+
+    def _update_lumped_warning(self):
+        """Show what a lumped inductor costs in run time.
+
+        `runner._time_step_factor` divides the timestep by sqrt(L[nH])
+        and multiplies the number of timesteps by the same value. Thus
+        the run time goes up with the square root of the inductance, and
+        the user must see it BEFORE the run and not after it.
+        """
+        label = getattr(self, "lumped_warn", None)
+        if label is None:
+            return
+        ind = []
+        for i, (_, cb, ch, esl, _) in enumerate(self.para_rows):
+            if not cb.GetValue():
+                continue
+            if self._kind_of(i) == "L":
+                ind.append(self._part_value(i) or 0.0)
+            ind.append(self._para_value(ch, esl, 1e-9) or 0.0)
+        nh = 1e9 * max(ind or [0.0])
+        text = ""
+        if nh > 1.0:
+            text = ("An inductor of %g nH divides the timestep by %.1f, "
+                    "thus the run takes about %.1f times longer."
+                    % (nh, nh ** 0.5, nh ** 0.5))
+        if label.GetLabel() != text:
+            label.SetLabel(text)
+            label.Wrap(560)
+            self.Layout()
 
     def _redraw_preview(self):
         if self._prev_fig is None:
@@ -775,6 +936,23 @@ class SettingsDialog(wx.Dialog):
                     % (self.port_order[i].GetSelection() + 1),
                     "RFsim", wx.ICON_ERROR)
                 return
+        # The three limits of the run. An empty timestep factor is
+        # correct: the runner then selects the value itself.
+        for ctrl, name, low, high in (
+                (self.max_steps, "Max timesteps", 100, 1e9),
+                (self.end_crit, "End criteria", 1e-12, 1.0),
+                (self.tsf, "Timestep factor", 1e-3, 1.0)):
+            text = ctrl.GetValue().strip()
+            if ctrl is self.tsf and not text:
+                continue
+            try:
+                v = float(text)
+            except ValueError:
+                v = None
+            if v is None or not low <= v <= high:
+                wx.MessageBox("%s must be a number from %g to %g."
+                              % (name, low, high), "RFsim", wx.ICON_ERROR)
+                return
         evt.Skip()
 
     def _pkg_of(self, ch):
@@ -850,6 +1028,7 @@ class SettingsDialog(wx.Dialog):
         r["esr0"] = "%g" % self._esr.get(kind, 0.0)
         if self._pkg_of(self.para_rows[i][2]) != NO_PARASITICS:
             self.para_rows[i][4].ChangeValue(r["esr0"])
+        self._update_lumped_warning()
         self.Layout()
 
     def _part_value(self, i):
@@ -878,6 +1057,7 @@ class SettingsDialog(wx.Dialog):
         """
         ch = self.para_rows[i][2]
         ch.SetSelection(self._pkg_values.index(CUSTOM_PKG))
+        self._update_lumped_warning()
         evt.Skip()
 
     def get_settings(self):
@@ -932,11 +1112,13 @@ class SettingsDialog(wx.Dialog):
                 for i, (ref, cb, ch, esl, esr) in enumerate(self.para_rows)},
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
-            # ponytail: these two limits are constant. Put them in the
-            # dialog if high-Q structures, which need a longer ringdown,
-            # become usual.
-            "max_timesteps": 300000,
-            "end_criteria": 1e-4,
+            "max_timesteps": int(float(self.max_steps.GetValue())),
+            "end_criteria": float(self.end_crit.GetValue()),
+            # An empty field gives None. `runner._time_step_factor` then
+            # selects the value from the largest inductance of the model,
+            # and a value here has priority over it.
+            "time_step_factor": (float(self.tsf.GetValue())
+                                 if self.tsf.GetValue().strip() else None),
         }
 
 

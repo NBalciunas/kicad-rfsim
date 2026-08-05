@@ -58,7 +58,7 @@ CSXCAD.
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog. It shows the ports, the R/L/C parts and the domain, and it follows the "Domain margin" field and the "Model" checkboxes.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the port impedance, the number and the type of each port, the substrate, the CPU threads, the mesh preset, the domain margin and the output directory.
+4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the port impedance, the number and the type of each port, the substrate, the CPU threads, the mesh preset, the domain margin, the run limits and the output directory. The run limits are the maximum number of timesteps, the end criteria and the timestep factor. Leave the timestep factor empty: the plugin then selects it, and a lumped inductor needs a smaller value for stability.
 5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports
@@ -84,7 +84,7 @@ Each excited port costs one full FDTD run. Port 1 supplies the field views and t
 
 A de-embedded port measures the impedance of the line and its effective permittivity from its own probes. The results window shows the real part and the imaginary part of the impedance in the "Line Impedance" view, and the solver writes all the values, the effective permittivity included, to `lines.json`. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
 
-The coarse preset gives a value that is too small: the microstrip of `validation/` gives 44 ohm at coarse, 47 ohm at medium, and the theory gives 50 ohm. Use medium or fine when the number is important.
+The coarse preset gives a value that is a little too small: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.9 ohm at fine, and the theory gives 49.8 ohm. Use medium or fine when the number is important.
 
 ### The substrate and the domain
 

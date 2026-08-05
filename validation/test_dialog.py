@@ -272,6 +272,102 @@ def test_unknown_part_without_a_value_cannot_run():
     print("a modelled part with no type or no value is refused OK")
 
 
+def test_the_rows_scroll_and_the_dialog_stops_growing():
+    """A board with many parts must not make a dialog taller than a screen.
+
+    Measured on 2026-08-04: 1053 px with ONE part, and 29 px more for
+    each part after it. Thus the dialog went past a screen of 1920x1080
+    with one part, and past 2560x1440 at 15 parts. The rows are in a
+    scrolled window now, thus the height stops at MAX_PART_ROWS rows.
+    """
+    heights = {}
+    for n in (1, 5, 15, 20):
+        d = dialog([unknown("D%d" % k) for k in range(n - 1)])
+        assert len(d.part_rows) == n, "want %d rows, got %d" % (n,
+                                                                len(d.part_rows))
+        heights[n] = d.GetSize().GetHeight()
+        d.Destroy()
+    print("   the dialog: " + ", ".join("%d part(s) %d px" % (n, h)
+                                        for n, h in sorted(heights.items())))
+    # 15 parts and 20 parts are both above MAX_PART_ROWS, thus the two
+    # dialogs must be the same height: the rows after the limit go
+    # behind the scroll bar. 5 parts is below the limit, thus that
+    # dialog is permitted to be shorter.
+    grow = abs(heights[20] - heights[15])
+    assert grow <= 2, \
+        "the dialog grows by %d px from 15 parts to 20: the rows do not " \
+        "scroll" % grow
+    assert heights[20] <= heights[1] + (gui.MAX_PART_ROWS + 1) * 40, \
+        "the dialog is %d px with 20 parts, against %d px with one" \
+        % (heights[20], heights[1])
+    print("the rows scroll OK (the height stops at %d px)" % heights[20])
+
+
+def test_the_inductor_warning_follows_the_value():
+    """A lumped inductor multiplies the run time, and the dialog says so.
+
+    `runner._time_step_factor` gives min(1, 1/sqrt(L[nH])), thus 100 nH
+    divides the timestep by 10 and multiplies the number of steps by 10.
+    Nothing said this before: the user saw a run that was 10 times
+    longer, with no message.
+    """
+    d = dialog([unknown("L9")])
+    assert d.lumped_warn.GetLabel() == "", \
+        "a board with no inductor must give no warning"
+    r = d.part_rows[1]
+    r["kind"].SetSelection(gui.KIND_ORDER.index("L"))
+    fire(r["kind"], wx.EVT_CHOICE)
+    d.para_rows[1][1].SetValue(True)
+    d._on_lumped(None)
+    r["value"].SetValue("0.5")          # 0.5 nH: the timestep does not move
+    assert d.lumped_warn.GetLabel() == "", \
+        "0.5 nH keeps the full timestep, thus it needs no warning: %r" \
+        % d.lumped_warn.GetLabel()
+    r["value"].SetValue("100")          # 100 nH: 10 times more timesteps
+    text = d.lumped_warn.GetLabel()
+    assert "10.0 times longer" in text, text
+    d.Destroy()
+    print("the inductor warning OK (%s)" % text)
+
+
+def test_the_run_limits_reach_the_settings():
+    """The two limits of the run and the timestep factor are controls now.
+
+    They were constant at 300k and 1e-4 in get_settings, thus a
+    structure with a high Q stopped too early and nothing said so.
+    """
+    d = dialog()
+    s = d.get_settings()
+    assert s["max_timesteps"] == 300000 and s["end_criteria"] == 1e-4, s
+    # An EMPTY timestep factor must give None, and not 0: the runner
+    # then selects the value from the largest inductance of the model.
+    assert s["time_step_factor"] is None, s["time_step_factor"]
+    d.max_steps.SetValue("50000")
+    d.end_crit.SetValue("1e-5")
+    d.tsf.SetValue("0.25")
+    s = d.get_settings()
+    assert s["max_timesteps"] == 50000, s["max_timesteps"]
+    assert s["end_criteria"] == 1e-5, s["end_criteria"]
+    assert s["time_step_factor"] == 0.25, s["time_step_factor"]
+
+    # _on_ok must refuse a value that the solver cannot use.
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        for ctrl, bad in ((d.max_steps, "0"), (d.end_crit, "5"),
+                          (d.tsf, "2.0"), (d.tsf, "not a number")):
+            good = ctrl.GetValue()
+            ctrl.SetValue(bad)
+            d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+            assert stopped, "the dialog accepted %r" % bad
+            stopped.clear()
+            ctrl.SetValue(good)
+    finally:
+        wx.MessageBox = old_box
+    d.Destroy()
+    print("the run limits OK (max timesteps, end criteria, timestep factor)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -281,4 +377,7 @@ if __name__ == "__main__":
     test_unknown_part_starts_off_and_empty()
     test_unknown_part_takes_a_type_and_a_value()
     test_unknown_part_without_a_value_cannot_run()
+    test_the_rows_scroll_and_the_dialog_stops_growing()
+    test_the_inductor_warning_follows_the_value()
+    test_the_run_limits_reach_the_settings()
     print("PASS")

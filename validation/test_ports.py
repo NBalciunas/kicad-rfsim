@@ -131,28 +131,39 @@ def test_port_length_uses_list_position():
 
 
 def test_strip_cells():
-    """A stripline needs cells ACROSS the strip, as a CPW port has.
+    """A stripline and a microstrip need cells ACROSS the strip.
 
-    Before, only the CPW branch of _mesh made them. The step across a
-    stripline then came from the wavelength: the strip of 0.6 mm of
+    Before, only the CPW branch of _mesh made them. The step across the
+    strip then came from the wavelength: the stripline of 0.6 mm of
     validation/ is narrower than one cell of 2.355 mm at the coarse
     preset, and the port measured 19.4 ohm against 38.9 ohm from the
     theory. With the cells it gives 39.2 ohm at the SAME preset.
+
+    A microstrip got the rule on 2026-08-05. Its track of 2.9 mm is
+    WIDER than one coarse cell, thus its error was smaller and it looked
+    like the usual mesh error: 44.3 ohm at coarse and 47.2 at medium
+    against 50.0 from the theory. With the cells the same board gives
+    49.3 ohm at coarse and at medium.
     """
-    m = model("stripline")
-    _, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
-    c, hw = -10.0, 0.3
-    inside = [y for y in ys if c - hw - 1e-9 <= y <= c + hw + 1e-9]
-    assert len(inside) >= runner.CPW_STRIP_CELLS - 1, \
-        "only %d lines across the strip, want %d or more" \
-        % (len(inside), runner.CPW_STRIP_CELLS - 1)
-    # The mesh must grade outward, and not jump from 0.075 mm to res.
-    out = sorted(y for y in ys if c + hw < y < c + hw + 4.0 * RES)
-    steps = [b - a for a, b in zip([c + hw] + out, out)]
-    assert steps and max(steps) < RES, \
-        "the mesh jumps to the full step at the edge of the strip"
-    print("stripline strip cells OK (%d across, %d graded outward)"
-          % (len(inside), len(out)))
+    for kind, w in (("stripline", 0.6), ("msl", 2.9)):
+        m = model(kind, track_width=w, width=w, length=w)
+        _, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+        c, hw = -10.0, 0.5 * w
+        # A microstrip has its own count: refer to MSL_STRIP_CELLS.
+        want = runner._strip_cells(kind)
+        inside = [y for y in ys if c - hw - 1e-9 <= y <= c + hw + 1e-9]
+        assert len(inside) >= want - 1, \
+            "%s: only %d lines across the strip, want %d or more" \
+            % (kind, len(inside), want - 1)
+        # The mesh must grade outward, and not jump from a strip cell
+        # to res.
+        out = sorted(y for y in ys if c + hw < y < c + hw + 4.0 * RES)
+        steps = [b - a for a, b in zip([c + hw] + out, out)]
+        assert steps and max(steps) < RES, \
+            "%s: the mesh jumps to the full step at the edge of the strip" \
+            % kind
+        print("%s strip cells OK (%d across, %d graded outward)"
+              % (kind, len(inside), len(out)))
 
 
 def test_cpw_z_cells():
