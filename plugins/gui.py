@@ -1418,7 +1418,8 @@ class ResultsFrame(wx.Frame):
         elif sel.startswith("Line Impedance"):
             self._plot_lines(ax)
         elif sel.startswith(("E-Field", "H-Field")):
-            self._plot_field(ax, sel[0], pnum)
+            ax.remove()
+            self._plot_field(sel[0], pnum)
         elif sel.startswith("Farfield"):
             ax.remove()
             ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
@@ -1427,7 +1428,7 @@ class ResultsFrame(wx.Frame):
             if tag in ff.get("cuts", {}):    # "(Phi=0)" and similar: a 2D cut
                 self._plot_farfield(ff, tag, ptag)
             else:                            # only "(f=xx GHz)": a 3D balloon
-                self._plot_farfield3d(ff, ptag)
+                self._plot_farfield3d(ff, ptag, pnum)
         elif sel.startswith("S-Parameters"):
             phase = sel.endswith("[Phase]")
             for j in range(net.nports):
@@ -1543,13 +1544,18 @@ class ResultsFrame(wx.Frame):
         p = next((q for q in ports if q["number"] == port), ports[0])
         return 0.5 * (z_of[p["layer"]] + z_of[p["ref_layer"]])
 
-    def _plot_field(self, ax, kind, port=None):
+    def _plot_field(self, kind, port=None):
         """Show an animation of the wave on the mid-plane of the substrate.
 
-        The two fields have the same red and blue view, which keeps the
-        sign. E shows E_z. H shows the largest in-plane component of H,
-        because H makes loops around the track and its vertical part is
-        near zero on this plane.
+        The picture is the size of the field vector at one phase, in the
+        style of CST: a scale from zero to the largest value that the
+        animation reaches. A block of text at the left gives the
+        frequency, the phase and that largest value.
+
+        The values are the values of openEMS for its excitation, which
+        has an amplitude of 1. Thus V/m and A/m are correct units, but
+        the size of the input signal, and not 1 W, sets the size of the
+        numbers.
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation
@@ -1562,29 +1568,35 @@ class ResultsFrame(wx.Frame):
             self._field[key] = _load_field(self.field_h5s[key])
         x, y, F, f_hz = self._field[key]
         frames = 24
+        unit = "V/m" if kind == "E" else "A/m"
 
-        if kind == "E":
-            comp = F[..., 2]                 # the vertical E below the track
-            cname = "E_z"
-        else:
-            hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
-            comp = F[..., 0] if hx >= hy else F[..., 1]  # the largest H
-            # **Name the component.** The code selects it from the data,
-            # thus it can change from run to run and from port to port.
-            # It stayed quiet until 2026-08-05, and a reader then could
-            # not know which component the picture showed.
-            cname = "H_x" if hx >= hy else "H_y"
-        lim = float(np.percentile(np.abs(comp), 99)) or 1.0
-        mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
-                             vmin=-lim, vmax=lim, shading="gouraud")
-        # **A colour bar.** The view had none at all, thus the picture
-        # gave the shape of the wave and no scale. The unit is the raw
-        # value of openEMS at the amplitude of the excitation: the
-        # absolute size means nothing, and only the SHAPE and the SIGN
-        # do. The label says so, and it does not invent a unit.
-        bar = self.figure.colorbar(mesh, ax=ax, shrink=0.85)
-        bar.set_label("Re(%s), arbitrary units (the excitation amplitude)"
-                      % cname, fontsize=8)
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[1.0, 3.2])
+        info_ax = self.figure.add_subplot(gs[0])
+        info_ax.axis("off")
+        ax = self.figure.add_subplot(gs[1])
+
+        def mag(i):
+            """The size of the real field vector at the phase of frame i."""
+            return np.linalg.norm(
+                np.real(F * np.exp(2j * np.pi * i / frames)), axis=-1)
+
+        # The scale is fixed for the whole animation: a scale that moves
+        # with the frame makes every frame look the same. The colour
+        # runs smoothly from zero to the largest value: a scale of
+        # steps, as the bar of CST, makes bands of one colour that look
+        # like large pixels.
+        vmax = max(float(mag(i).max()) for i in range(frames)) or 1.0
+        ticks = np.linspace(0.0, vmax, 10)
+        mesh = ax.pcolormesh(x, y, mag(0), cmap="jet", vmin=0.0, vmax=vmax,
+                             shading="gouraud")
+        bar = self.figure.colorbar(mesh, ax=ax, shrink=0.85, ticks=ticks)
+        # The unit sits over the bar, as CST, and not at its side: a
+        # word that stands up needs the reader to turn their head.
+        bar.ax.set_title(unit, fontsize=9)
+        # Each mark carries its own value, and the two ends of the bar
+        # carry theirs. A common factor above the bar, which is the
+        # default, hides how large a step is.
+        bar.ax.set_yticklabels(["%.3g" % t for t in ticks], fontsize=7)
 
         top = self.model["ports"][0]["layer"]
         for poly in self.model["polygons"].get(top, []):
@@ -1604,30 +1616,39 @@ class ResultsFrame(wx.Frame):
                         zorder=6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        # The title names the QUANTITY, the PLANE and the frequency. The
-        # plane is the one that `runner.build` dumps: the middle of the
-        # substrate between the layer of the excited port and the layer
-        # below it.
-        ax.set_title("Re(%s), substrate mid-plane z=%.2f mm, f=%g GHz%s"
-                     % (cname, self._dump_z(port), f_hz / 1e9,
-                        ", Port %d" % port if len(ports) > 1 else ""),
+        ax.set_title("%s-Field (f=%g GHz)%s"
+                     % (kind, f_hz / 1e9,
+                        " (Port %d)" % port if len(ports) > 1 else ""),
                      fontsize=10)
         ax.set_aspect("equal")
 
+        # The block of numbers at the left. The PLANE goes with them:
+        # it is the plane that `runner.build` dumps, the middle of the
+        # substrate between the layer of the excited port and the layer
+        # below it, and a field picture with no plane shows nothing.
+        head = ("Frequency: %.2f GHz\n" % (f_hz / 1e9))
+        tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(substrate mid-plane)"
+                % (vmax, unit, self._dump_z(port)))
+        info = info_ax.text(0.0, 0.5, head + "Phase: 0\N{DEGREE SIGN}" + tail,
+                            fontsize=9, va="center", ha="left",
+                            linespacing=1.8)
+
         def step(i):
-            ph = np.exp(2j * np.pi * i / frames)
-            mesh.set_array(np.real(comp * ph).ravel())
-            return (mesh,)
+            mesh.set_array(mag(i).ravel())
+            info.set_text(head + "Phase: %d\N{DEGREE SIGN}"
+                          % round(360.0 * i / frames) + tail)
+            return (mesh, info)
 
         self._anim = FuncAnimation(self.figure, step, frames=frames,
                                    interval=60, blit=False,
                                    cache_frame_data=False)
 
-    def _plot_farfield3d(self, ff, ptag=""):
+    def _plot_farfield3d(self, ff, ptag="", pnum=None):
         """Show a transparent 3D balloon of the directivity.
 
         The PCB is a reference plate. The radius and the colour give the
-        dBi in a range of 30 dB. +z is the normal of the board.
+        dBi in a range of 30 dB. +z is the normal of the board. A block
+        of text at the left gives the numbers, in the style of CST.
         """
         import numpy as np
         from matplotlib import cm, colors
@@ -1642,7 +1663,10 @@ class ResultsFrame(wx.Frame):
         Y = R * np.sin(th) * np.sin(ph)
         Z = R * np.cos(th)
 
-        ax = self.figure.add_subplot(111, projection="3d")
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[1.0, 3.2])
+        info_ax = self.figure.add_subplot(gs[0])
+        info_ax.axis("off")
+        ax = self.figure.add_subplot(gs[1], projection="3d")
         norm = colors.Normalize(vmin=rmin, vmax=float(D.max()))
         fc = cm.jet(norm(D))
         fc[..., 3] = 0.3  # a transparent balloon: you can see the board
@@ -1683,20 +1707,49 @@ class ResultsFrame(wx.Frame):
         ax.set_zlim(-m, m)
         ax.set_box_aspect((1, 1, 1))
         ax.set_axis_off()
-        # **"Directivity (dBi)" and not "Farfield".** A reviewer of
-        # 2026-08-03 read the view as a quantity that has a unit. The
-        # directivity is a RATIO, thus dBi is correct and the title must
-        # say which quantity it is. Dmax and the frequency go with it:
-        # the 3D view had neither.
-        ax.set_title("Directivity (dBi), f=%g GHz, Dmax=%.1f dBi%s"
-                     % (ff["f_hz"] / 1e9, float(D.max()), ptag), fontsize=10)
+        ax.set_title("Farfield (f=%g GHz)%s" % (ff["f_hz"] / 1e9, ptag),
+                     fontsize=10)
         sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
         sm.set_array([])
-        # The RADIUS is D - (Dmax - 30): a display transform with a
-        # floor of 30 dB. Without this label a null looks like it
-        # touches the origin.
-        self.figure.colorbar(sm, ax=ax, shrink=0.65,
-                             label="Directivity (dBi), floor at Dmax - 30 dB")
+        # The marks of the default carry round numbers, and they stop
+        # before the two ends of the bar: a reader then cannot see the
+        # value at the top, which is Dmax, or the value at the floor.
+        ticks = np.linspace(rmin, float(D.max()), 9)
+        bar = self.figure.colorbar(sm, ax=ax, shrink=0.65, ticks=ticks)
+        bar.ax.set_yticklabels(["%.1f" % t for t in ticks], fontsize=7)
+        bar.ax.set_title("dBi", fontsize=9)   # over the bar, as CST
+
+        # The block of numbers at the left. The radiation efficiency is
+        # the radiated power over the ACCEPTED power. The total
+        # efficiency also counts the power that the mismatch reflects,
+        # thus it is the radiation efficiency times 1 - |Snn|^2.
+        lines = ["Frequency: %.2f GHz" % (ff["f_hz"] / 1e9)]
+        rad = ff.get("efficiency_pct")
+        if rad:
+            rad_db = 10.0 * np.log10(rad / 100.0)
+            lines.append("Rad. Effic. : %.4f dB" % rad_db)
+            mis = self._mismatch_db(ff["f_hz"], pnum)
+            if mis is not None:
+                lines.append("Tot. Effic. : %.4f dB" % (rad_db + mis))
+        lines.append("Dir. : %.3f dBi" % float(D.max()))
+        info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
+                     va="center", ha="left", linespacing=1.8)
+
+    def _mismatch_db(self, f_hz, pnum):
+        """Give 10*log10(1 - |Snn|^2) at f_hz, or give None.
+
+        This is the part of the total efficiency that the reflection of
+        the port takes away. Port 1 is the port of a run that excited
+        one port only.
+        """
+        import numpy as np
+        n = (pnum or 1) - 1
+        net = self.net
+        if net is None or n >= net.nports:
+            return None
+        i = int(np.argmin(np.abs(net.f - f_hz)))
+        g2 = float(np.abs(net.s[i, n, n]) ** 2)
+        return 10.0 * np.log10(max(1.0 - g2, 1e-12))
 
     def _plot_farfield(self, ff, cut, ptag=""):
         """Show one polar cut of the directivity in absolute dBi.
@@ -1724,13 +1777,9 @@ class ResultsFrame(wx.Frame):
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))
-        ax.set_title("Directivity (dBi), %s cut, f=%g GHz%s"
-                     % (cut, ff["f_hz"] / 1e9, ptag), fontsize=10)
-        # The radial axis is the directivity in dBi, with a floor 40 dB
-        # under the peak. The angle is the other spherical angle.
-        ax.set_xlabel("%s / \N{DEGREE SIGN}   (radius: directivity in dBi, "
-                      "floor at peak - 40 dB)"
-                      % ("Theta" if phi_cut else "Phi"), fontsize=8)
+        ax.set_title("Farfield Directivity Abs (%s)%s" % (cut, ptag))
+        ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
+                      % ("Theta" if phi_cut else "Phi"))
 
         st = _lobe_stats(ang_deg, D)
         lines = ["Frequency = %g GHz" % (ff["f_hz"] / 1e9),

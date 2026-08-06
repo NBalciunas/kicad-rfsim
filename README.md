@@ -63,9 +63,7 @@ CSXCAD.
 
 ### Ports
 
-**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** It is not at the edge of the board. The box of the port covers the whole pad in x and y, and the whole substrate in z, down to the reference layer:
-
-![The geometry of a lumped port](docs/port-geometry.png)
+**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** It is not at the edge of the board. The box of the port covers the whole pad in x and y, and the whole substrate in z, down to the reference layer.
 
 The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. The label of a port names what stops every de-embedded type, for example `Port N [No Track]`. Each port shows a "Feed" control with the direction and the width of its line. A routed track fills the two values and locks them. If the feed line is drawn copper (a graphic shape or a polygon, usual for a patch antenna), select the direction and enter the width yourself: the de-embedded types then become available. The port lies on the copper along that direction, so make sure the line is really there - the plugin gives a warning when it finds none. The type list holds only the types that the geometry permits, and each de-embedded entry shows its measured value: the CPW entry shows the gap, and the stripline entry shows `Stripline Port [Strip to Plane: 0.254 mm]`. A value in brackets comes from the board, and you cannot change it. For a CPW port the copper at the two sides of the line must be ground: the plugin measures the gap, but it cannot know the net.
 

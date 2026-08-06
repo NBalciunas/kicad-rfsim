@@ -18,6 +18,24 @@ import json
 import os
 import shutil
 import sys
+import warnings
+
+
+def _show_warning(message, category, filename, lineno, file=None, line=None):
+    """Write a python warning as one [rfsim] line.
+
+    A library such as h5py writes its warning to stderr in the default
+    format, which is two lines and has a file path in it. The log of the
+    plugin shows the output of the runner, thus give each warning the
+    same prefix as the other messages of the runner.
+
+    The name of the category is the only word for the level: a
+    "WARNING:" in front of "UserWarning:" says the same thing twice.
+    """
+    print("[rfsim] %s: %s" % (category.__name__, message), flush=True)
+
+
+warnings.showwarning = _show_warning
 
 import solverenv  # the directory of this file is sys.path[0] for a script
 
@@ -582,8 +600,19 @@ def _mesh(model, ports, res):
 
 def build(model, excite_idx, res, want_ff=False):
     """Make a new FDTD model and CSX model, with port `excite_idx` excited."""
-    from CSXCAD import ContinuousStructure
-    from openEMS import openEMS
+    # The openEMS libraries have no signature. Thus Windows Smart App Control
+    # can stop them. The default traceback does not tell the user what to do.
+    try:
+        from CSXCAD import ContinuousStructure
+        from openEMS import openEMS
+    except ImportError as e:
+        if "Application Control policy" not in str(e):
+            raise
+        raise SystemExit(
+            "[rfsim] Windows stopped the openEMS libraries. These libraries"
+            " have no signature. Thus Smart App Control does not let them"
+            " start. To correct this, open Windows Security. Select"
+            " 'App & browser control'. Set Smart App Control to Off.")
 
     s = model["settings"]
     f0 = 0.5 * (s["f_start"] + s["f_stop"])

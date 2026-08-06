@@ -62,10 +62,12 @@ def test_every_view_draws():
 
 
 def test_the_field_views_say_what_they_show():
-    """The quantity, the plane, the frequency and a colour bar.
+    """The unit, the plane, the frequency, the phase and the maximum.
 
     Problem 2. The title said "E-Field (f=2.4 GHz)" and nothing else:
-    not the component, not the plane, and the view had no colour bar.
+    not the plane, and the view had no colour bar. The numbers now sit
+    in a block of text at the left, and the colour bar carries the unit
+    alone.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings()
@@ -75,25 +77,28 @@ def test_the_field_views_say_what_they_show():
         f.choice.SetSelection(f.choice.GetStrings().index(name))
         f._plot()
         t = texts(f.figure)
-        want = "e_z" if name.startswith("E") else "h_"
-        assert want in t, "%r does not name the component: %s" % (name, t)
+        # The colour bar is an axes of its own, thus its label is in the
+        # text of the figure.
+        want = "v/m" if name.startswith("E") else "a/m"
+        assert want in t, "%r has no colour bar with a unit: %s" % (name, t)
         assert "mid-plane" in t and "mm" in t, \
             "%r does not name the plane: %s" % (name, t)
         assert "ghz" in t, "%r does not name the frequency: %s" % (name, t)
-        # The colour bar is an axes of its own, thus its label is in the
-        # text of the figure.
-        assert "arbitrary units" in t, \
-            "%r has no colour bar with a unit: %s" % (name, t)
-    print("the field views name the quantity, the plane and the scale OK")
+        assert "phase:" in t, "%r does not give the phase: %s" % (name, t)
+        assert "maximum:" in t, \
+            "%r does not give the largest value: %s" % (name, t)
+    print("the field views name the unit, the plane and the scale OK")
     f.Destroy()
 
 
 def test_the_far_field_views_say_directivity():
-    """"Directivity (dBi)", and the floor of the display transform.
+    """The unit is dBi, and each view gives its numbers.
 
     A reviewer wrote that "the far-field is not a unitless quantity".
-    The views show DIRECTIVITY, which is a ratio, thus dBi is correct
-    and the title must say so.
+    The views show DIRECTIVITY, which is a ratio, thus dBi is correct.
+    A cut names the quantity in its title and its axis. The 3D balloon
+    gives the frequency, the two efficiencies and the directivity in a
+    block of text. Both views keep the style of CST.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings() if n.startswith("Farfield")]
@@ -102,11 +107,15 @@ def test_the_far_field_views_say_directivity():
         f.choice.SetSelection(f.choice.GetStrings().index(name))
         f._plot()
         t = texts(f.figure)
-        assert "directivity" in t and "dbi" in t, \
-            "%r does not say Directivity (dBi): %s" % (name, t)
-        assert "floor" in t, \
-            "%r does not name the floor of the display: %s" % (name, t)
-    print("the far-field views say Directivity (dBi) and name the floor OK")
+        assert "dbi" in t, "%r does not name the unit: %s" % (name, t)
+        if "(phi=" in name.lower() or "(theta=" in name.lower():
+            assert "directivity" in t, \
+                "%r does not name the quantity: %s" % (name, t)
+        else:
+            for want in ("frequency:", "rad. effic.", "tot. effic.", "dir."):
+                assert want in t, \
+                    "%r does not give %r: %s" % (name, want, t)
+    print("the far-field views name dBi and give their numbers OK")
     f.Destroy()
 
 
@@ -122,7 +131,10 @@ def test_the_ports_are_on_the_field_views():
     for name in names:
         f.choice.SetSelection(f.choice.GetStrings().index(name))
         f._plot()
-        ax = f.figure.get_axes()[0]
+        # The figure holds the picture, the block of text at the left
+        # and the colour bar. The picture is the one with the axis of x.
+        ax = next(a for a in f.figure.get_axes()
+                  if a.get_xlabel() == "x (mm)")
         marks = [t for t in ax.texts if t.get_text().startswith("P")]
         assert len(marks) == len(f.model["ports"]), \
             "%r marks %d ports, and the model holds %d" \

@@ -1,6 +1,7 @@
 .idea/
 .claude/settings.local.json
 NOTES.md
+docs/port-geometry.png
 __pycache__/
 .venv/
 validation/out_*/
