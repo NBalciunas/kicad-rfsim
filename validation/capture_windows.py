@@ -86,9 +86,6 @@ def capture_dialog(out):
         ("dialog-1-part", []),
         ("dialog-5-parts", [unknown("D%d" % k) for k in range(4)]),
         ("dialog-20-parts", [unknown("D%d" % k) for k in range(19)]),
-        ("dialog-rlc-field",
-         [dict(unknown("D1"), rlc={"R": 1.5, "L": 0.6e-9, "C": 0.3e-12},
-               type="RLC", package=board_reader.CUSTOM_RLC_PKG)]),
     ]
     for name, extra in cases:
         d = dialog(extra)

@@ -134,14 +134,8 @@ def _time_step_factor(model):
     # largest inductance in the model, whatever its source.
     ind = []
     for e in model.get("lumped_elements", []):
-        if e["type"] == "L" and e.get("value"):
+        if e["type"] == "L" and e["value"] > 0:
             ind.append(e["value"])
-        # An element that the "rfsim" field describes holds its own L,
-        # and that inductance destabilizes the run in the same way as
-        # the value of an inductor. The factor must count it, or a part
-        # with a large L diverges to NaN.
-        if e.get("rlc", {}).get("L"):
-            ind.append(e["rlc"]["L"])
         if s.get("parasitics", True) and e.get("esl"):
             ind.append(e["esl"])
     if not ind:
@@ -667,30 +661,10 @@ def build(model, excite_idx, res, want_ff=False):
             # the extraction with type None and value None, and the
             # dialog removes it when the user models nothing. A
             # model.json that a person edits can still hold one.
-            if not e.get("rlc") and (not e.get("type")
-                                     or e.get("value") is None):
+            if not e.get("type") or e.get("value") is None:
                 print("[rfsim] WARNING: lumped %s has no type or no value; "
                       "not modeled (the gap between its pads stays open)"
                       % e.get("ref", "?"), flush=True)
-                continue
-            if e.get("rlc"):
-                # R, L and C TOGETHER in one element, from the "rfsim"
-                # field of the footprint. openEMS puts the three in
-                # series under LEtype=1, thus this needs no new
-                # topology: only a part that the plugin can read. A PIN
-                # diode that is off is the usual case (C_T in series
-                # with L_s and R_s), and no refdes of R, L or C
-                # describes it.
-                comp = {k: v for k, v in e["rlc"].items() if v}
-                csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
-                                     **dict(le_kw, **comp)).AddBox(
-                    e["start"], e["stop"], priority=15)
-                print("[rfsim] lumped %s: %s in series (the \"%s\" field) "
-                      "(%s-axis) at z=%.3f"
-                      % (e["ref"],
-                         ", ".join("%s=%g" % (k, v)
-                                   for k, v in sorted(comp.items())),
-                         "rfsim", e["ny"], e["start"][2]), flush=True)
                 continue
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(

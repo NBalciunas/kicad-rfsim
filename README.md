@@ -112,6 +112,8 @@ The "Lumped Elements" part of the dialog gives one row for each R/L/C part. Each
 
 "Model" is on for each part. Remove it from one part, and the model does not contain that part: its pads stay in the copper, thus the gap between them stays open. This is the same control as "Excite" at a port, but for one part.
 
+Any footprint with 2 numbered SMD pads on one copper layer gives a row, and not only an R, an L or a C. A part whose reference does not name the type starts at "Unknown" with its "Model" off: select the type and give the value, and the plugin models a diode, a ferrite bead or a footprint of your own as an R, an L or a C.
+
 The plugin reads the package from the name of the footprint: `R_0402_1005Metric` gives `0402`. It knows 0201, 0402, 0603, 0805, 1206, 1210, 2010 and 2512, and it selects that preset ("0603 Package"). A name that has no such code (a metric-only name, a SOT-23, or a library of your own) gives "Custom", and you put in the two values. Select a different preset to change the ESL, or type a value to move the row to "Custom". "No parasitics" makes that part an ideal element: the two fields go off, but they keep their text for when you select a package again. The solver names the package of each part in its log.
 
 ## Examples

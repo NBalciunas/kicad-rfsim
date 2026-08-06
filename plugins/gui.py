@@ -35,20 +35,6 @@ ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
 ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
 
 
-UNKNOWN_RLC = "R+L+C"        # the type that the row shows for such a part
-RLC_KIND = UNKNOWN_RLC
-RLC_FIELD_NAME = "rfsim"     # it must agree with board_reader.RLC_FIELD
-# The unit of each component of an "rfsim" field, for the row that shows
-# it. The values in the model are SI.
-_RLC_UNITS = (("R", 1.0, "ohm"), ("L", 1e-9, "nH"), ("C", 1e-12, "pF"))
-
-
-def _rlc_text(rlc):
-    """Give "1.5 ohm + 0.6 nH + 0.3 pF" for the row of the dialog."""
-    return " + ".join("%g %s" % (rlc[k] / scale, unit)
-                      for k, scale, unit in _RLC_UNITS if rlc.get(k))
-
-
 def _qty_label(kind):
     """Give the label in front of the value of a part."""
     return KIND_QUANTITY.get(kind, "Value") + ":"
@@ -65,8 +51,31 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
-SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
+# The er and the tan d of each preset. **FR-4 must agree with
+# `board_reader.DEF_EPSILON`**, which is the value that the plugin uses
+# when the board file holds no stackup. The two were 4.2 here and 4.5
+# there until 2026-08-05, thus the SAME board gave one substrate
+# through the dialog and another through a run with no GUI.
+# The three laminates after FR-4 are the usual low-loss choices of a
+# fabricator. Their values are the DATASHEET values at 10 GHz, and FR-4
+# is at 1 MHz: the er of FR-4 falls to about 4.3 at 5 GHz, thus a run in
+# the GHz band deserves a value that the laminate of your fabricator
+# gives.
+#
+# **Two Dk values exist for a Rogers laminate, and these are the
+# PROCESS values.** Rogers measures them with a clamped stripline at
+# 10 GHz, and it publishes a larger "design Dk" for a MICROSTRIP: about
+# 3.66 for RO4350B and 3.55 for RO4003C. A microstrip that this plugin
+# simulates with the process value reads about 5% high in impedance.
+# The design values are not here, because nobody has measured which one
+# agrees with this solver: refer to the todo list.
+SUBSTRATE_PRESETS = [("FR-4", 4.5, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
+                     ("Rogers RO4003C", 3.38, 0.0027),
+                     # The values are those of RT/duroid 5880, which is
+                     # the usual PTFE laminate. Another PTFE differs: er
+                     # goes from 2.1 to 2.6 with the glass in it.
+                     ("PTFE", 2.20, 0.0009),
                      ("Custom", None, None)]
 # The colours of the top view. The preview in the settings dialog and the
 # view in the results window both use them.
@@ -320,8 +329,7 @@ class SettingsDialog(wx.Dialog):
             num = wx.Choice(self, choices=nums)
             num.SetSelection(i)
             num.Enable(len(ports) > 1)
-            num.SetToolTip("The number assigns the port. Port 1 drives "
-                           "the field and far-field views.")
+            num.SetToolTip("The number assigns the port.")
             # The type choice holds only the types that the geometry
             # permits; the label of the row names what the geometry does
             # not give. The fixed width fits the CPW entry with its gap:
@@ -333,8 +341,7 @@ class SettingsDialog(wx.Dialog):
             exc = wx.CheckBox(self, label="Excite")
             exc.SetValue(True)
             exc.SetToolTip("Drive this port: one FDTD run for each "
-                           "excited port. Uncheck ports whose S-columns "
-                           "you don't need.")
+                           "excited port.")
             # _refresh_port_badges puts the text in. The pad, the
             # footprint and the net go into the tooltip.
             label = wx.StaticText(self, label="")
@@ -355,25 +362,32 @@ class SettingsDialog(wx.Dialog):
                                   (0, -1): 4}[tuple(p["direction"])])
                 wtc.ChangeValue("%g" % (p.get("track_width")
                                         or min(p["width"], p["length"])))
+                # **A control that is OFF shows no tooltip**, because
+                # Windows sends it no mouse event. Thus these two carry
+                # one for the day that they become enabled, and the
+                # LABELS beside them carry the same text, which is what
+                # a user can actually reach.
+                locked_tip = "The track at this pad gives this value."
                 for c in (dch, wtc):
-                    c.SetToolTip("The track at this pad gives this value")
+                    c.SetToolTip(locked_tip)
                     c.Enable(False)
                 self.port_feed.append(None)
             else:
+                locked_tip = None
                 dch.SetSelection(0)
-                dch.SetToolTip("Direction of the feed line at this pad, "
-                               "as drawn in the preview above (+y points "
-                               "up). Pick one to enable de-embedded port "
-                               "types on copper drawn as shapes/polygons.")
+                dch.SetToolTip("Direction of the feed line at this pad.")
                 wtc.ChangeValue("%g" % min(p["width"], p["length"]))
-                wtc.SetToolTip("Width of the feed line (the track width "
-                               "a routed track would provide)")
+                wtc.SetToolTip("Width of the feed line.")
                 self.port_feed.append((dch, wtc))
                 dch.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_feed(k))
-            note.Add(wx.StaticText(self, label="Feed:"), 0, mid)
+            feed_lbl = wx.StaticText(self, label="Feed:")
+            width_lbl = wx.StaticText(self, label="Width:")
+            if locked_tip:
+                for lbl in (feed_lbl, width_lbl):
+                    lbl.SetToolTip(locked_tip)
+            note.Add(feed_lbl, 0, mid)
             note.Add(dch, 0, mid | wx.LEFT, 4)
-            note.Add(wx.StaticText(self, label="Width:"), 0,
-                     mid | wx.LEFT, 6)
+            note.Add(width_lbl, 0, mid | wx.LEFT, 6)
             note.Add(wtc, 0, mid | wx.LEFT, 4)
             note.Add(wx.StaticText(self, label="mm"), 0, mid | wx.LEFT, 2)
             prg.Add(label, 0, mid)
@@ -481,13 +495,6 @@ class SettingsDialog(wx.Dialog):
                                   + list(KIND_NAMES.values()), size=(110, -1))
                 kinds.SetSelection(KIND_ORDER.index(kind) if kind in KIND_ORDER
                                    else 0)
-                # A part that the "rfsim" field of the footprint
-                # describes holds R, L and C together. The row SHOWS the
-                # three values and it does not let the user change them:
-                # the footprint is the source, thus the board and the
-                # simulation cannot disagree. The row keeps its Model
-                # checkbox, thus the part can still go out of the run.
-                rlc = e.get("rlc")
                 # The unit of the field is fixed (ohm, nH or pF), in the
                 # same way as the ESR and the ESL fields. Thus the user
                 # gives a number and no prefix, and the unit follows the
@@ -498,25 +505,6 @@ class SettingsDialog(wx.Dialog):
                 value.Enable(kind is not None)
                 qty = wx.StaticText(pane, label=_qty_label(kind))
                 uni = wx.StaticText(pane, label=ENTRY_UNITS.get(kind, ""))
-                if rlc:
-                    kinds.Set([RLC_KIND])
-                    kinds.SetSelection(0)
-                    kinds.Enable(False)
-                    qty.SetLabel("In series:")
-                    value.ChangeValue(_rlc_text(rlc))
-                    # The three values need more room than one number:
-                    # "1.5 ohm + 0.6 nH + 0.3 pF" does not fit the width
-                    # of a value field, and a value that is cut off is
-                    # of no use to a reader.
-                    value.SetMinSize((190, -1))
-                    value.SetEditable(False)
-                    value.Enable(False)
-                    value.SetToolTip(
-                        "The \"%s\" field of the footprint gives these three "
-                        "values, and they go in series in ONE element. "
-                        "Change the field on the board to change them."
-                        % RLC_FIELD_NAME)
-                    uni.SetLabel("")
                 lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
                        0, mid)
                 lg.Add(kinds, 0, mid)
@@ -558,8 +546,7 @@ class SettingsDialog(wx.Dialog):
                 self.part_rows.append({"ref": e["ref"], "kind": kinds,
                                        "value": value, "qty": qty,
                                        "unit": uni, "last_pkg": start_pkg,
-                                       "esl0": esl0, "esr0": esr0,
-                                       "rlc": rlc})
+                                       "esl0": esl0, "esr0": esr0})
             # A lumped inductor makes the FDTD unstable at the full
             # Courant step, thus the runner divides the step by
             # sqrt(L[nH]) and multiplies the number of steps by the same
@@ -577,29 +564,26 @@ class SettingsDialog(wx.Dialog):
         self.preset = row(sg, "Presets:", wx.Choice(
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
         self.preset.SetSelection(0)
-        # the default values: FR4 of 1.6 mm, copper of 35 um (1 oz)
-        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.2"))
+        # The default values are the FR-4 preset: refer to
+        # SUBSTRATE_PRESETS. 1.6 mm and 35 um (1 oz) go with them.
+        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
         self.tand = row(sg, "Loss tangent:", wx.TextCtrl(self, value="0.02"))
         self.h = row(sg, "Substrate thickness:",
                      wx.TextCtrl(self, value="1.6"), "mm")
         self.cu_t = row(sg, "Copper thickness:",
                         wx.TextCtrl(self, value="0.035"), "mm")
-        # **Fill the fields from the stackup of the BOARD.** A Rogers
-        # board simulated as FR4 until 2026-08-05, because the dialog
-        # started at its own default values and the user had to type the
-        # stackup again. Nothing said so (problem 8).
+        # **The dialog does NOT read the stackup of the board.** It fills
+        # the four fields from the FR-4 preset and nothing else, thus a
+        # user always sees the same start and gives the values that the
+        # board needs. A version that filled them from the
+        # `(stackup ...)` block of the file, with a label under the
+        # fields that named the source, went in and came out again on
+        # 2026-08-05 at the request of the owner. B7 holds that work, and
+        # problem 8 is the reason to do it one day: a Rogers board
+        # simulates as FR4 until the user types the values.
         #
-        # The values come only from a stackup that the FILE holds. The
-        # fallback of `board_reader` is FR4 as well, and to fill the
-        # fields from THAT would show the default values of the code as
-        # if the board gave them. `model["stackup_source"]` tells the
-        # two apart, and the label below the fields says which one it
-        # is: a number that a user does not question must be a number
-        # that names where it came from.
-        self.stack_note = wx.StaticText(self, label="")
-        self.stack_note.SetFont(self.stack_note.GetFont().Smaller())
-        sbox.Add(self.stack_note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
-        self._fill_substrate_from_board(preview)
+        # `model["stackup_source"]` stays in the model: it tells a reader
+        # of model.json where the substrate came from, and B7 needs it.
         self.preset.Bind(wx.EVT_CHOICE, self._on_preset)
         for c in (self.er, self.tand):
             c.Bind(wx.EVT_TEXT, self._on_substrate_edit)
@@ -610,12 +594,7 @@ class SettingsDialog(wx.Dialog):
         self.threads = row(rg, "CPU threads:", wx.Choice(
             self, choices=["Auto"] + [str(i) for i in range(1, cpus + 1)]))
         self.threads.SetSelection(0)
-        self.threads.SetToolTip(
-            "Threads for the FDTD engine. Each thread takes one slice of "
-            "the domain, and all the threads wait for the slowest one at "
-            "each timestep. Thus a small model is fastest with few "
-            "threads, and a large model with more. \"Auto\" reads the "
-            "size of the mesh and selects the value.")
+        self.threads.SetToolTip("Threads for the FDTD engine.")
         self.mesh = row(rg, "Mesh resolution:", wx.Choice(
             self, choices=[m.capitalize() for m in MESH_LEVELS]))
         self.mesh.SetSelection(1)
@@ -632,22 +611,18 @@ class SettingsDialog(wx.Dialog):
         # to MAX_PART_ROWS and to problem 10 of NOTES.
         self.max_steps = wx.TextCtrl(self, value="300000", size=(70, -1))
         self.max_steps.SetToolTip(
-            "The run stops at this number of timesteps. A structure with "
-            "a high Q (a narrowband filter, a resonator) needs more, "
-            "because its energy comes down slowly.")
+            "The run stops at this number of timesteps.")
         self.end_crit = wx.TextCtrl(self, value="1e-4", size=(55, -1))
         self.end_crit.SetToolTip(
-            "The run stops when the energy comes down to this part of its "
-            "maximum. A smaller value gives a longer run and a more exact "
-            "result.")
+            "The run stops when the energy comes down to this part of "
+            "its maximum.")
         # An empty field gives None, and the runner then selects the
         # value itself from the largest inductance in the model.
         self.tsf = wx.TextCtrl(self, value="", size=(55, -1))
         self.tsf.SetToolTip(
-            "The part of the Courant timestep that the run uses. Leave it "
-            "EMPTY for the automatic value, which a lumped inductor needs "
-            "for stability. A value here has priority over the automatic "
-            "one. A smaller value gives a longer run.")
+            "The portion of the Courant time step used by the "
+            "simulation. Leave this field empty to use the "
+            "automatically calculated value.")
         lim = wx.BoxSizer(wx.HORIZONTAL)
         for label, ctrl in (("Max steps:", self.max_steps),
                             ("End criteria:", self.end_crit),
@@ -844,12 +819,7 @@ class SettingsDialog(wx.Dialog):
                 c.Enable(on and self._pkg_of(ch) != NO_PARASITICS)
             # The type stays on with the Model off, thus the user can
             # select it first and model the part after it. The value
-            # needs a type: the unit comes from it. A row that the
-            # "rfsim" field describes keeps its controls off: the
-            # footprint is the source of its three values.
-            if self.part_rows[i].get("rlc"):
-                ch.Enable(False)
-                continue
+            # needs a type: the unit comes from it.
             self.part_rows[i]["value"].Enable(
                 on and self._kind_of(i) is not None)
         self._update_lumped_warning()
@@ -950,53 +920,6 @@ class SettingsDialog(wx.Dialog):
                     va="center", fontsize=7, transform=ax.transAxes)
         self._prev_canvas.draw_idle()
 
-    def _fill_substrate_from_board(self, model):
-        """Put the stackup of the board into the substrate fields.
-
-        The dialog builds a UNIFORM stackup from these four values, thus
-        a board whose layers differ from each other cannot come back
-        exactly. The function then takes the dielectric that carries the
-        FIRST port, which is the one that the impedance of the line
-        depends on, and it says so in the label.
-
-        `ChangeValue` writes the fields, in the same way as the presets:
-        `SetValue` sends EVT_TEXT and would move the preset choice to
-        "Custom" while the dialog is still being built.
-        """
-        note = self.stack_note
-        if not model or model.get("stackup_source") != "file":
-            note.SetLabel("The board file holds no stackup, thus these are "
-                          "the default values of FR4. Board Setup > "
-                          "Physical Stackup, and save the board.")
-            note.SetForegroundColour(wx.Colour(150, 90, 0))
-            return
-        diel = model.get("dielectric_layers") or []
-        cu = model.get("copper_layers") or []
-        if not diel or not cu:
-            return
-        # The dielectric under the layer of the first port.
-        z_of = {c["name"]: c["z"] for c in cu}
-        z_port = z_of.get((model.get("ports") or [{}])[0].get("layer"),
-                          cu[0]["z"])
-        below = [d for d in diel if d["z_top"] <= z_port + 1e-9]
-        d0 = below[0] if below else diel[0]
-        total = sum(d["z_top"] - d["z_bottom"] for d in diel)
-        for ctrl, value in ((self.er, "%g" % d0["epsilon"]),
-                            (self.tand, "%g" % d0["loss_tangent"]),
-                            (self.h, "%g" % round(total, 4)),
-                            (self.cu_t, "%g" % cu[0]["thickness"])):
-            ctrl.ChangeValue(value)
-        mixed = len({(d["epsilon"], d["loss_tangent"]) for d in diel}) > 1
-        note.SetLabel(
-            ("The stackup of the board gives these values (the layer "
-             "%s). The board has layers that DIFFER, and the simulation "
-             "uses one uniform substrate: check the two numbers."
-             if mixed else
-             "The stackup of the board gives these values (the layer %s).")
-            % d0["name"])
-        note.SetForegroundColour(wx.Colour(150, 90, 0) if mixed
-                                 else wx.Colour(90, 90, 90))
-
     def _on_preset(self, evt):
         _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
         if er is not None:  # ChangeValue sends no EVT_TEXT: the preset stays
@@ -1033,10 +956,6 @@ class SettingsDialog(wx.Dialog):
         # the user turned that part on and gave it nothing.
         for i, r in enumerate(self.part_rows):
             if not self.para_rows[i][1].GetValue():
-                continue
-            # The "rfsim" field of the footprint gives the whole part,
-            # thus such a row needs no type and no single value.
-            if r.get("rlc"):
                 continue
             if self._kind_of(i) is None:
                 wx.MessageBox(

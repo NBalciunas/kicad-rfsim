@@ -367,81 +367,43 @@ def test_the_inductor_warning_follows_the_value():
     print("the inductor warning OK (%s)" % text)
 
 
-def test_a_part_with_r_l_and_c_together():
-    """The "rfsim" field of a footprint gives R, L and C in ONE element.
+def test_the_substrate_starts_at_fr4():
+    """The dialog starts at FR-4 and does NOT read the stackup.
 
-    A PIN diode that is off is C_T in series with L_s and R_s, and no
-    refdes of R, L or C describes it. openEMS puts the three components
-    of one element in series (LEtype=1), thus the engine could always do
-    this; the limit was the way in which the plugin reads a part. The
-    row SHOWS the three values and does not let the user change them:
-    the footprint is the source, thus the board and the simulation
-    cannot disagree.
+    A version that filled the four fields from the `(stackup ...)` block
+    of the board file went in and came out again on 2026-08-05, at the
+    request of the owner. B7 holds that work. What must hold now: the
+    fields start at the FR-4 preset, and that preset must agree with the
+    fallback of `board_reader`, or the SAME board gives one substrate
+    through the dialog and another through a run with no GUI.
     """
-    rlc = {"R": 1.5, "L": 0.6e-9, "C": 0.3e-12}
-    e = dict(unknown("D1"), rlc=rlc, type="RLC",
-             package=board_reader.CUSTOM_RLC_PKG, esl=0.0, esr=0.0)
-    d = dialog([e])
-    r = d.part_rows[1]
-    assert r["rlc"] == rlc, r.get("rlc")
-    assert r["kind"].GetStringSelection() == gui.RLC_KIND, \
-        r["kind"].GetStringSelection()
-    assert not r["kind"].IsEnabled(), "the type of such a row must be fixed"
-    shown = r["value"].GetValue()
-    for want in ("1.5 ohm", "0.6 nH", "0.3 pF"):
-        assert want in shown, "the row does not show %s: %r" % (want, shown)
-    assert not r["value"].IsEditable(), "the values come from the footprint"
-    # _on_ok must NOT refuse it: it has no type and no single value.
-    old_box, stopped = wx.MessageBox, []
-    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
-    try:
-        d.para_rows[1][1].SetValue(True)      # Model on
-        d._on_lumped(None)
-        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
-        assert not stopped, "the dialog refused an rfsim part: %s" % stopped
-    finally:
-        wx.MessageBox = old_box
-    d.Destroy()
-    print("a part with R, L and C together OK (%s)" % shown)
-
-
-def test_the_substrate_comes_from_the_board():
-    """The dialog fills er, tan d, h and cu_t from the stackup.
-
-    Problem 8: a Rogers board simulated as FR4 until 2026-08-05, because
-    the dialog started at its own default values and said nothing. The
-    values must come from the FILE only: the fallback of board_reader is
-    FR4 as well, and to fill the fields from that would show the default
-    values of the code as if the board gave them.
-    """
-    board = pcbnew.LoadBoard(BOARD)
-    pads = [p for fp in board.GetFootprints()
-            if fp.GetReference() in ("P1", "P2") for p in fp.Pads()]
-    pre = board_reader.extract(board, pads, 1.0)
-    src = pre.get("stackup_source")
-    assert src in ("file", "default"), src
     d = dialog()
     got = (d.er.GetValue(), d.tand.GetValue(), d.h.GetValue(),
            d.cu_t.GetValue())
-    note = d.stack_note.GetLabel()
-    if src == "file":
-        d0 = pre["dielectric_layers"][0]
-        assert float(got[0]) == d0["epsilon"], (got, d0)
-        assert float(got[1]) == d0["loss_tangent"], (got, d0)
-        assert float(got[3]) == pre["copper_layers"][0]["thickness"], got
-        assert "stackup of the board" in note, note
-    else:
-        # No stackup in the file: the fields keep the defaults of the
-        # dialog, and the label SAYS that the board gave nothing.
-        assert got == ("4.2", "0.02", "1.6", "0.035"), got
-        assert "no stackup" in note, note
-    # get_settings must give what the fields show, whatever the source.
+    assert got == ("4.5", "0.02", "1.6", "0.035"), got
+    assert float(got[0]) == board_reader.DEF_EPSILON, (
+        "the dialog default er %s does not agree with the FR4 of "
+        "board_reader (%s): one board would then give two substrates"
+        % (got[0], board_reader.DEF_EPSILON))
+    assert d.preset.GetStringSelection() == "FR-4",         d.preset.GetStringSelection()
+    # Every preset must write its two values, and "Custom" must write
+    # none: it is the entry that a hand-typed value moves the row to.
+    for i, (name, er, tand) in enumerate(gui.SUBSTRATE_PRESETS):
+        d.preset.SetSelection(i)
+        d._on_preset(None)
+        if er is None:
+            continue
+        assert float(d.er.GetValue()) == er, (name, d.er.GetValue())
+        assert float(d.tand.GetValue()) == tand, (name, d.tand.GetValue())
+    # get_settings must give what the fields show.
+    d.preset.SetSelection(0)
+    d._on_preset(None)
     s = d.get_settings()
-    assert s["er"] == float(got[0]) and s["tand"] == float(got[1]), s
-    assert s["h"] == float(got[2]) and s["cu_t"] == float(got[3]), s
+    assert s["er"] == 4.5 and s["tand"] == 0.02, s
+    assert s["h"] == 1.6 and s["cu_t"] == 0.035, s
     d.Destroy()
-    print("the substrate comes from the board OK (source %r, er %s)"
-          % (src, got[0]))
+    print("the substrate starts at FR-4 OK (%d presets)"
+          % len(gui.SUBSTRATE_PRESETS))
 
 
 def test_the_run_limits_reach_the_settings():
@@ -494,7 +456,6 @@ if __name__ == "__main__":
     test_the_rows_scroll_and_the_dialog_stops_growing()
     test_the_whole_dialog_scrolls_and_keeps_the_run_button()
     test_the_inductor_warning_follows_the_value()
-    test_a_part_with_r_l_and_c_together()
-    test_the_substrate_comes_from_the_board()
+    test_the_substrate_starts_at_fr4()
     test_the_run_limits_reach_the_settings()
     print("PASS")

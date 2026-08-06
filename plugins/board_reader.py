@@ -108,46 +108,6 @@ def _parse_value(text, kind):
         return None
 
 
-RLC_FIELD = "rfsim"          # the footprint field that holds R, L and C
-# The package of an element that the "rfsim" field describes. The user
-# gave the whole part, thus the code must not add a body on top of it.
-CUSTOM_RLC_PKG = "rfsim field"
-_RLC_RE = re.compile(r"\b([RLC])\s*=\s*([^\s,;]+)", re.I)
-
-
-def _parse_rlc(text):
-    """Read "R=1.5 L=0.6n C=0.3p" into {"R": .., "L": .., "C": ..} in SI.
-
-    A part that no single type describes needs all three components at
-    the same time: a PIN diode that is off is C_T in series with L_s and
-    R_s, and a refdes of R, L or C describes none of that. openEMS puts
-    the R, the L and the C of ONE element in series (`LEtype=1`), thus
-    the engine has always been able to do this; the limit was the way in
-    which the plugin reads a part.
-
-    The separator is a space, a comma or a semicolon, and the letter
-    case has no meaning. Each value obeys the same rules as a Value
-    field: `_parse_value` reads RKM notation and the SI prefixes. A
-    value that the function cannot read makes the WHOLE field invalid,
-    because a part that silently loses one of its three components is
-    worse than a part that the plugin refuses.
-
-    It gives None when the text holds no R, L or C at all.
-    """
-    if not text:
-        return None
-    out = {}
-    for letter, value in _RLC_RE.findall(text):
-        k = letter.upper()
-        if k in out:
-            return None                      # the same component two times
-        v = _parse_value(value, k)
-        if v is None or v < 0:
-            return None
-        out[k] = v
-    return out or None
-
-
 def _lname(layer_id):
     return pcbnew.BOARD.GetStandardLayerName(layer_id)
 
@@ -845,24 +805,8 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         # A part with no type has no value either: the Value field of a
         # diode holds a part number, and not a quantity. The dialog asks
         # the user for both.
-        # A footprint field "rfsim" holds R, L and C TOGETHER, for a part
-        # that no single type describes. It has priority over the refdes
-        # and over the Value field, and it accepts ANY refdes: the point
-        # of it is a part that is not an R, an L or a C.
-        rlc = None
-        try:
-            if fp.HasFieldByName(RLC_FIELD):
-                raw = fp.GetFieldByName(RLC_FIELD).GetText()
-                rlc = _parse_rlc(raw)
-                if rlc is None and raw.strip():
-                    warnings.append(
-                        "%s: the \"%s\" field %r is not understood -> the "
-                        "part uses its refdes and its Value field. Write it "
-                        "as \"R=1.5 L=0.6n C=0.3p\"." % (ref, RLC_FIELD, raw))
-        except AttributeError:
-            pass          # an older pcbnew with no field API by name
         val = _parse_value(fp.GetValue(), kind) if kind else None
-        if kind and val is None and not rlc:
+        if kind and val is None:
             warnings.append("%s: value \"%s\" not understood -> not modeled"
                             % (ref, fp.GetValue()))
             continue
@@ -899,18 +843,10 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
             warnings.append("%s: %s" % (ref, pkg_warn))
-        e = {"ref": ref, "type": kind, "value": val, "ny": ny,
-             "layer": layer, "start": start, "stop": stop,
-             "pads": [list(c1), list(c2)],
-             "package": pkg, "esl": esl, "esr": esr}
-        if rlc:
-            # The three components go in series in ONE element. The
-            # parasitics of a package have no meaning here: the user
-            # gave the whole part, thus an ESL on top of it would count
-            # the body two times.
-            e.update(rlc=rlc, type=e["type"] or "RLC", esl=0.0, esr=0.0,
-                     package=CUSTOM_RLC_PKG)
-        elements.append(e)
+        elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
+                         "layer": layer, "start": start, "stop": stop,
+                         "pads": [list(c1), list(c2)],
+                         "package": pkg, "esl": esl, "esr": esr})
     return elements, warnings
 
 
@@ -949,7 +885,8 @@ def _port(board, pad, number, copper_layers):
     fp = pad.GetParentFootprint()
     return {
         "number": number,
-        "label": "%s pad %s (%s)" % (fp.GetReference(), pad.GetNumber(),
+        # The tooltip of the port row shows this: "R1 Pad 2 (GND)".
+        "label": "%s Pad %s (%s)" % (fp.GetReference(), pad.GetNumber(),
                                      pad.GetNetname() or "no net"),
         "x": _mm(bbox.Centre().x),
         "y": -_mm(bbox.Centre().y),
