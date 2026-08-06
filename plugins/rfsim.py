@@ -103,7 +103,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
                                  preview.get("lumped_elements", []),
                                  preview=preview,
-                                 packages=board_reader.package_presets())
+                                 packages=board_reader.package_presets(),
+                                 esr=board_reader.esr_presets())
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
@@ -111,12 +112,15 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         dlg.Destroy()
 
         port_types = settings.pop("port_types")
+        port_feed = settings.pop("port_feed")
         # the numbers from the dialog: pad i becomes port order[i], and
-        # the types move with the pads
+        # the types and the manual feeds move with the pads
         order = settings.pop("order")
         pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
         port_types = [t for _, t in
                       sorted(zip(order, port_types), key=lambda t: t[0])]
+        port_feed = [f for _, f in
+                     sorted(zip(order, port_feed), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
         # The parasitics of each R/L/C part, from the rows of the dialog.
@@ -130,18 +134,55 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             v = para.get(e["ref"])
             if v:
                 e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
+                # A part whose refdes does not give the type comes back
+                # from extract() with type None and value None. The user
+                # selected them in the dialog, thus they go in here. A
+                # part that the board describes keeps its own values,
+                # and the dialog gives None for both.
+                if v.get("type"):
+                    e["type"] = v["type"]
+                if v.get("value") is not None:
+                    e["value"] = v["value"]
         # A part whose Model checkbox is off does not go into the model at
         # all. Its pads stay in the copper, thus the gap between them stays
         # open. This is the same result as the old checkbox for all the
         # parts, and the runner needs no test of its own.
         model["lumped_elements"] = [
             e for e in model["lumped_elements"]
-            if para.get(e["ref"], {}).get("model", True)]
+            if para.get(e["ref"], {}).get("model", True)
+            and e.get("type") and e.get("value") is not None]
+        for p, t, f in zip(model["ports"], port_types, port_feed):
+            p["type"] = t
+            if f and not p["direction"]:
+                # The manual feed of the dialog: the pad has no track,
+                # and the user gave the direction and the width of a
+                # line that the board draws as a shape or as a polygon.
+                # The gap of that direction comes from extract(), thus a
+                # drawn CPW keeps its measured gap.
+                p["direction"], p["track_width"] = f
+                key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y",
+                       (0, -1): "-y"}[tuple(p["direction"])]
+                p["gap"] = (p.get("gaps") or {}).get(key)
+                # `extract()` measured the copper run for the direction
+                # of a TRACK, and this pad had none. Measure it for the
+                # direction that the user gave, or the runner cannot cap
+                # the length of the port (problem 13).
+                p["copper_run"] = board_reader.copper_run(
+                    model["polygons"].get(p["layer"], []),
+                    p["x"], p["y"], p["direction"])
+                if (t in ("msl", "cpw", "stripline")
+                        and not board_reader.copper_along(
+                            model["polygons"].get(p["layer"], []),
+                            p["x"], p["y"], p["direction"])):
+                    model["warnings"].append(
+                        "Port %d: no copper along the manual feed "
+                        "direction. The %s port adds its own strip there, "
+                        "so the simulated board differs from the real "
+                        "one. Check the direction, or draw the feed line."
+                        % (p["number"], t))
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
-        for p, t in zip(model["ports"], port_types):
-            p["type"] = t
         model["settings"] = settings
 
         os.makedirs(outdir, exist_ok=True)

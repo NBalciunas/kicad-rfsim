@@ -18,6 +18,24 @@ import json
 import os
 import shutil
 import sys
+import warnings
+
+
+def _show_warning(message, category, filename, lineno, file=None, line=None):
+    """Write a python warning as one [rfsim] line.
+
+    A library such as h5py writes its warning to stderr in the default
+    format, which is two lines and has a file path in it. The log of the
+    plugin shows the output of the runner, thus give each warning the
+    same prefix as the other messages of the runner.
+
+    The name of the category is the only word for the level: a
+    "WARNING:" in front of "UserWarning:" says the same thing twice.
+    """
+    print("[rfsim] %s: %s" % (category.__name__, message), flush=True)
+
+
+warnings.showwarning = _show_warning
 
 import solverenv  # the directory of this file is sys.path[0] for a script
 
@@ -38,10 +56,49 @@ RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
 # The port types that openEMS de-embeds. Each one gives the impedance of
 # the line and the propagation constant. A lumped port does not.
 TL_PORTS = ("msl", "cpw", "stripline")
-# The number of mesh cells across each gap of a CPW port, and across the
-# strip. Refer to NOTES.md, "The mesh of a CPW port".
+# The number of mesh cells across each gap of a CPW port, and across
+# the strip. The voltage probe of the port integrates E over the cells
+# in the gap, thus the wavelength must not control that step.
 CPW_GAP_CELLS = 4
 CPW_STRIP_CELLS = 8
+# The same rule for the strip of a MICROSTRIP port, and it has its own
+# number. A microstrip has no gap that fixes the step, thus these cells
+# are the smallest cells of the board and they control the timestep.
+# Measured on 2026-08-05 on the 2.9 mm track of validation/, against
+# 49.8 ohm from Hammerstad and Jensen:
+#
+#   cells   Z0 coarse   Z0 medium   cells in the model
+#   none      44.3        47.2         60865   (it did not converge)
+#   4         47.7        47.8         67445
+#   8         49.3        49.3         80605
+#
+# 8 cells give the more exact impedance, and 4 are the value here. With
+# 8, the y mesh near a lumped element becomes so much finer than the x
+# mesh at the COARSE preset that `run_shunt.py coarse` reads a body ESL
+# 24% to 31% too large (the medium preset stays correct). 4 cells keep
+# that rig correct and they still remove the error that does not
+# converge, which is what a mesh rule must do. Raise this to 8 for a
+# more exact microstrip when no board holds a lumped element.
+MSL_STRIP_CELLS = 4
+# The safety margin of the timestep rule for a lumped inductor. The
+# largest stable factor follows 1/sqrt(L[nH]), and the measurement of
+# 2026-08-05 over 6 geometries gives a margin of 1.0 to 2.7 for the bare
+# law. 1.0 is no margin at all: on a board of 6.4 mm an inductor of 1 nH
+# sits exactly on the boundary. This coefficient takes the worst
+# geometry back to about 1.5. It costs 1/0.7 = 1.43 times more timesteps
+# on a board that holds a real inductor, and NOTHING on a usual board: a
+# body ESL is under 1 nH, thus the factor stays at 1.0.
+# `validation/run_stability.py` measures the margin again.
+LE_STAB_MARGIN = 0.7
+# The newest version of model.json that this runner can read. It must
+# agree with `board_reader.MODEL_VERSION`, and the two files cannot
+# import each other: board_reader imports pcbnew, and this file must not.
+MODEL_VERSION = 1
+
+
+def _strip_cells(port_type):
+    """Give the number of mesh cells across the strip of a line port."""
+    return MSL_STRIP_CELLS if port_type == "msl" else CPW_STRIP_CELLS
 
 
 def _has_lumped_rlc():
@@ -62,13 +119,27 @@ def _time_step_factor(model):
     A lumped inductor makes the FDTD unstable if the timestep is too
     large. On the geometry of validation/run_rlc.py, 1 nH is stable at
     the full Courant step, but 10, 100 and 300 nH diverge to NaN. The
-    largest stable factor is near 1.8/sqrt(L[nH]). Thus 1/sqrt(L[nH])
-    keeps a margin of about 1.8.
+    largest stable factor follows 1/sqrt(L[nH]) over 300 times in L.
 
-    This is an approximation from one geometry only. The true criterion
-    also includes the cell size and the box of the element. Thus a run
-    can diverge. The runner finds this condition and tells the user to
-    set settings["time_step_factor"], which has priority over this value.
+    **The MARGIN of that law is not the same on every board**, and
+    2026-08-05 measured it on 6 geometries: the mesh preset, the box of
+    the element and the thickness of the board.
+    `validation/run_stability.py` holds the measurement, and the log of
+    that day holds the numbers. The margin runs from 2.7 down to **1.0**,
+    and the worst case is a THICK board: the cells at the element grow
+    with the substrate, and a board of 6.4 mm puts 1 nH exactly ON the
+    boundary. Thus `LE_STAB_MARGIN` divides the law, and the worst
+    geometry then keeps a margin of about 1.5.
+
+    The mesh preset alone changes nothing, and that is not luck: the two
+    faces of the element box are anchored mesh lines with nothing between
+    them, thus the box itself sets the smallest cell of the board as soon
+    as the preset becomes coarse. A rule on the FACTOR is tied to the
+    same geometry that controls the stability.
+
+    This stays an approximation. Thus `_diverged()` examines the port
+    data for NaN after each run and tells the user to set
+    settings["time_step_factor"], which has priority over this value.
     """
     s = model["settings"]
     if s.get("time_step_factor"):
@@ -87,7 +158,52 @@ def _time_step_factor(model):
             ind.append(e["esl"])
     if not ind:
         return None
-    return min(1.0, 1.0 / (max(ind) * 1e9) ** 0.5)
+    return min(1.0, LE_STAB_MARGIN / (max(ind) * 1e9) ** 0.5)
+
+
+def _cell_count(fdtd):
+    """Give the number of mesh cells of a model that build() made."""
+    grid = fdtd.GetCSX().GetGrid()
+    n = 1
+    for axis in "xyz":
+        n *= grid.GetQtyLines(axis)
+    return n
+
+
+def _threads(s, cells):
+    """Give the number of threads for the engine.
+
+    settings["threads"] has priority. A value of None (the "Auto" item of
+    the dialog) gives the value that this function calculates.
+
+    openEMS keeps the "fastest" engine if the caller names no engine, and
+    that engine leaves the largest part of the machine idle. The
+    multithreaded engine gives one slice of the domain to each thread,
+    and it synchronizes the threads at each timestep. Thus the slowest
+    thread controls the speed of all the others, and a thread that gets a
+    small slice costs more than it gives.
+
+    The count must therefore follow the size of the model. These are
+    measurements on an i7-12700K (8 performance cores, 4 efficiency
+    cores), in MCells/s:
+
+        cells      2 thr   4 thr   8 thr   12 thr
+        62 k        27.6    35.4    28.4    20.8
+        147 k       34.7    52.5    59.4    50.6
+        504 k       44.2    74.3   105.9   104.9
+        1.62 M      56.1    94.6   135.3   145.1
+
+    Thus a small model is fastest at 4 threads, and 8 threads make it 20%
+    slower. Above about 150 k cells, 8 threads is the best value that a
+    usual desktop gives. More than 8 gives little: the efficiency cores
+    take a slice of the same size as a performance core, and each
+    performance core then waits for them at every timestep.
+    """
+    n = s.get("threads")
+    if n:
+        return max(1, int(n))
+    cap = min(8, os.cpu_count() or 1)
+    return min(cap, 4) if cells < 150000 else cap
 
 
 def _parasitic_components(e):
@@ -129,18 +245,36 @@ def _diverged(sim_path):
     return None
 
 
-def _merge_close(vals, tol):
+def _merge_close(vals, tol, anchors=()):
     """Sort the coordinates and merge those that are nearer than tol.
 
     This prevents very thin mesh cells.
+
+    A value in `anchors` does NOT move: the merged line takes the value
+    of the anchor, and not the mean of the two. A lumped element is a box
+    between two mesh lines and it has no line of its own inside, thus a
+    face that the mean moves can leave the box with no cell at all.
+
+    The failure is measured, and it is not an open circuit: the copper of
+    the two pads meets on that one line, thus the gap CLOSES and the run
+    gives a piece of line. A series 50 ohm in a 50 ohm line gave S21
+    -0.16 dB in the place of -4.5 dB, and S11 -17.4 dB in the place of
+    -10.3 dB. openEMS gives NO warning for it.
     """
+    keep = set(round(a, 9) for a in anchors)
     vals = sorted(vals)
     out = [vals[0]]
+    held = [round(vals[0], 9) in keep]
     for v in vals[1:]:
         if v - out[-1] < tol:
-            out[-1] = 0.5 * (out[-1] + v)
+            if round(v, 9) in keep and not held[-1]:
+                out[-1] = v          # the anchor takes the place of the mean
+                held[-1] = True
+            elif not held[-1]:
+                out[-1] = 0.5 * (out[-1] + v)
         else:
             out.append(v)
+            held.append(round(v, 9) in keep)
     return out
 
 
@@ -158,7 +292,7 @@ def _port_geometry(model, res):
     z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
     ports = []
     plist = model["ports"]
-    for p in plist:
+    for i_p, p in enumerate(plist):
         z_top = z_of[p["layer"]]
         z_ref = z_of[p["ref_layer"]]
         g = dict(p, z_top=z_top, z_ref=z_ref)
@@ -168,14 +302,38 @@ def _port_geometry(model, res):
         need = {"cpw": "gap", "stripline": "height"}.get(p["type"])
         if (p["type"] in TL_PORTS and p["direction"]
                 and (need is None or p.get(need))):
-            w = p.get("track_width") or p["width"]
+            d = p["direction"]
+            # width and length are on the axes of the board. The extent
+            # across the feed is width for a feed on x, and length for a
+            # feed on y.
+            w = p.get("track_width") or (p["width"] if d[0] else p["length"])
             length = max(3.0 * w, 6.0 * res)
+            # **Cap the length with the copper that runs along the feed.**
+            # `6*res` is 14 mm or more at the coarse preset, and a short
+            # feed line (the inset feed of a patch, for example) is
+            # shorter than that. The measurement plane is at the middle
+            # of the port, thus it would lie INSIDE the patch, where the
+            # values of a line have no meaning; and the metal strip that
+            # every de-embedded port adds over its box would go out past
+            # the end of the copper, thus the model would hold a line
+            # that the board does not have. Problem 13.
+            #
+            # The cap keeps a little of the run free, because the port
+            # must not reach the exact end of the copper. `copper_run`
+            # is None when the copper runs further than its limit, and
+            # then nothing caps the length here.
+            run = p.get("copper_run")
+            if run and run > 0:
+                length = min(length, 0.8 * run)
             if len(plist) == 2:
-                q = plist[1 - (p["number"] - 1)]
+                # The OTHER port, by list position. Do not index with
+                # p["number"]: a hand-edited model.json can hold numbers
+                # that are not 1..N in list order, and that gives the
+                # wrong port with no message.
+                q = plist[1 - i_p]
                 dist = max(abs(q["x"] - p["x"]), abs(q["y"] - p["y"]))
                 if dist > 0:
                     length = min(length, 0.3 * dist)
-            d = p["direction"]
             # Only a microstrip port goes down to the reference plane.
             z_far = z_ref if p["type"] == "msl" else z_top
             if d[0]:
@@ -232,8 +390,15 @@ def _mesh(model, ports, res):
             xs.update((min(px), max(px)))
             ys.update((min(py), max(py)))
     for v in model["vias"]:
-        xs.update((v["x"] - v["r"], v["x"] + v["r"]))
-        ys.update((v["y"] - v["r"], v["y"] + v["r"]))
+        # The CENTER line is necessary, and not only the two edges.
+        # openEMS makes a metal primitive into PEC on the edges of the
+        # Yee grid, thus a mesh NODE must lie inside the barrel. The two
+        # edge lines put the nodes exactly on the surface of the cylinder
+        # and leave the inside empty. openEMS then writes "Unused
+        # primitive (type: Cylinder)" and the via conducts nothing: the
+        # planes stay separate and the model is incorrect with no error.
+        xs.update((v["x"] - v["r"], v["x"], v["x"] + v["r"]))
+        ys.update((v["y"] - v["r"], v["y"], v["y"] + v["r"]))
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
@@ -242,9 +407,8 @@ def _mesh(model, ports, res):
             # the current probe goes around the strip. The E field has a
             # peak at each edge of the strip. Thus the mesh step across
             # the line must come from the gap, and not from the
-            # wavelength: a gap of 0.3 mm with a step of 2.4 mm gives an
-            # impedance that is about 30% too small. Refer to NOTES.md,
-            # "The mesh of a CPW port".
+            # wavelength: a gap of 0.3 mm with a step of 2.4 mm gives
+            # an impedance that is about 30% too small.
             across = ys if g["prop_dir"] == "x" else xs
             c = g["y"] if g["prop_dir"] == "x" else g["x"]
             hw = 0.5 * g["msl_width"]
@@ -262,6 +426,41 @@ def _mesh(model, ports, res):
                 # domain do not correct it.
                 pos = c + side * (hw + g["gap"])
                 step = g["gap"] / CPW_GAP_CELLS
+                while step < res:
+                    pos += side * step
+                    across.add(pos)
+                    step *= 1.4
+        elif g["type"] in ("stripline", "msl"):
+            # A stripline and a microstrip need the same treatment as the
+            # strip of a CPW port. Before, only the CPW branch existed,
+            # thus the mesh step across the strip came from the
+            # WAVELENGTH: the stripline of 0.6 mm of validation/ is
+            # narrower than one cell of 2.355 mm at the coarse preset.
+            # That board measured 19.4 ohm against 38.9 ohm from
+            # IPC-2141; with these cells it gives 39.2 ohm at the SAME
+            # preset, and the mesh grows only from 57x39x48 lines to
+            # 57x57x48. The medium mesh gave 34.6 ohm without them, which
+            # is how the mesh was found to be the cause.
+            #
+            # A microstrip is the same geometry with the return path
+            # below it, and it got the rule on 2026-08-05. Its track of
+            # 2.9 mm is WIDER than one coarse cell, thus its error was
+            # smaller and it looked like the usual mesh error that
+            # converges: 44.3 ohm at coarse and 47.2 at medium, against
+            # 49.8 from Hammerstad and Jensen. It was not that. With
+            # MSL_STRIP_CELLS cells the same board gives 47.7 at coarse
+            # and 47.8 at medium: the 2.9 ohm between the two presets
+            # goes away, which is what the rule must do.
+            across = ys if g["prop_dir"] == "x" else xs
+            c = g["y"] if g["prop_dir"] == "x" else g["x"]
+            hw = 0.5 * g["msl_width"]
+            half = max(1, _strip_cells(g["type"]) // 2)
+            for side in (-1, 1):
+                for i in range(1, half + 1):
+                    across.add(c + side * hw * i / half)
+                # Grade outward from the edge of the strip, as the CPW
+                # branch grades outward from the gap.
+                pos, step = c + side * hw, hw / half
                 while step < res:
                     pos += side * step
                     across.add(pos)
@@ -293,22 +492,127 @@ def _mesh(model, ports, res):
         for c in model["copper_layers"]:
             for k in (1, 2):
                 zs.update((c["z"] + k * step, c["z"] - k * step))
+    for g in ports:
+        if g["type"] != "cpw" or not g["gap"]:
+            # A MICROSTRIP port does NOT need this rule, and it was
+            # measured on 2026-08-05: the same chain of z lines on the
+            # validation board (a track of 2.9 mm on a substrate of
+            # 1.53 mm) moves Z0 by 0.05 ohm, which is 0.1%, and it costs
+            # 8.6% more cells. The plane below the strip holds the field,
+            # thus the dielectric rule of 4 cells already covers it. A
+            # NARROW line is a different case and it is not settled:
+            # refer to Problems, problem 16.
+            continue
+        # A CPW port also needs its own cells ABOVE and BELOW the plane of
+        # the line, and their step must come from the GAP. The line of a
+        # CPW has no plane below it that holds the field: the field goes
+        # from the strip across the two gaps, thus it is at its largest
+        # within about one gap width of the surface. The step of the rule
+        # above comes from the thickness of the dielectric (0.38 mm on a
+        # board of 1.6 mm), which is much larger than a usual gap of
+        # 0.3 mm. The capacitance of the line then comes out about 27% too
+        # large, and the impedance about 21% too small. The value does NOT
+        # converge with the mesh preset, thus the fault does not look
+        # like a mesh fault. The step is the step of the gap cells, thus
+        # it makes no cell smaller than the y mesh of the gap already is.
+        st = g["gap"] / CPW_GAP_CELLS
+        for side in (-1, 1):
+            # Stop at the next copper plane on that side. A line of this
+            # chain that lands NEAR the plane is worse than no line at
+            # all: _merge_close would join the two and MOVE the line of
+            # the plane, and a copper sheet that has no line on it is not
+            # metal. openEMS then writes "Unused primitive (type:
+            # LinPoly)" and the plane conducts nothing, in the same way as
+            # the vias of 2026-08-03 (10).
+            nxt = [c["z"] for c in model["copper_layers"]
+                   if side * (c["z"] - g["z_top"]) > 0]
+            limit = (min(nxt) if side > 0 else max(nxt)) if nxt else None
+            pos, step, n = g["z_top"], st, 0
+            while True:
+                pos += side * step
+                if limit is not None and side * (pos - limit) > -0.25 * st:
+                    break
+                zs.add(pos)
+                n += 1
+                # Grade outward after the cells of the gap, as the branch
+                # across the line does.
+                if n >= CPW_GAP_CELLS:
+                    step *= 1.4
+                if step >= res:
+                    break
 
     tol = min(res / 8.0, margin / 20.0)
+    # The cells across the strip of a stripline port or of a microstrip
+    # port are much smaller than the mesh step. Thus the merge would
+    # remove them again, in the same way as it would remove the lines of
+    # a CPW gap.
+    strips = [g["msl_width"] / _strip_cells(g["type"]) for g in ports
+              if g["type"] in ("stripline", "msl") and g.get("msl_width")]
+    if strips:
+        tol = min(tol, 0.25 * min(strips))
     gaps = [g["gap"] for g in ports if g["type"] == "cpw" and g["gap"]]
     if gaps:
         # A CPW gap is usually much smaller than the mesh step. Thus the
         # merge can remove the lines in the gap, and the voltage probes
         # of the port then measure across the wrong cells.
         tol = min(tol, 0.25 * min(gaps) / CPW_GAP_CELLS)
-    return (_merge_close(xs, tol), _merge_close(ys, tol),
-            _merge_close(zs, min(tol, 0.05)))
+    # The cells above and below the plane of a CPW have the same step as
+    # the cells in the gap. Thus the z merge needs the same tolerance, or
+    # it removes them again.
+    tol_z = min(tol, 0.05)
+    if gaps:
+        tol_z = min(tol_z, 0.25 * min(gaps) / CPW_GAP_CELLS)
+    # The box of a lumped element has 2 lines only: its faces. Thus the
+    # merge must keep them apart, in the same way as it keeps the lines
+    # of a CPW gap apart. An element whose box is smaller than tol keeps
+    # ONE line, the copper of its two pads then meets on that line, and
+    # the part becomes a piece of track with no message. Measured at the
+    # coarse preset with a margin of 4 mm, where tol is 0.200 mm: a
+    # series 50 ohm in a gap of 0.15 mm gave S21 -0.16 dB, against
+    # -4.50 dB with the clamp and -3.5 dB from the theory. A part with a
+    # gap of 0.5 mm is not affected (-4.56 dB with and without it). The
+    # anchors below then hold the two faces on their own coordinates,
+    # because a face that the mean moves can also leave the box with no
+    # cell.
+    le_x, le_y = [], []
+    for e in model.get("lumped_elements", []):
+        le_x += [e["start"][0], e["stop"][0]]
+        le_y += [e["start"][1], e["stop"][1]]
+    boxes = [abs(b - a) for a, b in zip(le_x[::2], le_x[1::2])]
+    boxes += [abs(b - a) for a, b in zip(le_y[::2], le_y[1::2])]
+    boxes = [b for b in boxes if b > 0]
+    if boxes:
+        tol = min(tol, 0.25 * min(boxes))
+    # The number of CELLS in the box of an element does not change the
+    # value that the engine models, and this was measured on 2026-08-05
+    # in both directions. Along the current: a rule that removed the
+    # lines inside the box took the shunt board from 2 cells back to 1,
+    # and the body ESL that the notch gave moved from 0.3105 nH to
+    # 0.3104 nH. Across the current: the cells across the strip of a
+    # microstrip port took the box of the series board from 2 cells to 8,
+    # and `run_rlc.py` gives R, L and C back against the closed form as
+    # before. Thus openEMS scales R, L and C correctly over the box, and
+    # this code needs no rule for the cell count. Only the two FACES
+    # matter, and the anchors above hold them.
+    return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
+            _merge_close(zs, tol_z))
 
 
 def build(model, excite_idx, res, want_ff=False):
     """Make a new FDTD model and CSX model, with port `excite_idx` excited."""
-    from CSXCAD import ContinuousStructure
-    from openEMS import openEMS
+    # The openEMS libraries have no signature. Thus Windows Smart App Control
+    # can stop them. The default traceback does not tell the user what to do.
+    try:
+        from CSXCAD import ContinuousStructure
+        from openEMS import openEMS
+    except ImportError as e:
+        if "Application Control policy" not in str(e):
+            raise
+        raise SystemExit(
+            "[rfsim] Windows stopped the openEMS libraries. These libraries"
+            " have no signature. Thus Smart App Control does not let them"
+            " start. To correct this, open Windows Security. Select"
+            " 'App & browser control'. Set Smart App Control to Off.")
 
     s = model["settings"]
     f0 = 0.5 * (s["f_start"] + s["f_stop"])
@@ -349,11 +653,17 @@ def build(model, excite_idx, res, want_ff=False):
                    [br["x1"], br["y1"], d["z_top"]], priority=1)
 
     copper_prop = {}
+    port_layers = {p["layer"] for p in model["ports"]}
     for c in model["copper_layers"]:
+        polys = model["polygons"].get(c["name"], [])
+        # A layer with no copper needs no property. A property with no
+        # primitive makes openEMS print "No primitives found".
+        if not polys and c["name"] not in port_layers:
+            continue
         prop = csx.AddConductingSheet("cu_" + c["name"], conductivity=5.8e7,
                                       thickness=max(c["thickness"], 1e-4) * 1e-3)
         copper_prop[c["name"]] = prop
-        for poly in model["polygons"].get(c["name"], []):
+        for poly in polys:
             pts = np.array(poly).T  # shape (2, N)
             prop.AddLinPoly(pts, "z", c["z"], 0, priority=10)
 
@@ -376,6 +686,15 @@ def build(model, excite_idx, res, want_ff=False):
             print("[rfsim] WARNING: this openEMS build has no LEtype; the "
                   "package parasitics are OFF (ideal elements)", flush=True)
         for e in model.get("lumped_elements", []):
+            # A part whose refdes does not give the type comes out of
+            # the extraction with type None and value None, and the
+            # dialog removes it when the user models nothing. A
+            # model.json that a person edits can still hold one.
+            if not e.get("type") or e.get("value") is None:
+                print("[rfsim] WARNING: lumped %s has no type or no value; "
+                      "not modeled (the gap between its pads stays open)"
+                      % e.get("ref", "?"), flush=True)
+                continue
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
                 csx.AddMetal("short_" + e["ref"]).AddBox(
                     e["start"], e["stop"], priority=15)
@@ -553,6 +872,30 @@ def _line_data(port, sim_path, freq):
     k0 = 2.0 * np.pi * np.asarray(freq, dtype=float) / C0
     with np.errstate(divide="ignore", invalid="ignore"):
         eps = (np.real(beta) / k0) ** 2
+    # **Do not store the imaginary part of `beta` as the attenuation.**
+    # It is the obvious thing to do, it costs one line, and the number
+    # that comes out is NOISE. Measured on 2026-08-05, on the validation
+    # microstrip at the coarse preset, as dB/m against the frequency:
+    #
+    #   1.0 GHz  -9.4    2.5 GHz   6.0    4.5 GHz  36.0
+    #   1.5 GHz  -6.2    3.0 GHz  11.4    5.0 GHz  64.5
+    #   2.0 GHz  -0.5    3.5 GHz  14.5    5.5 GHz  79.8
+    #                    4.0 GHz  21.3    6.0 GHz  63.0
+    #
+    # A passive line cannot give a NEGATIVE attenuation, and the value
+    # falls again above 5.5 GHz. Re(Z0) and eps_eff stay steady over the
+    # same sweep, thus the mode and the geometry are correct and the
+    # imaginary part alone is bad.
+    #
+    # The cause is the conditioning, and it cannot be corrected here.
+    # `beta` comes from finite differences of the probes along the line,
+    # over a span of about 9 mm. The PHASE turns a large part of a
+    # wavelength over that span, thus the real part is well conditioned.
+    # The LOSS over the same span is 0.105 dB, which is 1.2% of the
+    # amplitude, thus the imaginary part is the difference of two nearly
+    # equal numbers. To measure the loss of a line needs a different
+    # method: two lines of different lengths, or |S21| of a matched line
+    # over a long span. Refer to the log of 2026-08-05 (5).
     return {"Z0_real": np.real(z).tolist(),
             "Z0_imag": np.imag(z).tolist(),
             "eps_eff": np.where(np.isfinite(eps), eps, 0.0).tolist()}
@@ -590,6 +933,19 @@ def write_touchstone(path, freq, S, z0):
 def main(model_path, outdir):
     with open(model_path) as fh:
         model = json.load(fh)
+    # A model that is NEWER than this runner can hold a key that changes
+    # what a value means. The runner would then read the file and give a
+    # number that is incorrect with no message, which is worse than a
+    # stop. A model with no "version" key comes from before 2026-08-05
+    # and it is version 1.
+    version = int(model.get("version", 1))
+    if version > MODEL_VERSION:
+        raise SystemExit(
+            "[rfsim] ERROR: %s is a version %d model, and this runner "
+            "knows version %d. Update the plugin: an older runner can "
+            "read a newer model and give an incorrect result with no "
+            "message." % (os.path.basename(model_path), version,
+                          MODEL_VERSION))
     for w in model.get("warnings", []):
         print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]
@@ -645,7 +1001,14 @@ def main(model_path, outdir):
         print("[rfsim] === excitation %d/%d (port %d) ==="
               % (step + 1, len(exc), k + 1), flush=True)
         fdtd, ports, ff = build(model, k, res, want_ff=True)
-        fdtd.Run(sim_path, cleanup=True)
+        if step == 0:
+            # The mesh is the same for each excitation. Thus calculate the
+            # thread count one time, and tell the user which value it is.
+            threads = _threads(s, _cell_count(fdtd))
+            print("[rfsim] engine: multithreaded, %d thread(s)" % threads,
+                  flush=True)
+        fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
+                 numThreads=threads)
         bad = _diverged(sim_path)
         if bad:
             tsf = _time_step_factor(model) or 1.0
@@ -685,17 +1048,20 @@ def main(model_path, outdir):
 
     # A passive structure cannot give out more power than it takes in.
     # Thus the sum of |S|^2 down an excited column must not go above 1.
-    # A value above 1 shows that the voltage probes or the current probes
-    # of the port are not calibrated: the S-parameters are then incorrect,
-    # and not only inexact. Refer to NOTES.md, "The impedance of a CPW
-    # port and of a stripline port is too small".
+    # A value above 1 shows that the S-parameters are incorrect, and not
+    # only inexact. On a CPW port or a stripline port the usual cause is
+    # a mesh that is too coarse near the line: the measurement on the
+    # stripline board gave sum|S|^2 = 1.71 at the coarse preset and 1.05
+    # at the medium preset, and the CPW board gave 1.08 before it had
+    # its cells above and below the plane of the line.
     for k in exc:
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
         if power.max() > 1.05:
             print("[rfsim] WARNING: port %d gives out more power than it "
                   "takes in (max sum|S|^2 = %.2f). The S-parameters of this "
-                  "port are NOT reliable. This occurs with the CPW port and "
-                  "the stripline port of openEMS v0.37.0-rc1."
+                  "port are NOT reliable. On a CPW port or a stripline port "
+                  "the usual cause is a mesh that is too coarse across the "
+                  "line. Run again at the medium or the fine preset."
                   % (k + 1, power.max()), flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)

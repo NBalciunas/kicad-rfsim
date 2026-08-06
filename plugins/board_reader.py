@@ -5,14 +5,27 @@ JSON file: floats in mm, right-handed coordinates (the y axis points in
 the opposite direction to the y axis of the screen coordinates of KiCad),
 and z=0 at the bottom of the board. The module uses the pcbnew SWIG
 bindings of KiCad 10. The IPC API is not an alternative yet: IPC has no
-function that makes polygons from tracks, arcs or text (refer to
-NOTES.md, "The IPC API").
+function that makes polygons from tracks, arcs or text.
 """
 import math
 import os
 import re
 
 import pcbnew
+
+# The version of the model dict, which `extract()` writes into
+# model.json. The runner refuses a model that is NEWER than the version
+# it knows, because a key that it does not read gives a silent and
+# incorrect run, and not an error.
+#
+# Raise it when a change makes an OLD runner read a new model
+# incorrectly. Do NOT raise it for a key that is only added: the runner
+# reads each optional key with `.get(key, default)`, thus an old file
+# still runs. The history:
+#
+#   1  2026-08-05  the first number. Every model.json before it has no
+#      "version" key at all, and the runner reads that as version 1.
+MODEL_VERSION = 1
 
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
@@ -42,6 +55,16 @@ _ESR_OHM = {"C": 0.03, "L": 0.10}
 # match is the correct one. The tests for a digit on each side prevent a
 # match inside the metric code.
 _PKG_RE = re.compile(r"(?<!\d)(%s)(?!\d)" % "|".join(_ESL_NH))
+# These two codes are an imperial size AND a metric size, thus a name
+# that holds one of them alone can be either. A library that puts the
+# metric code first and does not write "Metric" gives an incorrect
+# value, and not "unknown": "C_0603" is an imperial 0603 in the usual
+# libraries, and a metric 0603 (= an imperial 0201) in some others. Each
+# of the other metric codes (1005, 1608, 2012, 3216) is not in the
+# table, thus it gives "unknown", which is safe. The name of KiCad always
+# carries the metric code beside the imperial one, thus the absence of
+# "Metric" is the signal.
+_AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 
 # The largest gap that the code accepts as a coplanar gap, in mm. A gap of
 # a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
@@ -87,6 +110,24 @@ def _parse_value(text, kind):
 
 def _lname(layer_id):
     return pcbnew.BOARD.GetStandardLayerName(layer_id)
+
+
+def _pad_layer_id(pad):
+    """Give the id of the copper layer of a pad.
+
+    PAD.GetLayer() gives F.Cu for each pad that comes from a file, also
+    for a pad on an inner layer or on the back. Thus it cannot find a
+    stripline. The layer set of the pad keeps the real layer. A pad on
+    more than one copper layer, for example a through-hole pad, has no
+    single layer: then use GetLayer(), as before.
+    """
+    cu = [lid for lid in pad.GetLayerSet().Seq() if pcbnew.IsCopperLayer(lid)]
+    return cu[0] if len(cu) == 1 else pad.GetLayer()
+
+
+def _pad_layer(pad):
+    """Give the name of the copper layer of a pad."""
+    return _lname(_pad_layer_id(pad))
 
 
 def _mm(v):
@@ -214,16 +255,23 @@ def _stackup(board, substrate=None):
     cu_names = [_lname(lid) for lid in cu_ids]
     id_of = dict(zip(cu_names, cu_ids))
 
+    # `source` tells WHERE the values came from, and the dialog needs it:
+    # it fills its substrate fields from a stackup that the FILE gives,
+    # and it must not fill them from the FR4 default values, which would
+    # look like the board and are only a fallback.
     if substrate:  # the values from the user have priority over the file
+        source = "dialog"
         items = _uniform_stackup(cu_names, substrate["h"], substrate["er"],
                                  substrate["tand"], substrate["cu_t"])
     else:
+        source = "file"
         items = _stackup_from_file(board.GetFileName())
         if items:
             file_cu = [it["name"] for it in items if it["kind"] == "copper"]
             if file_cu != cu_names:  # the file does not agree: use defaults
                 items = None
         if not items:
+            source = "default"
             items = _default_stackup(board, cu_names)
 
     z = sum(it["thickness"] for it in items if it["kind"] == "dielectric")
@@ -241,7 +289,7 @@ def _stackup(board, substrate=None):
                 "loss_tangent": max(0.0, it["loss_tangent"]),
             })
             z -= it["thickness"]
-    return copper, diel
+    return copper, diel, source
 
 
 # The code below makes polygons from the tracks, the arcs, the via rings
@@ -250,7 +298,7 @@ def _stackup(board, substrate=None):
 # function of PAD needed the ERROR_LOC enum, which SWIG did not wrap.
 # KiCad 10 has pcbnew.ERROR_INSIDE. Thus
 # BOARD.ConvertBrdLayerToPolygonalContours can replace all of this code
-# and can also include the text. Refer to the backlog in NOTES.md.
+# and can also include the text.
 
 def _add_outline(ps, pts):
     ps.NewOutline()
@@ -500,6 +548,98 @@ def _coplanar_gap(polys, x, y, direction):
     return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
 
 
+def copper_along(polys, x, y, direction):
+    """Tell if copper lies along `direction` from the pad at (x, y).
+
+    The dialog can give a manual feed direction for a pad that has no
+    track (a feed line that the user drew as a shape or as a polygon).
+    An MSL port adds its own strip over the port box. If the board has
+    no copper there, the simulation then contains a line that the board
+    does not have. The test takes the samples of _coplanar_gap: 0.4 mm
+    to 2.0 mm from the pad.
+    """
+    if not direction or not polys:
+        return False
+    axis = 1 if direction[0] else 0
+    dx, dy = direction
+    on = 0
+    for step in (0.4, 0.8, 1.2, 1.6, 2.0):
+        # An odd number of hits shows that the sample point is inside
+        # the copper.
+        on += len(_ray_hits(x + dx * step, y + dy * step, axis, 1,
+                            polys)) % 2
+    return on >= 3
+
+
+def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
+    """Give the distance that copper runs along `direction`, in mm.
+
+    A de-embedded port is `max(3*w, 6*res)` long, and `6*res` is 14 mm
+    or more at the coarse preset. A SHORT feed line is shorter than
+    that: the measurement plane of the port then lies inside the patch
+    that the line feeds, where the values of a line have no meaning, and
+    the strip that the port adds goes out past the end of the copper
+    (problem 13). The runner caps the length of the port with this
+    value.
+
+    The function walks along the direction and gives the distance to the
+    LAST point that is still on copper. An odd number of ray hits shows
+    that a point is inside the copper, which is the standard crossing
+    test. The walk is more robust than one ray: `Fracture` divides the
+    copper into polygons that share an edge, thus a single ray gives a
+    hit where the copper does not in fact end.
+
+    It gives None when the copper runs further than `limit`, and None
+    when the pad itself is not on the copper of that layer.
+    """
+    if not direction or not polys:
+        return None
+    axis = 1 if direction[0] else 0
+    dx, dy = direction
+
+    def on_copper(d):
+        return len(_ray_hits(x + dx * d, y + dy * d, axis, 1, polys)) % 2 == 1
+
+    if not on_copper(0.0):
+        return None
+    d = 0.0
+    while d + step <= limit:
+        if not on_copper(d + step):
+            # Refine the edge between the last point that is on copper
+            # and the first that is not.
+            lo, hi = d, d + step
+            for _ in range(6):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if on_copper(mid) else (lo, mid)
+            return round(lo, 4)
+        d += step
+    return None
+
+
+def _touches(polys, box):
+    """Tell if any polygon of `polys` overlaps the box (x0, y0, x1, y1).
+
+    This is a test of the bounding boxes. An antenna feed pad is at the
+    EDGE of the ground pour, thus a test on the center of the pad is too
+    strict. Refer to the guard for the ground return in extract().
+    """
+    px0, py0, px1, py1 = box
+    for poly in polys:
+        xs = [pt[0] for pt in poly]
+        ys = [pt[1] for pt in poly]
+        if (min(xs) <= px1 and max(xs) >= px0
+                and min(ys) <= py1 and max(ys) >= py0):
+            return True
+    return False
+
+
+def _pad_box(pad):
+    """Give the bounding box of a pad as (x0, y0, x1, y1) in model mm."""
+    bb = pad.GetBoundingBox()
+    return (_mm(bb.GetLeft()), -_mm(bb.GetBottom()),
+            _mm(bb.GetRight()), -_mm(bb.GetTop()))
+
+
 def _feed_direction(board, pad):
     """Give the direction of the track that goes out of the pad.
 
@@ -513,7 +653,7 @@ def _feed_direction(board, pad):
     for t in board.GetTracks():
         if isinstance(t, pcbnew.PCB_VIA) or t.GetNetCode() != pad.GetNetCode():
             continue
-        if not t.IsOnLayer(pad.GetLayer()):
+        if not t.IsOnLayer(_pad_layer_id(pad)):
             continue
         for a, b in ((t.GetStart(), t.GetEnd()), (t.GetEnd(), t.GetStart())):
             if bbox.Contains(a):
@@ -542,35 +682,60 @@ def package_presets():
     return {k: v * 1e-9 for k, v in _ESL_NH.items()}
 
 
-def _package(fp):
-    """Give the imperial package code of a footprint, or give None.
+def esr_presets():
+    """Give the body ESR of each type of part, in ohm.
 
-    The function reads the name of the footprint, for example
-    "R_0402_1005Metric".
+    The dialog needs it for a part whose type the USER selects: the ESR
+    comes from the type, in the same way as it does for a part that the
+    refdes describes. The table stays in this module only.
+    """
+    return dict(_ESR_OHM)
+
+
+def _package(name):
+    """Give (the imperial package code, a warning) for a footprint name.
+
+    The name is the library item name, for example "R_0402_1005Metric".
+    The code is None when the name holds no size that the table knows.
+    The warning is None, or the text of an AMBIGUOUS name: the value that
+    such a name gives is incorrect, and not absent, thus the user must
+    see it.
+    """
+    m = _PKG_RE.search(name or "")
+    if not m:
+        return None, None
+    pkg = m.group(1)
+    if pkg not in _AMBIGUOUS_PKG or "metric" in (name or "").lower():
+        return pkg, None
+    twin, twin_esl = _AMBIGUOUS_PKG[pkg]
+    other = ("an imperial %s (ESL %.2f nH)" % (twin, twin_esl) if twin_esl
+             else "an imperial %s, which this code does not know" % twin)
+    return pkg, ('the footprint "%s" gives the size %s with no metric code '
+                 'beside it, thus that size can be imperial or metric. The '
+                 'model uses the imperial %s (ESL %.2f nH). A METRIC %s is '
+                 '%s: give the values by hand in the dialog if the part is '
+                 'that one.'
+                 % (name, pkg, pkg, _ESL_NH[pkg], pkg, other))
+
+
+def _parasitics(fp, kind):
+    """Give (package, ESL in H, ESR in ohm, warning) for the body of a part.
+
+    An ideal element gives incorrect results above about 1 GHz: the ESL of
+    an 0402 capacitor puts its self-resonance inside a usual sweep. The
+    solver puts these values in series with the value of the part.
     """
     try:
         name = fp.GetFPID().GetUniStringLibItemName()
     except Exception:
-        return None
-    m = _PKG_RE.search(name or "")
-    return m.group(1) if m else None
-
-
-def _parasitics(fp, kind):
-    """Give (package, ESL in H, ESR in ohm) for the body of a part.
-
-    An ideal element gives incorrect results above about 1 GHz: the ESL of
-    an 0402 capacitor puts its self-resonance inside a usual sweep. The
-    solver puts these values in series with the value of the part. Refer
-    to NOTES.md, "Package parasitics".
-    """
-    pkg = _package(fp)
+        name = None
+    pkg, warn = _package(name)
     esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
-    return pkg, esl, _ESR_OHM.get(kind, 0.0)
+    return pkg, esl, _ESR_OHM.get(kind, 0.0), warn
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):
-    """Find the R/L/C parts that have 2 pads in `region`.
+    """Find each part with 2 terminals in `region`.
 
     The result is (elements, warnings). Each element is a box that
     bridges the gap between the two pads of the part. The box is parallel
@@ -579,13 +744,23 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     the parts in `skip_refs`, which hold a port pad. It gives a warning
     for a part that has an unknown value, or that is not on one copper
     layer.
+
+    A refdes that starts with R, L or C gives the TYPE of the part, and
+    the Value field gives its value. **Each other part with 2 terminals
+    also comes back**, with `type` = None and `value` = None: a diode, a
+    ferrite bead, a crystal or a footprint of your own is a 2-terminal
+    part that a user can model as an R, an L or a C. The dialog shows
+    such a part as "Unknown" with its Model checkbox OFF, thus it changes
+    no simulation until the user gives it a type and a value.
     """
     z_of = {c["name"]: c["z"] for c in copper_layers}
     elements, warnings = [], []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         kind = ref[:1].upper()
-        if kind not in ("R", "L", "C") or ref in skip_refs:
+        if kind not in ("R", "L", "C"):
+            kind = None          # the user gives the type in the dialog
+        if ref in skip_refs:
             continue
         if not fp.GetBoundingBox().Intersects(region):
             continue  # not in the simulated area: ignore it, with no warning
@@ -606,23 +781,32 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             # "REF**", or a connector with a name that starts with R,
             # stays quiet. But a real 50-ohm part that has 3 terminals
             # gives a warning.
-            if _parse_value(fp.GetValue(), kind) is not None:
+            # A part whose type the refdes does not give stays quiet
+            # here: a connector, a mounting hole or a footprint of your
+            # own has any number of pads, and a warning for each one is
+            # noise. The same rule holds for the three tests below.
+            if kind and _parse_value(fp.GetValue(), kind) is not None:
                 warnings.append(
                     "%s (value \"%s\") has %d numbered pad(s), not 2 -> not "
                     "modeled. A lumped element bridges exactly two terminals."
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
-            warnings.append("%s: not an SMD part (THT barrel not modeled) "
-                            "-> not modeled" % ref)
+            if kind:
+                warnings.append("%s: not an SMD part (THT barrel not modeled) "
+                                "-> not modeled" % ref)
             continue
-        layer = _lname(pads[0].GetLayer())
-        if layer not in z_of or _lname(pads[1].GetLayer()) != layer:
-            warnings.append("%s: pads not both on one copper layer -> not "
-                            "modeled" % ref)
+        layer = _pad_layer(pads[0])
+        if layer not in z_of or _pad_layer(pads[1]) != layer:
+            if kind:
+                warnings.append("%s: pads not both on one copper layer -> not "
+                                "modeled" % ref)
             continue
-        val = _parse_value(fp.GetValue(), kind)
-        if val is None:
+        # A part with no type has no value either: the Value field of a
+        # diode holds a part number, and not a quantity. The dialog asks
+        # the user for both.
+        val = _parse_value(fp.GetValue(), kind) if kind else None
+        if kind and val is None:
             warnings.append("%s: value \"%s\" not understood -> not modeled"
                             % (ref, fp.GetValue()))
             continue
@@ -649,13 +833,16 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             hw = 0.5 * min(_mm(b1.GetWidth()), _mm(b2.GetWidth()))
             start, stop = [c - hw, g0, z], [c + hw, g1, z]
         if g1 - g0 <= 0:
-            warnings.append("%s: pads overlap (no gap to bridge) -> not "
-                            "modeled" % ref)
+            if kind:
+                warnings.append("%s: pads overlap (no gap to bridge) -> not "
+                                "modeled" % ref)
             continue
-        if min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
+        if kind and min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
             warnings.append("%s is placed off-axis; approximated as a %s-axis "
                             "element" % (ref, ny))
-        pkg, esl, esr = _parasitics(fp, kind)
+        pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
+        if pkg_warn:
+            warnings.append("%s: %s" % (ref, pkg_warn))
         elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
                          "layer": layer, "start": start, "stop": stop,
                          "pads": [list(c1), list(c2)],
@@ -664,7 +851,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
 
 
 def _port(board, pad, number, copper_layers):
-    layer_name = _lname(pad.GetLayer())
+    layer_name = _pad_layer(pad)
     names = [c["name"] for c in copper_layers]
     if layer_name not in names:
         raise ValueError("Pad of port %d is not on a copper layer in the stackup"
@@ -695,11 +882,11 @@ def _port(board, pad, number, copper_layers):
     direction, track_w = _feed_direction(board, pad)
     ext_x = _mm(bbox.GetWidth())
     ext_y = _mm(bbox.GetHeight())
-    along_y = bool(direction and direction[0] == 0)
     fp = pad.GetParentFootprint()
     return {
         "number": number,
-        "label": "%s pad %s (%s)" % (fp.GetReference(), pad.GetNumber(),
+        # The tooltip of the port row shows this: "R1 Pad 2 (GND)".
+        "label": "%s Pad %s (%s)" % (fp.GetReference(), pad.GetNumber(),
                                      pad.GetNetname() or "no net"),
         "x": _mm(bbox.Centre().x),
         "y": -_mm(bbox.Centre().y),
@@ -709,8 +896,11 @@ def _port(board, pad, number, copper_layers):
         "height": height,        # strip to each plane, mm; None = no stripline
         "asymmetry": round(asym, 4),
         "gap": None,             # the coplanar gap; extract() measures it
-        "width": ext_x if along_y else ext_y,     # extent across the feed
-        "length": ext_y if along_y else ext_x,    # extent along the feed
+        # On the axes of the board: length is the pad extent in x, and
+        # width is the pad extent in y. The lumped port box of the runner
+        # and the port marks of the GUI read them in that way.
+        "width": ext_y,
+        "length": ext_x,
         "direction": direction,
         "track_width": track_w,
         "type": "lumped",  # overwritten from the settings dialog
@@ -727,7 +917,7 @@ def extract(board, pads, margin_mm, substrate=None):
     are "er", "tand", "h" (the total dielectric thickness in mm) and
     "cu_t" (in mm).
     """
-    copper_layers, diel_layers = _stackup(board, substrate)
+    copper_layers, diel_layers, stack_src = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
 
     first = pads[0].GetBoundingBox()
@@ -768,7 +958,7 @@ def extract(board, pads, margin_mm, substrate=None):
     # _copper_polys does not model the text on copper. Give a warning; do
     # not remove the copper with no message. KiCad 10 can correct this: it
     # has ERROR_INSIDE, and ConvertBrdLayerToPolygonalContours includes
-    # the text. Refer to the backlog in NOTES.md.
+    # the text.
     warnings = []
     if clipped:
         warnings.append(
@@ -806,9 +996,34 @@ def extract(board, pads, margin_mm, substrate=None):
     # Measure the coplanar gap of each port. The copper of the layer must
     # exist first, thus this operation comes after the extraction of the
     # polygons. A port that has a gap can use a CPW port.
-    for p in ports:
-        p["gap"] = _coplanar_gap(polygons.get(p["layer"], []),
-                                 p["x"], p["y"], p["direction"])
+    for p, pad in zip(ports, pads):
+        polys_l = polygons.get(p["layer"], [])
+        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        # How far the copper runs from the pad along the feed. The
+        # runner caps the length of a de-embedded port with it: refer to
+        # `copper_run` and to problem 13. None means "further than the
+        # limit", and the runner then uses its own length.
+        p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
+        # A stripline needs copper on the two planes. _port reads the
+        # stackup only, thus it gives a height for each strip on an inner
+        # layer, also when the second plane is empty above the pad. The
+        # port would then put its voltage probes into open board. The
+        # guard below tests the reference layer; this test is for the
+        # second plane.
+        if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
+                                        _pad_box(pad)):
+            warnings.append(
+                "Port %d (%s): no copper on %s above the pad, so this is "
+                "not a stripline. The Stripline port type is not offered."
+                % (p["number"], p["label"], p["ref_layer2"]))
+            p["height"], p["ref_layer2"], p["asymmetry"] = None, None, 0.0
+        if not p["direction"]:
+            # The gap of each candidate direction, for the manual feed
+            # of the dialog. A drawn CPW has no track, and the dialog
+            # offers the CPW type only for a direction that has a gap.
+            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
+                         for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
+                                        ("+y", [0, 1]), ("-y", [0, -1]))}
         if p["height"] and p["asymmetry"] > 0.25:
             warnings.append(
                 "Port %d (%s): the strip is not centered between %s and %s "
@@ -823,26 +1038,21 @@ def extract(board, pads, margin_mm, substrate=None):
     # point-in-polygon test if pours with unusual shapes give incorrect
     # results.
     for p, pad in zip(ports, pads):
-        bb = pad.GetBoundingBox()
-        px0, px1 = _mm(bb.GetLeft()), _mm(bb.GetRight())
-        py0, py1 = -_mm(bb.GetBottom()), -_mm(bb.GetTop())
-        for poly in polygons.get(p["ref_layer"], []):
-            xs = [pt[0] for pt in poly]
-            ys = [pt[1] for pt in poly]
-            if (min(xs) <= px1 and max(xs) >= px0
-                    and min(ys) <= py1 and max(ys) >= py0):
-                break
-        else:
+        if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
             # A CPW carries its return current on the coplanar ground of
             # its own layer. Thus a board with no plane below the pad is
-            # correct for a CPW port, and the guard must not stop it.
-            if p["gap"]:
+            # correct for a CPW port, and the guard must not stop it. A
+            # drawn CPW has no track: then the gap of a candidate
+            # direction counts too.
+            g = p["gap"] or next((v for v in (p.get("gaps") or {}).values()
+                                  if v), None)
+            if g:
                 warnings.append(
                     "Port %d (%s): no copper on reference layer %s, but "
                     "there is coplanar copper %.3f mm from the feed line. "
                     "Set this port to \"Coplanar (CPW)\": a Lumped or "
                     "Microstrip port has no return path here."
-                    % (p["number"], p["label"], p["ref_layer"], p["gap"]))
+                    % (p["number"], p["label"], p["ref_layer"], g))
                 continue
             raise ValueError(
                 "Port %d (%s): no copper on reference layer %s under the "
@@ -864,6 +1074,9 @@ def extract(board, pads, margin_mm, substrate=None):
     for c in copper_layers:
         c.pop("id")
     return {
+        "version": MODEL_VERSION,
+        # "file", "default" or "dialog": refer to _stackup().
+        "stackup_source": stack_src,
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
@@ -920,13 +1133,30 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
     # A ray that goes exactly through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
-    print("geometry OK (%d cases)" % (len(_GEO) + 1))
+    # The copper test for a manual feed direction: the strip goes to +x
+    # from the origin, thus +x is on copper and -x is empty board.
+    assert copper_along([_STRIP], 0.0, 0.0, [1, 0]), "copper_along +x"
+    assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
+    assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
+    print("geometry OK (%d cases)" % (len(_GEO) + 4))
 
-    _PKGS = [("R_0402_1005Metric", "0402"), ("C_0603_1608Metric", "0603"),
-             ("R_0201_0603Metric", "0201"), ("L_1210_3225Metric", "1210"),
-             ("C_1005", None), ("SOT-23", None), ("R_2512_6332Metric", "2512")]
-    for _name, _want in _PKGS:
-        _m = _PKG_RE.search(_name)
-        _got = _m.group(1) if _m else None
+    # (the name, the code, does it give a warning?). A name that carries
+    # the metric code is not ambiguous, also when the imperial code is
+    # 0402 or 0603. A bare "C_0603" IS ambiguous: it can be an imperial
+    # 0603 (0.35 nH) or a metric 0603, which is an imperial 0201
+    # (0.20 nH). A bare code that is not also a metric size, such as
+    # 1206, is not ambiguous.
+    _PKGS = [("R_0402_1005Metric", "0402", False),
+             ("C_0603_1608Metric", "0603", False),
+             ("R_0201_0603Metric", "0201", False),
+             ("L_1210_3225Metric", "1210", False),
+             ("C_1005", None, False), ("SOT-23", None, False),
+             ("R_2512_6332Metric", "2512", False),
+             ("C_0603", "0603", True), ("R_0402", "0402", True),
+             ("C_1206", "1206", False), ("", None, False)]
+    for _name, _want, _warn in _PKGS:
+        _got, _msg = _package(_name)
         assert _got == _want, "%s -> %r, want %r" % (_name, _got, _want)
+        assert bool(_msg) == _warn, \
+            "%s -> warning %r, want %s" % (_name, _msg, _warn)
     print("package OK (%d cases)" % len(_PKGS))

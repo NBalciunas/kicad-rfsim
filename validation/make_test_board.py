@@ -18,6 +18,13 @@ BOARD = (0.0, 0.0, 40.0, 20.0)
 # with eps_eff 2.88, on a dielectric of 1.53 mm and er 4.5.
 CPW_W, CPW_GAP = 1.5, 0.3
 SL_W = 0.6      # the strip of the stripline board, on In1.Cu of 4 layers
+# The stitching vias of via_fence(), which no validation board calls.
+# A real CPW and a real stripline tie their reference conductors
+# together, but a measurement showed that the stitching does NOT change
+# the impedance on these boards: refer to via_fence(). The drill is
+# large on purpose, because the mesh puts a line at each side of a via
+# and at its center: a small drill makes thin cells and a slow run.
+VIA_DRILL, VIA_PITCH, VIA_OFFSET = 0.6, 3.0, 3.0
 
 
 def _pad_fp(board, ref, x, y, net, size=None):
@@ -47,6 +54,40 @@ def _edge_cuts(board, corners):
         e.SetLayer(pcbnew.Edge_Cuts)
         e.SetWidth(FromMM(0.1))
         board.Add(e)
+
+
+def via_fence(board, net, offset=VIA_OFFSET):
+    """Put a row of through vias at each side of the line.
+
+    The vias tie all the copper layers of `net` together. Call this
+    function BEFORE the zone filler, thus each zone connects to them.
+
+    No validation board calls it, and a board does not need it to give
+    the correct impedance: a stitched board and the board with no via
+    give the SAME value at the medium mesh (34.3 against 34.6 ohm). A
+    solid wall between the two ground conductors of a CPW gave the same
+    result on 2026-08-04. The error of both boards was the MESH, and
+    `runner._mesh` now corrects it.
+
+    Two traps if you use this function. A THROUGH via puts an annular
+    ring on EVERY copper layer, and that includes the layer of the strip;
+    `SetRemoveUnconnected(True)` with `SetKeepStartEnd(True)` keeps the
+    ring off a layer that has no copper of this net. And a via that is
+    small against the mesh step makes thin cells beside coarse ones,
+    which is its own error.
+    """
+    x = X0 - 2.0
+    while x <= X1 + 2.0 + 1e-9:
+        for y in (TRACE_Y - offset, TRACE_Y + offset):
+            v = pcbnew.PCB_VIA(board)
+            v.SetPosition(VECTOR2I(FromMM(x), FromMM(y)))
+            v.SetDrill(FromMM(VIA_DRILL))
+            v.SetWidth(FromMM(VIA_DRILL + 0.3))
+            v.SetViaType(pcbnew.VIATYPE_THROUGH)
+            v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+            v.SetNetCode(net.GetNetCode())
+            board.Add(v)
+        x += VIA_PITCH
 
 
 def _zone(board, layer, net, corners):
@@ -82,6 +123,81 @@ def make(path):
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
     _edge_cuts(board, corners)
     _zone(board, pcbnew.B_Cu, gnd, corners)
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+
+    pcbnew.SaveBoard(path, board)
+    return board, [pad1, pad2]
+
+
+def make_zone_holes(path, void=True):
+    """The microstrip board, with a HOLE in the ground zone under the line.
+
+    A filled zone that has holes is the one geometry that reached
+    `extract()` and never reached the SOLVER. `Fracture` changes each
+    hole into a slit with no width, and nobody had shown that CSXCAD
+    makes correct raster data from such a polygon: a slit that closes
+    would join the copper across the hole, and a slit that opens too far
+    would cut the plane. The board of `run_headless.py` has a plain
+    rectangle on B.Cu, thus it cannot show either.
+
+    **The hole is DIRECTLY under the line, and it is large.** That is
+    the point of the board: a hole at the side of the line changes the
+    impedance by so little that a slit which closed and a slit which
+    worked give the SAME number, and the test then shows nothing. The
+    ground under the line carries the return current, thus a void there
+    must raise the impedance by a large step. `void=False` gives the
+    same board with NO hole, and that is the control: the difference of
+    the two runs is the measurement.
+
+    Three vias of another net stay in the pour in both boards. They make
+    the small clearance holes that a real board has, and they keep the
+    two boards identical in every other way.
+    """
+    board = pcbnew.NewBoard(path)
+    rf = pcbnew.NETINFO_ITEM(board, "RF")
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    other = pcbnew.NETINFO_ITEM(board, "OTHER")
+    for n in (rf, gnd, other):
+        board.Add(n)
+
+    pad1 = _pad_fp(board, "P1", X0, TRACE_Y, rf)
+    pad2 = _pad_fp(board, "P2", X1, TRACE_Y, rf)
+
+    t = pcbnew.PCB_TRACK(board)
+    t.SetStart(VECTOR2I(FromMM(X0), FromMM(TRACE_Y)))
+    t.SetEnd(VECTOR2I(FromMM(X1), FromMM(TRACE_Y)))
+    t.SetWidth(FromMM(TRACE_W))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetNetCode(rf.GetNetCode())
+    board.Add(t)
+
+    # The vias of the other net. They are BELOW the line in y, thus they
+    # do not touch the track on F.Cu, and their annular ring on B.Cu
+    # makes the pour keep a clearance: that clearance is the hole.
+    for x in (13.0, 20.0, 27.0):
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(VECTOR2I(FromMM(x), FromMM(TRACE_Y + 3.5)))
+        v.SetDrill(FromMM(VIA_DRILL))
+        v.SetWidth(FromMM(VIA_DRILL + 0.6))
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        v.SetNetCode(other.GetNetCode())
+        board.Add(v)
+
+    x0, y0, x1, y1 = BOARD
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    _edge_cuts(board, corners)
+    z = _zone(board, pcbnew.B_Cu, gnd, corners)
+    if void:
+        # A hole in the OUTLINE of the zone, under the middle of the
+        # line. The filler keeps it, thus the pour has a true void and
+        # not only a clearance. 8 x 6 mm against a line of 2.9 mm: the
+        # return current must go around it.
+        hx0, hx1 = 0.5 * (X0 + X1) - 4.0, 0.5 * (X0 + X1) + 4.0
+        hy0, hy1 = TRACE_Y - 3.0, TRACE_Y + 3.0
+        h = z.Outline().NewHole(0)
+        for cx, cy in ((hx0, hy0), (hx1, hy0), (hx1, hy1), (hx0, hy1)):
+            z.Outline().Append(FromMM(cx), FromMM(cy), 0, h)
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
 
     pcbnew.SaveBoard(path, board)
@@ -155,7 +271,13 @@ def make_stripline(path):
     pads = []
     for ref, x in (("P1", X0), ("P2", X1)):
         pad = _pad_fp(board, ref, x, TRACE_Y, rf, size=SL_W)
-        pad.SetLayer(pcbnew.In1_Cu)  # LSET does not take a list in KiCad 10
+        # The layer SET must hold In1.Cu, and not only the item layer:
+        # SaveBoard writes the set, and PAD.GetLayer() of a board that
+        # comes from a file always gives F.Cu. LSET does not take a list
+        # in KiCad 10, thus the code adds the layer to an empty set.
+        lset = pcbnew.LSET()
+        lset.AddLayer(pcbnew.In1_Cu)
+        pad.SetLayerSet(lset)
         pads.append(pad)
 
     t = pcbnew.PCB_TRACK(board)

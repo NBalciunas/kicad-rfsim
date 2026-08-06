@@ -12,79 +12,101 @@ import types
 
 import wx
 
-PORT_TYPES = [("Lumped", "lumped"), ("Microstrip (MSL)", "msl"),
-              ("Coplanar (CPW)", "cpw"), ("Stripline", "stripline")]
+PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
+              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
+# The rows of the R/L/C parts that the dialog shows without a scroll.
+# Each row is about 29 px tall, and the dialog is already 1053 px tall
+# with one part on a screen of 1920x1080.
+MAX_PART_ROWS = 6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
 KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor"}
-KIND_UNITS = {"R": "ohm", "C": "F", "L": "H"}
-# The multipliers for a value that a person reads, the largest first.
-_ENG = ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""),
-        (1e-3, "m"), (1e-6, "u"), (1e-9, "n"), (1e-12, "p"))
+# The name of the quantity, for the label in front of the value of a part.
+KIND_QUANTITY = {"R": "Resistance", "C": "Capacitance", "L": "Inductance"}
+# The first entry of the type choice, for a part whose refdes does not
+# say what it is (a diode, a ferrite bead, a footprint of your own).
+UNKNOWN_KIND = "Unknown"
+KIND_ORDER = [None] + list(KIND_NAMES)   # the index in the type choice
+# The unit of the field that the user fills in. A number and no prefix,
+# in the same way as the ESR and the ESL fields. The value goes into
+# model.json in SI units.
+ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
+ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
 
 
-SUBSTRATE_PRESETS = [("FR-4", 4.2, 0.02),
+def _qty_label(kind):
+    """Give the label in front of the value of a part."""
+    return KIND_QUANTITY.get(kind, "Value") + ":"
+
+
+def _entry_text(kind, value_si):
+    """Give the text of the value field: a number in the unit of the row.
+
+    The unit is ohm, nH or pF. Thus 4.7 kohm becomes "4700" and 10 nH
+    becomes "10". A part with no type has an empty field.
+    """
+    if kind not in ENTRY_SCALE or value_si is None:
+        return ""
+    return "%g" % (value_si / ENTRY_SCALE[kind])
+
+
+# The er and the tan d of each preset. **FR-4 must agree with
+# `board_reader.DEF_EPSILON`**, which is the value that the plugin uses
+# when the board file holds no stackup. The two were 4.2 here and 4.5
+# there until 2026-08-05, thus the SAME board gave one substrate
+# through the dialog and another through a run with no GUI.
+# The three laminates after FR-4 are the usual low-loss choices of a
+# fabricator. Their values are the DATASHEET values at 10 GHz, and FR-4
+# is at 1 MHz: the er of FR-4 falls to about 4.3 at 5 GHz, thus a run in
+# the GHz band deserves a value that the laminate of your fabricator
+# gives.
+#
+# **Two Dk values exist for a Rogers laminate, and these are the
+# PROCESS values.** Rogers measures them with a clamped stripline at
+# 10 GHz, and it publishes a larger "design Dk" for a MICROSTRIP: about
+# 3.66 for RO4350B and 3.55 for RO4003C. A microstrip that this plugin
+# simulates with the process value reads about 5% high in impedance.
+# The design values are not here, because nobody has measured which one
+# agrees with this solver: refer to the todo list.
+SUBSTRATE_PRESETS = [("FR-4", 4.5, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
+                     ("Rogers RO4003C", 3.38, 0.0027),
+                     # The values are those of RT/duroid 5880, which is
+                     # the usual PTFE laminate. Another PTFE differs: er
+                     # goes from 2.1 to 2.6 with the glass in it.
+                     ("PTFE", 2.20, 0.0009),
                      ("Custom", None, None)]
 # The colours of the top view. The preview in the settings dialog and the
 # view in the results window both use them.
 CU_COLORS = {"F.Cu": ("tab:red", 0.8), "B.Cu": ("tab:blue", 0.45)}
 
 
-def _badge(parent, text):
-    """Give a small box that holds `text`, for the name or the value of a
-    part.
+def _port_choices(p):
+    """Give (label, value) for the port types that the geometry permits.
 
-    The function gives no size to the box. Add it to the grid with
-    wx.EXPAND: then each box fills its column, thus all the boxes of one
-    column have the same width. The colour comes from the system, thus it
-    obeys a dark theme.
+    A lumped port always operates. Each de-embedded port needs a feed
+    direction (a track, or the manual "Feed" control). A CPW port also
+    needs a coplanar gap. A stripline port needs a plane above the strip
+    and a plane below it. Each of those two entries carries its measured
+    value in brackets: a value in brackets comes from the board, and the
+    user cannot change it. Both values keep three decimals. The two
+    entries are adjacent, thus a different count of decimals looks
+    arbitrary. Three decimals are also necessary: a stackup that comes
+    from mil gives 0.127 mm and 0.254 mm, and two decimals make the two
+    values equal. The label of the port row names what the geometry does
+    not give.
     """
-    t = wx.StaticText(parent, label=text,
-                      style=wx.BORDER_SIMPLE | wx.ALIGN_CENTRE_HORIZONTAL)
-    t.SetBackgroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE))
-    return t
-
-
-def _eng(value, unit):
-    """Give a value with its multiplier, for example "4.7 kohm" or "3.3 nH"."""
-    if value is None:
-        return ""
-    if value == 0:
-        return "0 " + unit
-    for scale, prefix in _ENG:
-        if abs(value) >= scale:
-            return "%g %s%s" % (value / scale, prefix, unit)
-    return "%g %s" % (value, unit)
-
-
-def _port_types(p):
-    """Give the port types that the geometry of a port permits.
-
-    A lumped port always operates. Each de-embedded port needs a track
-    that gives the direction. A CPW port also needs a coplanar gap, and a
-    stripline port needs a plane above the strip and a plane below it.
-    """
-    ok = {"lumped": True,
-          "msl": bool(p.get("direction")),
-          "cpw": bool(p.get("direction") and p.get("gap")),
-          "stripline": bool(p.get("direction") and p.get("height"))}
-    return [t for t in PORT_TYPES if ok[t[1]]]
-
-
-def _port_note(p):
-    """Give what the geometry of a port ADDS.
-
-    The box of the port holds the restriction "no track, lumped only",
-    thus this text does not hold it again.
-    """
-    extra = []
-    if p.get("gap"):
-        extra.append("coplanar gap %.3f mm" % p["gap"])
-    if p.get("height"):
-        extra.append("stripline: %.3f mm to each plane" % p["height"])
-    return "; ".join(extra)
+    out = [PORT_TYPES[0]]
+    if p.get("direction"):
+        out.append(PORT_TYPES[1])
+        if p.get("gap"):
+            out.append(("%s [Coplanar Gap: %.3f mm]"
+                        % (PORT_TYPES[2][0], p["gap"]), "cpw"))
+        if p.get("height"):
+            out.append(("%s [Strip to Plane: %.3f mm]"
+                        % (PORT_TYPES[3][0], p["height"]), "stripline"))
+    return out
 
 
 def _use_wxagg():
@@ -203,24 +225,27 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
         ax.legend(handles=handles, loc="upper right", fontsize=8)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("Board layout")
+        ax.set_title("Board Layout")
 
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None):
+                 packages=None, esr=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
-        # {the code of the package: the ESL in H}. board_reader keeps the
-        # table, thus there is one source of truth. This module must not
-        # import it: board_reader imports pcbnew.
+        # {the code of the package: the ESL in H} and {the type of the
+        # part: the ESR in ohm}. board_reader keeps both tables, thus
+        # there is one source of truth. This module must not import it:
+        # board_reader imports pcbnew.
         self._packages = dict(packages or {})
+        self._esr = dict(esr or {})
         self._pkg_values = []
+        self.part_rows = []
         self._build(ports, default_outdir, lumped, preview)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(self, label="RFsim v1.0")
+        title = wx.StaticText(self, label="RFsim v1.1")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
@@ -288,13 +313,15 @@ class SettingsDialog(wx.Dialog):
         self.port_types = []   # the values of the choices of each port
         self.port_order = []
         self.port_excite = []
+        # (the direction choice, the width field) of a pad that has no
+        # track, or None for a pad that has one.
+        self.port_feed = []
         nums = [str(i + 1) for i in range(len(ports))]
         # The rows of the ports use their own grid, in the same way as the
-        # lumped elements: a box that holds the number of the port, then
-        # what the geometry gives, then the controls. Column 1 grows, thus
-        # "Excite" stays at the right end.
+        # lumped elements. Column 1 is empty and grows, thus the label
+        # stays at the left and the controls stay at the right end.
         mid = wx.ALIGN_CENTER_VERTICAL
-        prg = wx.FlexGridSizer(cols=5, vgap=6, hgap=8)
+        prg = wx.FlexGridSizer(cols=6, vgap=6, hgap=8)
         prg.AddGrowableCol(1, 1)
         pbox.Add(prg, 0, wx.ALL | wx.EXPAND, 6)
         self.port_badges = []
@@ -302,42 +329,83 @@ class SettingsDialog(wx.Dialog):
             num = wx.Choice(self, choices=nums)
             num.SetSelection(i)
             num.Enable(len(ports) > 1)
-            # The types are not the same for each port: they come from the
-            # geometry. Thus each choice keeps its own list of values.
-            types = _port_types(p)
-            self.port_types.append([t[1] for t in types])
-            ch = wx.Choice(self, choices=[t[0] for t in types])
-            ch.SetSelection(0)
-            ch.Enable(len(types) > 1)
+            num.SetToolTip("The number assigns the port.")
+            # The type choice holds only the types that the geometry
+            # permits; the label of the row names what the geometry does
+            # not give. The fixed width fits the CPW entry with its gap:
+            # the list can change with the feed direction, and the
+            # control must not change its size with it.
+            # _set_type_choices fills the control below.
+            self.port_types.append([])
+            ch = wx.Choice(self, size=(280, -1))
             exc = wx.CheckBox(self, label="Excite")
             exc.SetValue(True)
+            exc.SetToolTip("Drive this port: one FDTD run for each "
+                           "excited port.")
             # _refresh_port_badges puts the text in. The pad, the
-            # footprint and the net go into the tooltip: the box stays
-            # short, and no data goes away.
-            badge = _badge(self, "")
-            badge.SetToolTip(p["label"])
+            # footprint and the net go into the tooltip.
+            label = wx.StaticText(self, label="")
+            label.SetToolTip(p["label"])
             self.port_badges.append(p)
-            prg.Add(badge, 0, wx.EXPAND)
-            prg.Add(wx.StaticText(self, label=_port_note(p)), 0, mid)
-            prg.Add(num, 0, mid)
+            # The feed controls. A pad with a track shows the direction
+            # and the width that the track gives, locked (off). A pad
+            # with no track can still sit on a line that the user drew
+            # as a shape or as a polygon (the feed of a patch antenna,
+            # for example): the user then gives the two values, and a
+            # de-embedded port becomes possible.
+            note = wx.BoxSizer(wx.HORIZONTAL)
+            dch = wx.Choice(self, choices=["No Line", "+x (→)", "-x (←)",
+                                           "+y (↑)", "-y (↓)"])
+            wtc = wx.TextCtrl(self, size=(50, -1))
+            if p.get("direction"):
+                dch.SetSelection({(1, 0): 1, (-1, 0): 2, (0, 1): 3,
+                                  (0, -1): 4}[tuple(p["direction"])])
+                wtc.ChangeValue("%g" % (p.get("track_width")
+                                        or min(p["width"], p["length"])))
+                # **A control that is OFF shows no tooltip**, because
+                # Windows sends it no mouse event. Thus these two carry
+                # one for the day that they become enabled, and the
+                # LABELS beside them carry the same text, which is what
+                # a user can actually reach.
+                locked_tip = "The track at this pad gives this value."
+                for c in (dch, wtc):
+                    c.SetToolTip(locked_tip)
+                    c.Enable(False)
+                self.port_feed.append(None)
+            else:
+                locked_tip = None
+                dch.SetSelection(0)
+                dch.SetToolTip("Direction of the feed line at this pad.")
+                wtc.ChangeValue("%g" % min(p["width"], p["length"]))
+                wtc.SetToolTip("Width of the feed line.")
+                self.port_feed.append((dch, wtc))
+                dch.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_feed(k))
+            feed_lbl = wx.StaticText(self, label="Feed:")
+            width_lbl = wx.StaticText(self, label="Width:")
+            if locked_tip:
+                for lbl in (feed_lbl, width_lbl):
+                    lbl.SetToolTip(locked_tip)
+            note.Add(feed_lbl, 0, mid)
+            note.Add(dch, 0, mid | wx.LEFT, 4)
+            note.Add(width_lbl, 0, mid | wx.LEFT, 6)
+            note.Add(wtc, 0, mid | wx.LEFT, 4)
+            note.Add(wx.StaticText(self, label="mm"), 0, mid | wx.LEFT, 2)
+            prg.Add(label, 0, mid)
+            prg.Add((0, 0))   # the empty column that grows
+            prg.Add(note, 0, mid)
             prg.Add(ch, 0, mid)
+            prg.Add(num, 0, mid)
             prg.Add(exc, 0, mid | wx.LEFT, 12)
             self.port_choices.append(ch)
             self.port_order.append(num)
             self.port_excite.append(exc)
-            # The user can change the number of a port. Thus the box must
-            # follow it, or it tells a number that is not correct.
+            self._set_type_choices(i, p)
+            # The user can change the number of a port. Thus the label
+            # must follow it, or it tells a number that is not correct.
             num.Bind(wx.EVT_CHOICE, self._on_port_number)
-        self._port_badge_ctrls = [prg.GetItem(5 * i).GetWindow()
+        self._port_badge_ctrls = [prg.GetItem(6 * i).GetWindow()
                                   for i in range(len(ports))]
         self._refresh_port_badges()
-        if len(ports) > 1:
-            pbox.Add(wx.StaticText(
-                self, label="The number assigns the port (excited in that "
-                "order; port 1 drives the field/far-field views). Excite = "
-                "drive this port (one FDTD run each); uncheck ports whose "
-                "S-columns you don't need."),
-                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         # (ref, the Model checkbox, the package choice, the ESL, the ESR)
         self.para_rows = []
@@ -346,7 +414,7 @@ class SettingsDialog(wx.Dialog):
             # part of the port. There is no checkbox for all the parts:
             # each row has its own "Model" checkbox, in the same way as
             # the "Excite" checkbox of a port.
-            lbox = section("Lumped elements")
+            lbox = section("Lumped Elements")
             # One row for each part. The code reads the package from the
             # name of the footprint. A name that has no code gives
             # "Custom", and the user then puts in the values. "No
@@ -363,49 +431,97 @@ class SettingsDialog(wx.Dialog):
             labels += [CUSTOM_PKG, NO_PARASITICS]
             # One grid for all the rows, and not one sizer for each row.
             # Thus each part of a row stays in a column that agrees from
-            # row to row. The name of the box already says "Lumped
-            # elements", thus a row does not say it again: it starts with
-            # the type and the reference, in the same way as a port row
-            # starts with the name of its pad. Column 2 is an empty
-            # column that grows, thus it holds the two boxes at the left
-            # and the parasitics at the right.
-            lg = wx.FlexGridSizer(cols=12, vgap=6, hgap=8)
-            lg.AddGrowableCol(2, 1)
-            lbox.Add(lg, 0, wx.ALL | wx.EXPAND, 6)
+            # row to row. A row reads as a sentence:
+            #
+            #   Element "R1"  [Resistor v]  Resistance: [50 v] ohm
+            #       ... Parasitics: [0402 Package v] ESR: [] ESL: [] [x] Model
+            #
+            # Column 5 is an empty column that GROWS, thus the part
+            # stays at the left and the parasitics stay at the right end.
+            #
+            # The rows go into a SCROLLED window, and their parent is
+            # that window and not the dialog. Each row is about 29 px
+            # tall, thus a board with many parts made a dialog that was
+            # taller than the screen: 1053 px with one part on a screen
+            # of 1920x1080, which is already the full height. _fit_rows
+            # gives the window its height limit after the rows exist.
+            #
+            # The parent is the static box and not the dialog: wx gives a
+            # warning for a window of a wxStaticBoxSizer that is a child
+            # of the dialog, and a scrolled window is a real container.
+            self.part_area = wx.ScrolledWindow(lbox.GetStaticBox(),
+                                               style=wx.VSCROLL)
+            self.part_area.SetScrollRate(0, 10)
+            lg = wx.FlexGridSizer(cols=15, vgap=6, hgap=8)
+            lg.AddGrowableCol(5, 1)
+            self.part_area.SetSizer(lg)
+            lbox.Add(self.part_area, 0, wx.ALL | wx.EXPAND, 6)
+            pane = self.part_area
             mid = wx.ALIGN_CENTER_VERTICAL
             for e in lumped:
                 i = len(self.para_rows)
                 pkg = e.get("package")
-                cb = wx.CheckBox(self, label="Model")
-                cb.SetValue(True)
-                ch = wx.Choice(self, choices=labels)
-                # A package that the code did not read gives "Custom", and
-                # not "No parasitics": the parasitics are on by default.
-                ch.SetSelection(names.index(pkg) if pkg in names
-                                else names.index(CUSTOM_PKG))
-                esl = wx.TextCtrl(self, value="%g" % (
-                    1e9 * (e.get("esl") or 0.0)), size=(55, -1))
-                esr = wx.TextCtrl(self, value="%g" % (e.get("esr") or 0.0),
-                                  size=(55, -1))
-                kind = e.get("type", "")
-                # wx.EXPAND, and no ALIGN: then each box fills its column
-                # and all the boxes of one column are the same width.
-                lg.Add(_badge(self, '%s "%s"' % (KIND_NAMES.get(kind) or "Part",
-                                                 e["ref"])), 0, wx.EXPAND)
-                lg.Add(_badge(self, _eng(e.get("value"),
-                                         KIND_UNITS.get(kind, ""))),
-                       0, wx.EXPAND)
+                kind = e.get("type") or None
+                cb = wx.CheckBox(pane, label="Model")
+                # A part whose type the board does not give starts OFF.
+                # Thus a diode, a ferrite bead or a footprint of your own
+                # changes no simulation until the user selects a type and
+                # gives a value.
+                cb.SetValue(kind is not None)
+                ch = wx.Choice(pane, choices=labels)
+                # A package that the code did not read gives "Custom" for
+                # a part that the board describes: the parasitics of an
+                # R, an L or a C are on by default, and _ESL_DEFAULT_NH
+                # is the value. A part with NO type gets **"No
+                # parasitics"**: the code knows nothing about its body,
+                # thus it must not invent an ESL for it.
+                start_pkg = (pkg if pkg in names
+                             else CUSTOM_PKG if kind else NO_PARASITICS)
+                ch.SetSelection(names.index(start_pkg))
+                esl0 = "%g" % (1e9 * (e.get("esl") or 0.0))
+                esr0 = "%g" % (e.get("esr") or 0.0)
+                if start_pkg == NO_PARASITICS:
+                    esl0 = esr0 = "0"
+                esl = wx.TextCtrl(pane, value=esl0, size=(55, -1))
+                esr = wx.TextCtrl(pane, value=esr0, size=(55, -1))
+                # The refdes gives the type and the Value field gives the
+                # number, and the row SHOWS what the parser read. But
+                # both controls stay open: the user knows the part, and
+                # the board does not always say what it is. A refdes
+                # that names no type starts at "Unknown" with an empty
+                # value, because the Value field of a diode holds a part
+                # number and not a quantity.
+                kinds = wx.Choice(pane, choices=[UNKNOWN_KIND]
+                                  + list(KIND_NAMES.values()), size=(110, -1))
+                kinds.SetSelection(KIND_ORDER.index(kind) if kind in KIND_ORDER
+                                   else 0)
+                # The unit of the field is fixed (ohm, nH or pF), in the
+                # same way as the ESR and the ESL fields. Thus the user
+                # gives a number and no prefix, and the unit follows the
+                # TYPE alone and not the size of the value.
+                value = wx.TextCtrl(pane, value=_entry_text(kind,
+                                                            e.get("value")),
+                                    size=(90, -1))
+                value.Enable(kind is not None)
+                qty = wx.StaticText(pane, label=_qty_label(kind))
+                uni = wx.StaticText(pane, label=ENTRY_UNITS.get(kind, ""))
+                lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
+                       0, mid)
+                lg.Add(kinds, 0, mid)
+                lg.Add(qty, 0, mid | wx.LEFT, 6)
+                lg.Add(value, 0, mid)
+                lg.Add(uni, 0, mid)
                 lg.Add((0, 0))   # the empty column that grows
-                lg.Add(wx.StaticText(self, label="Parasitics:"), 0, mid)
+                lg.Add(wx.StaticText(pane, label="Parasitics:"), 0, mid)
                 lg.Add(ch, 0, mid)
                 # R before L, in the sequence of "RLC". There is no third
-                # field: a series capacitance is not a parasitic of these
-                # parts. Refer to NOTES.md, "Package parasitics".
+                # field: a series capacitance is not a parasitic of
+                # these parts.
                 for label, ctrl, unit in (("ESR:", esr, "ohm"),
                                           ("ESL:", esl, "nH")):
-                    lg.Add(wx.StaticText(self, label=label), 0, mid | wx.LEFT, 6)
+                    lg.Add(wx.StaticText(pane, label=label), 0, mid | wx.LEFT, 6)
                     lg.Add(ctrl, 0, mid)
-                    lg.Add(wx.StaticText(self, label=unit), 0, mid)
+                    lg.Add(wx.StaticText(pane, label=unit), 0, mid)
                 lg.Add(cb, 0, mid | wx.LEFT, 12)
                 # A preset writes the ESL with ChangeValue, which sends no
                 # EVT_TEXT. Thus the choice stays on the package. An edit
@@ -415,45 +531,151 @@ class SettingsDialog(wx.Dialog):
                 for c in (esl, esr):
                     c.Bind(wx.EVT_TEXT,
                            lambda evt, k=i: self._on_para_edit(k, evt))
+                kinds.Bind(wx.EVT_CHOICE, lambda evt, k=i: self._on_kind(k))
+                # The value of an inductor changes the timestep, thus the
+                # warning must follow the field.
+                value.Bind(wx.EVT_TEXT,
+                           lambda evt: (self._update_lumped_warning(),
+                                        evt.Skip()))
                 self.para_rows.append((e["ref"], cb, ch, esl, esr))
-            lbox.Add(wx.StaticText(
-                self, label="The values are for the part BODY only: the loop "
-                "of the pads and the tracks is already in the mesh. A preset "
-                "sets the ESL; the ESR comes from the type of the part. Pick "
-                "\"No parasitics\" for an ideal element."),
-                0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+                # The controls of the PART itself. They stay beside
+                # para_rows, thus the code that reads the parasitics does
+                # not change.
+                # "esl0" and "esr0" are the values that come back when a
+                # row leaves "No parasitics", which writes 0 over them.
+                self.part_rows.append({"ref": e["ref"], "kind": kinds,
+                                       "value": value, "qty": qty,
+                                       "unit": uni, "last_pkg": start_pkg,
+                                       "esl0": esl0, "esr0": esr0})
+            # A lumped inductor makes the FDTD unstable at the full
+            # Courant step, thus the runner divides the step by
+            # sqrt(L[nH]) and multiplies the number of steps by the same
+            # value. The run time goes up with it, and nothing said so
+            # before this label: a user who typed 100 nH got a run that
+            # was 10 times longer with no message.
+            # The parent is the static box, in the same way as the window
+            # of the rows: one sizer cannot hold two different parents.
+            self.lumped_warn = wx.StaticText(lbox.GetStaticBox(), label="")
+            self.lumped_warn.SetForegroundColour(wx.Colour(150, 90, 0))
+            lbox.Add(self.lumped_warn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
         self.preset = row(sg, "Presets:", wx.Choice(
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
         self.preset.SetSelection(0)
-        # the default values: FR4 of 1.6 mm, copper of 35 um (1 oz)
-        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.2"))
+        # The default values are the FR-4 preset: refer to
+        # SUBSTRATE_PRESETS. 1.6 mm and 35 um (1 oz) go with them.
+        self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
         self.tand = row(sg, "Loss tangent:", wx.TextCtrl(self, value="0.02"))
         self.h = row(sg, "Substrate thickness:",
                      wx.TextCtrl(self, value="1.6"), "mm")
         self.cu_t = row(sg, "Copper thickness:",
                         wx.TextCtrl(self, value="0.035"), "mm")
+        # **The dialog does NOT read the stackup of the board.** It fills
+        # the four fields from the FR-4 preset and nothing else, thus a
+        # user always sees the same start and gives the values that the
+        # board needs. A version that filled them from the
+        # `(stackup ...)` block of the file, with a label under the
+        # fields that named the source, went in and came out again on
+        # 2026-08-05 at the request of the owner. B7 holds that work, and
+        # problem 8 is the reason to do it one day: a Rogers board
+        # simulates as FR4 until the user types the values.
+        #
+        # `model["stackup_source"]` stays in the model: it tells a reader
+        # of model.json where the substrate came from, and B7 needs it.
         self.preset.Bind(wx.EVT_CHOICE, self._on_preset)
         for c in (self.er, self.tand):
             c.Bind(wx.EVT_TEXT, self._on_substrate_edit)
 
         rbox = section("Simulation")
         rg = grid_in(rbox)
+        cpus = os.cpu_count() or 1
+        self.threads = row(rg, "CPU threads:", wx.Choice(
+            self, choices=["Auto"] + [str(i) for i in range(1, cpus + 1)]))
+        self.threads.SetSelection(0)
+        self.threads.SetToolTip("Threads for the FDTD engine.")
         self.mesh = row(rg, "Mesh resolution:", wx.Choice(
             self, choices=[m.capitalize() for m in MESH_LEVELS]))
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+        # A structure with a high Q rings for a long time. The run then
+        # stops at the step limit before the energy comes down to the end
+        # criteria, and the S-parameters are not correct. The two limits
+        # were constant at 300k and 1e-4 before this.
+        #
+        # The three fields go on ONE row, in the same way as the two
+        # frequencies. Three rows of the grid would make the dialog
+        # 84 px taller, and it is already 1053 px with one part: refer
+        # to MAX_PART_ROWS and to problem 10 of NOTES.
+        self.max_steps = wx.TextCtrl(self, value="300000", size=(70, -1))
+        self.max_steps.SetToolTip(
+            "The run stops at this number of timesteps.")
+        self.end_crit = wx.TextCtrl(self, value="1e-4", size=(55, -1))
+        self.end_crit.SetToolTip(
+            "The run stops when the energy comes down to this part of "
+            "its maximum.")
+        # An empty field gives None, and the runner then selects the
+        # value itself from the largest inductance in the model.
+        self.tsf = wx.TextCtrl(self, value="", size=(55, -1))
+        self.tsf.SetToolTip(
+            "The portion of the Courant time step used by the "
+            "simulation. Leave this field empty to use the "
+            "automatically calculated value.")
+        lim = wx.BoxSizer(wx.HORIZONTAL)
+        for label, ctrl in (("Max steps:", self.max_steps),
+                            ("End criteria:", self.end_crit),
+                            ("Timestep:", self.tsf)):
+            if lim.GetChildren():
+                lim.AddSpacer(12)
+            lim.Add(wx.StaticText(self, label=label), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+            lim.Add(ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+        rg.Add(wx.StaticText(self, label="Run limits:"), 0,
+               wx.ALIGN_CENTER_VERTICAL)
+        rg.Add(lim, 0, wx.EXPAND)
         self.outdir = row(rg, "Output directory:", wx.DirPickerCtrl(
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
-        top.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
-        self.SetSizerAndFit(top)
-        self.SetMinSize((520, -1))
+        # The rows must have their size before the dialog takes its own.
+        self._fit_rows()
+        # **The WHOLE dialog scrolls.** The rows of the parts scrolled
+        # since 2026-08-05, and that stopped the dialog from GROWING
+        # without a limit; it did not make it fit. The dialog is 1084 px
+        # tall with ONE part, and a screen of 1920x1080 gives about
+        # 1040 px of client area, thus the Run button was under the edge
+        # of the screen on a usual machine (problem 10).
+        #
+        # Every control above is a child of the dialog, thus this moves
+        # them into a scrolled body afterwards, in the place of a change
+        # to each of the 60 constructors. The Run button stays OUTSIDE
+        # the body: a button that scrolls out of view is the defect that
+        # this corrects.
+        body = wx.ScrolledWindow(self, style=wx.VSCROLL)
+        body.SetScrollRate(0, 12)
+        for child in list(self.GetChildren()):
+            if child is not body and child is not run:
+                child.Reparent(body)
+        body.SetSizer(top)
+        body.FitInside()
+        # A wx.ScrolledWindow does NOT give the size of its sizer as its
+        # best size, thus `Fit()` alone collapses the dialog to its
+        # minimum. Give the body the size of the content for the fit,
+        # and make it small again straight after: `_fit_to_screen` must
+        # be free to cut the height, and `SetSize` cannot go under the
+        # minimum size of a window.
+        content = top.GetMinSize()
+        body.SetInitialSize(content)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(body, 1, wx.EXPAND)
+        outer.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        self.SetSizer(outer)
         self.Fit()
+        body.SetMinSize((content.GetWidth(), 120))
+        self.SetMinSize((520, 240))
+        self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
@@ -483,9 +705,9 @@ class SettingsDialog(wx.Dialog):
             # full figure, because there are no labels that need space.
             self._prev_fig = Figure(figsize=(4.9, 2.9))
             self._prev_canvas = FigureCanvasWxAgg(self, -1, self._prev_fig)
-            # FigureCanvasWxAgg gives the native pixel size of the figure
-            # as its minimum size for wx, and this clips the figure. Refer
-            # to the wx problems in NOTES.md.
+            # FigureCanvasWxAgg gives the native pixel size of the
+            # figure as its minimum size for wx, and this clips the
+            # figure. Thus give the canvas a small minimum size.
             self._prev_canvas.SetMinSize((480, 285))
         except Exception:
             self._prev_fig = None
@@ -502,17 +724,79 @@ class SettingsDialog(wx.Dialog):
         self._refresh_port_badges()
         evt.Skip()
 
+    def _on_feed(self, k):
+        """Update the port types that a manual feed direction permits.
+
+        The gap of each candidate direction comes from extract(), in
+        port["gaps"]. Thus a drawn CPW (a center line from a polygon,
+        and not from a track) gets the CPW type for a direction that
+        has copper at the two sides. The detector reads the geometry
+        only, not the nets: that copper must really be ground.
+        """
+        p = self.port_badges[k]
+        dch, _ = self.port_feed[k]
+        sel = dch.GetSelection()
+        key = ("+x", "-x", "+y", "-y")[sel - 1] if sel > 0 else None
+        gap = (p.get("gaps") or {}).get(key) if key else None
+        self._set_type_choices(k, dict(p, direction=[1, 0] if key else None,
+                                       gap=gap))
+
+    def _set_type_choices(self, k, p):
+        """Fill the type choice of row k for the geometry in `p`.
+
+        The selection stays on the same type when the new list still
+        holds it; a type that went away falls back to Lumped. The
+        control goes off when Lumped is the one entry.
+        """
+        rows = _port_choices(p)
+        ch = self.port_choices[k]
+        old = self.port_types[k]
+        cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0 \
+            else "lumped"
+        self.port_types[k] = [v for _, v in rows]
+        ch.Set([label for label, _ in rows])
+        ch.SetSelection(self.port_types[k].index(cur)
+                        if cur in self.port_types[k] else 0)
+        ch.Enable(len(rows) > 1)
+
+    def _feed_of(self, i):
+        """Give (direction, width in mm) of a manual feed, or give None.
+
+        The result is None for a pad that has a track, for "No Line",
+        and for a width that is not a positive number.
+        """
+        fc = self.port_feed[i]
+        if not fc:
+            return None
+        dch, wtc = fc
+        sel = dch.GetSelection()
+        if sel <= 0:
+            return None
+        try:
+            w = float(wtc.GetValue())
+        except ValueError:
+            return None
+        if w <= 0:
+            return None
+        return ([[1, 0], [-1, 0], [0, 1], [0, -1]][sel - 1], w)
+
     def _refresh_port_badges(self):
-        """Put "Port N" into the box of each port.
+        """Put "Port N" and its problem tag into the label of each port.
 
         N is the number that the choice of that row gives now, and not the
         number of the selection. Two rows can hold the same number for a
-        short time; _on_ok refuses that.
+        short time; _on_ok refuses that. A tag names what stops every
+        de-embedded type: "[No Track]". A coplanar gap that is absent gets
+        no tag. It stops the CPW type alone, and a board that is not a CPW
+        is the usual case. The type choice already shows the measured gap,
+        or leaves the CPW entry out.
         """
         for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
                                  self.port_badges):
-            note = "" if p.get("direction") else " (no track, lumped only)"
-            badge.SetLabel("Port %d%s" % (num.GetSelection() + 1, note))
+            label = "Port %d" % (num.GetSelection() + 1)
+            if not p.get("direction"):
+                label += " [No Track]"
+            badge.SetLabel(label)
         self.Layout()
 
     def _any_modelled(self):
@@ -525,7 +809,7 @@ class SettingsDialog(wx.Dialog):
         Parasitics of a part that the model does not contain have no
         meaning. Thus the fields of a row go off with its Model checkbox.
         """
-        for _, cb, ch, esl, esr in self.para_rows:
+        for i, (_, cb, ch, esl, esr) in enumerate(self.para_rows):
             # A part that the model does not contain has no parasitics.
             # "No parasitics" makes an ideal element, thus its two fields
             # have no meaning either.
@@ -533,9 +817,92 @@ class SettingsDialog(wx.Dialog):
             ch.Enable(on)
             for c in (esl, esr):
                 c.Enable(on and self._pkg_of(ch) != NO_PARASITICS)
+            # The type stays on with the Model off, thus the user can
+            # select it first and model the part after it. The value
+            # needs a type: the unit comes from it.
+            self.part_rows[i]["value"].Enable(
+                on and self._kind_of(i) is not None)
+        self._update_lumped_warning()
         self._redraw_preview()
         if evt is not None:
             evt.Skip()
+
+    def _fit_rows(self):
+        """Give the window of the part rows its height limit.
+
+        The dialog was 1053 px tall with ONE part on a screen of
+        1920x1080, and each part after it added 29 px. Thus a board with
+        15 parts made a dialog that no screen shows. The window now stops
+        at MAX_PART_ROWS rows, or at one quarter of the screen if that is
+        less, and the rest of the rows come with the scroll bar.
+        """
+        area = getattr(self, "part_area", None)
+        if area is None:
+            return
+        rows = max(1, len(self.part_rows))
+        best = area.GetSizer().GetMinSize()
+        one = best.GetHeight() / float(rows)
+        try:
+            screen = wx.Display().GetClientArea().GetHeight()
+        except Exception:
+            screen = 1080
+        cap = max(2.0 * one, min(MAX_PART_ROWS * one, 0.25 * screen))
+        # The scroll bar takes some width, thus the rows do not lose a
+        # column when it appears.
+        w = best.GetWidth() + (wx.SystemSettings.GetMetric(
+            wx.SYS_VSCROLL_X) if best.GetHeight() > cap else 0)
+        area.SetMinSize((w, int(min(best.GetHeight(), cap)) + 2))
+        area.FitInside()
+        self._one_row = one
+
+    def _fit_to_screen(self):
+        """Hold the dialog inside the screen, and let the body scroll.
+
+        `Fit()` gives the dialog the height of all its content, and that
+        is more than a screen of 1920x1080 gives even with ONE part.
+        This cuts the height to the client area of the display; the
+        scrolled body then shows a scroll bar, and the Run button stays
+        visible because it is outside that body.
+        """
+        try:
+            area = wx.Display().GetClientArea()
+        except Exception:
+            return
+        w, h = self.GetSize()
+        # Keep a little space for the frame of the window itself.
+        avail = max(240, area.GetHeight() - 40)
+        if h > avail:
+            self.SetSize((w, avail))
+            self.Layout()
+
+    def _update_lumped_warning(self):
+        """Show what a lumped inductor costs in run time.
+
+        `runner._time_step_factor` divides the timestep by sqrt(L[nH])
+        and multiplies the number of timesteps by the same value. Thus
+        the run time goes up with the square root of the inductance, and
+        the user must see it BEFORE the run and not after it.
+        """
+        label = getattr(self, "lumped_warn", None)
+        if label is None:
+            return
+        ind = []
+        for i, (_, cb, ch, esl, _) in enumerate(self.para_rows):
+            if not cb.GetValue():
+                continue
+            if self._kind_of(i) == "L":
+                ind.append(self._part_value(i) or 0.0)
+            ind.append(self._para_value(ch, esl, 1e-9) or 0.0)
+        nh = 1e9 * max(ind or [0.0])
+        text = ""
+        if nh > 1.0:
+            text = ("An inductor of %g nH divides the timestep by %.1f, "
+                    "thus the run takes about %.1f times longer."
+                    % (nh, nh ** 0.5, nh ** 0.5))
+        if label.GetLabel() != text:
+            label.SetLabel(text)
+            label.Wrap(560)
+            self.Layout()
 
     def _redraw_preview(self):
         if self._prev_fig is None:
@@ -583,6 +950,26 @@ class SettingsDialog(wx.Dialog):
                 "ESL and ESR must be numbers, and not negative.)",
                 "RFsim", wx.ICON_ERROR)
             return
+        # A part that the user models needs a type and a value. A part
+        # whose refdes does not give the type starts with "Unknown" and
+        # with its Model checkbox off, thus this test speaks only when
+        # the user turned that part on and gave it nothing.
+        for i, r in enumerate(self.part_rows):
+            if not self.para_rows[i][1].GetValue():
+                continue
+            if self._kind_of(i) is None:
+                wx.MessageBox(
+                    'Element "%s" has no type. Select Resistor, Capacitor '
+                    "or Inductor, or clear its Model checkbox."
+                    % r["ref"], "RFsim", wx.ICON_ERROR)
+                return
+            v = self._part_value(i)
+            if v is None or v <= 0:
+                wx.MessageBox(
+                    'Element "%s" needs a value in %s: a positive number.'
+                    % (r["ref"], ENTRY_UNITS[self._kind_of(i)]),
+                    "RFsim", wx.ICON_ERROR)
+                return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
             wx.MessageBox("Each pad needs a unique port number.",
@@ -592,6 +979,37 @@ class SettingsDialog(wx.Dialog):
             wx.MessageBox("Select at least one port to excite.",
                           "RFsim", wx.ICON_ERROR)
             return
+        # A de-embedded type on a manual feed needs a direction and a
+        # width. The type list already removes the de-embedded types
+        # when the direction goes back to "No Line", thus this test
+        # catches only a width that does not parse.
+        for i, (ch, vals) in enumerate(zip(self.port_choices,
+                                           self.port_types)):
+            if (self.port_feed[i] and vals[ch.GetSelection()] != "lumped"
+                    and self._feed_of(i) is None):
+                wx.MessageBox(
+                    "Port %d: a de-embedded port needs a feed direction "
+                    "and a positive width in mm."
+                    % (self.port_order[i].GetSelection() + 1),
+                    "RFsim", wx.ICON_ERROR)
+                return
+        # The three limits of the run. An empty timestep factor is
+        # correct: the runner then selects the value itself.
+        for ctrl, name, low, high in (
+                (self.max_steps, "Max timesteps", 100, 1e9),
+                (self.end_crit, "End criteria", 1e-12, 1.0),
+                (self.tsf, "Timestep factor", 1e-3, 1.0)):
+            text = ctrl.GetValue().strip()
+            if ctrl is self.tsf and not text:
+                continue
+            try:
+                v = float(text)
+            except ValueError:
+                v = None
+            if v is None or not low <= v <= high:
+                wx.MessageBox("%s must be a number from %g to %g."
+                              % (name, low, high), "RFsim", wx.ICON_ERROR)
+                return
         evt.Skip()
 
     def _pkg_of(self, ch):
@@ -612,21 +1030,91 @@ class SettingsDialog(wx.Dialog):
         return float(ctrl.GetValue()) * scale
 
     def _on_package(self, i):
-        """Put the ESL of the package into the field of that row.
+        """Put the values of the package into the fields of that row.
 
-        ChangeValue sends no EVT_TEXT, thus the choice stays on the
-        package. Custom changes nothing: the values of the user stay.
+        Each write uses ChangeValue, which sends no EVT_TEXT. Thus the
+        choice stays where the user put it: SetValue would send the
+        event and _on_para_edit would move the row to "Custom".
+
+        "No parasitics" writes 0 into the two fields and greys them, thus
+        the row shows exactly what the solver gets: an ideal element. The
+        values come back when the row takes a package again - the ESL
+        from the preset, and the ESR from the type of the part.
         """
-        _, _, ch, esl, _ = self.para_rows[i]
+        r = self.part_rows[i]
+        _, _, ch, esl, esr = self.para_rows[i]
         pkg = self._pkg_of(ch)
-        if pkg in self._packages:
-            esl.ChangeValue("%g" % (1e9 * self._packages[pkg]))
+        if pkg == NO_PARASITICS:
+            for c in (esl, esr):
+                c.ChangeValue("0")
+        else:
+            if r["last_pkg"] == NO_PARASITICS:   # the row comes back
+                esl.ChangeValue(r["esl0"])
+                esr.ChangeValue(r["esr0"])
+            if pkg in self._packages:
+                esl.ChangeValue("%g" % (1e9 * self._packages[pkg]))
+        r["last_pkg"] = pkg
         self._on_lumped(None)   # "No parasitics" turns the fields off
 
+    def _kind_of(self, i):
+        """Give the type letter of a row, or None for "Unknown"."""
+        r = self.part_rows[i]
+        return KIND_ORDER[r["kind"].GetSelection()]
+
+    def _on_kind(self, i):
+        """The user selected the type of a part.
+
+        The label of the quantity and the unit follow the type, and the
+        field for the value goes on. "Unknown" turns it off again, and
+        the text stays: the value of the user comes back if the user
+        selects a type again. The NUMBER does not change with the type,
+        thus 50 becomes 50 ohm, 50 nH or 50 pF. The unit beside it says
+        which one.
+        """
+        r = self.part_rows[i]
+        kind = self._kind_of(i)
+        r["qty"].SetLabel(_qty_label(kind))
+        r["unit"].SetLabel(ENTRY_UNITS.get(kind, ""))
+        r["value"].Enable(kind is not None
+                          and self.para_rows[i][1].GetValue())
+        # The ESR of the body comes from the TYPE of the part, in the
+        # same way as it does for a part that the board describes. A row
+        # that is on "No parasitics" keeps its 0 and takes this value
+        # when it goes back to a package. ChangeValue sends no EVT_TEXT,
+        # thus the package choice of that row stays where it is.
+        r["esr0"] = "%g" % self._esr.get(kind, 0.0)
+        if self._pkg_of(self.para_rows[i][2]) != NO_PARASITICS:
+            self.para_rows[i][4].ChangeValue(r["esr0"])
+        self._update_lumped_warning()
+        self.Layout()
+
+    def _part_value(self, i):
+        """Give the value of a row in SI units, or give None.
+
+        Every row is open, thus the value of every row comes from its
+        field: model.json then holds what the dialog showed, and it
+        stays the one source of truth. The field starts with the value
+        that the Value field of the part gave.
+        """
+        kind = self._kind_of(i)
+        try:
+            return float(self.part_rows[i]["value"].GetValue()) \
+                * ENTRY_SCALE[kind]
+        except (ValueError, KeyError):
+            return None
+
     def _on_para_edit(self, i, evt):
-        """Move the choice of that row to Custom when the user types."""
+        """Move the choice of that row to Custom when the user types.
+
+        Select CUSTOM_PKG by its index, and not the LAST entry:
+        `_pkg_values` ends with "Custom" and then "No parasitics". The
+        last entry gave "No parasitics", thus `_para_value` gave 0 for
+        the ESR and for the ESL and the part became IDEAL, with no
+        message.
+        """
         ch = self.para_rows[i][2]
-        ch.SetSelection(ch.GetCount() - 1)
+        ch.SetSelection(self._pkg_values.index(CUSTOM_PKG))
+        self._update_lumped_warning()
         evt.Skip()
 
     def get_settings(self):
@@ -640,9 +1128,16 @@ class SettingsDialog(wx.Dialog):
             "h": float(self.h.GetValue()),
             "cu_t": float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
+            # "Auto" is item 0 and it gives None: the runner then reads the
+            # cell count and selects the value. Item i gives i threads.
+            "threads": self.threads.GetSelection() or None,
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
             "port_types": [vals[c.GetSelection()] for c, vals
                            in zip(self.port_choices, self.port_types)],
+            # The manual feed of each pad that has no track: (direction,
+            # width in mm), or None. rfsim.py puts it into the port.
+            "port_feed": [self._feed_of(i)
+                          for i in range(len(self.port_choices))],
             "order": [c.GetSelection() + 1 for c in self.port_order],
             # "excite" holds the FINAL port numbers, after the change of
             # the numbers. The runner compares against these numbers.
@@ -659,19 +1154,28 @@ class SettingsDialog(wx.Dialog):
             # "Custom" goes through as it is. Thus the log of the solver
             # tells the difference between a value that the user selected
             # and a package that the code could not read.
+            # Every row gives its type and its value, also a row that
+            # the user did not touch: the dialog SHOWS what the parser
+            # read, thus what the dialog shows is what model.json holds.
+            # "type" is None for a row that stays at "Unknown", and
+            # rfsim.py then drops that part.
             "lumped_parasitics": {
                 ref: {"model": cb.GetValue(),
                       "package": self._pkg_of(ch),
                       "esl": self._para_value(ch, esl, 1e-9),
-                      "esr": self._para_value(ch, esr)}
-                for ref, cb, ch, esl, esr in self.para_rows},
+                      "esr": self._para_value(ch, esr),
+                      "type": self._kind_of(i),
+                      "value": self._part_value(i)}
+                for i, (ref, cb, ch, esl, esr) in enumerate(self.para_rows)},
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
-            # ponytail: these two limits are constant. Put them in the
-            # dialog if high-Q structures, which need a longer ringdown,
-            # become usual.
-            "max_timesteps": 300000,
-            "end_criteria": 1e-4,
+            "max_timesteps": int(float(self.max_steps.GetValue())),
+            "end_criteria": float(self.end_crit.GetValue()),
+            # An empty field gives None. `runner._time_step_factor` then
+            # selects the value from the largest inductance of the model,
+            # and a value here has priority over it.
+            "time_step_factor": (float(self.tsf.GetValue())
+                                 if self.tsf.GetValue().strip() else None),
         }
 
 
@@ -847,7 +1351,7 @@ class ResultsFrame(wx.Frame):
         except Exception:
             pass
         if self._lines and self._lines.get("ports"):
-            plots.append("Line impedance")
+            plots.append("Line Impedance")
         self._field = {}
         self._anim = None
         if self.model:
@@ -855,7 +1359,7 @@ class ResultsFrame(wx.Frame):
             f_hz = s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
                                         if "f_start" in s else None)
             ftag = " (f=%g GHz)" % (f_hz / 1e9) if f_hz else ""
-            plots.append("Board layout")
+            plots.append("Board Layout")
             fports = sorted({p for _, p in self.field_h5s})
             for k in ("E", "H"):
                 for p in fports:
@@ -909,12 +1413,13 @@ class ResultsFrame(wx.Frame):
         m = re.search(r" \(Port (\d+)\)$", sel)
         pnum, base = (int(m.group(1)), sel[:m.start()]) if m else (None, sel)
 
-        if sel.startswith("Board layout"):
+        if sel.startswith("Board Layout"):
             self._plot_board(ax)
-        elif sel.startswith("Line impedance"):
+        elif sel.startswith("Line Impedance"):
             self._plot_lines(ax)
         elif sel.startswith(("E-Field", "H-Field")):
-            self._plot_field(ax, sel[0], pnum)
+            ax.remove()
+            self._plot_field(sel[0], pnum)
         elif sel.startswith("Farfield"):
             ax.remove()
             ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
@@ -923,7 +1428,7 @@ class ResultsFrame(wx.Frame):
             if tag in ff.get("cuts", {}):    # "(Phi=0)" and similar: a 2D cut
                 self._plot_farfield(ff, tag, ptag)
             else:                            # only "(f=xx GHz)": a 3D balloon
-                self._plot_farfield3d(ff, ptag)
+                self._plot_farfield3d(ff, ptag, pnum)
         elif sel.startswith("S-Parameters"):
             phase = sel.endswith("[Phase]")
             for j in range(net.nports):
@@ -986,58 +1491,75 @@ class ResultsFrame(wx.Frame):
         _draw_board(ax, self.model)
 
     def _plot_lines(self, ax):
-        """Draw the impedance of the line and eps_eff of each port.
+        """Draw the real part and the imaginary part of Z0 of each port.
 
         These values come from the voltage probes and the current probes
         of a de-embedded port. Thus they are the impedance of the real
         track on the real stackup, and not the reference impedance of the
         system. A lumped port has no line, thus it is not in this view.
 
+        A good line gives an almost real Z0: Im(Z0) stays near zero and
+        it is a little below it. A large Im(Z0) shows a bad extraction,
+        or a lossy line.
+
         The formula divides by the field at the measurement plane. Thus
         the values are noisy where the excitation has little energy,
-        usually at the two ends of the sweep. The limits of the axes use
+        usually at the two ends of the sweep. The limits of the axis use
         percentiles, and not the extreme values.
         """
         import numpy as np
         d = self._lines
         f_ghz = np.asarray(d["freq_hz"], float) / 1e9
-        ax2 = ax.twinx()
-        z_all, e_all = [], []
-        for num in sorted(d["ports"], key=int):
+        z_all = []
+        nums = sorted(d["ports"], key=int)
+        for num in nums:
             p = d["ports"][num]
-            z, e = np.asarray(p["Z0_real"], float), np.asarray(p["eps_eff"],
-                                                               float)
-            z_all.append(z)
-            e_all.append(e)
-            ln, = ax.plot(f_ghz, z, label="Port %s: Re(Z0)" % num)
-            ax2.plot(f_ghz, e, "--", lw=1.0, color=ln.get_color(),
-                     label="Port %s: eps_eff" % num)
+            re, im = (np.asarray(p["Z0_real"], float),
+                      np.asarray(p["Z0_imag"], float))
+            z_all += [re, im]
+            # One port needs no tag in the legend, because the name of the
+            # port adds nothing.
+            tag = " (Port %s)" % num if len(nums) > 1 else ""
+            ln, = ax.plot(f_ghz, re, label="Re(Z0)" + tag)
+            ax.plot(f_ghz, im, "--", lw=1.0, color=ln.get_color(),
+                    label="Im(Z0)" + tag)
 
-        def limits(vals, floor):
-            lo, hi = np.percentile(np.concatenate(vals), [2, 98])
-            pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
-            return max(floor, lo - pad), hi + pad
+        lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
+        pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_ylabel("Impedance / ohm")
+        ax.legend(fontsize=8)
+        ax.set_title("Line Impedance")
 
-        ax.set_ylim(*limits(z_all, 0.0))
-        ax2.set_ylim(*limits(e_all, 1.0))
-        ax.set_ylabel("Line impedance Re(Z0) / ohm")
-        ax2.set_ylabel("Effective permittivity")
-        ax2.grid(False)
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        ax.legend(h1 + h2, l1 + l2, fontsize=8)
-        ax.set_title("Transmission line impedance")
+    def _dump_z(self, port):
+        """Give the z of the plane that the field dump lies on, in mm.
 
-    def _plot_field(self, ax, kind, port=None):
+        `runner.build` puts the dump at the middle of the substrate
+        between the layer of the EXCITED port and the layer below it:
+        `0.5 * (z_top + z_ref)`. The title of the view names the value,
+        because a field picture with no plane is a picture of nothing.
+        """
+        z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
+        ports = self.model["ports"]
+        p = next((q for q in ports if q["number"] == port), ports[0])
+        return 0.5 * (z_of[p["layer"]] + z_of[p["ref_layer"]])
+
+    def _plot_field(self, kind, port=None):
         """Show an animation of the wave on the mid-plane of the substrate.
 
-        The two fields have the same red and blue view, which keeps the
-        sign. E shows E_z. H shows the largest in-plane component of H,
-        because H makes loops around the track and its vertical part is
-        near zero on this plane.
+        The picture is the size of the field vector at one phase, in the
+        style of CST: a scale from zero to the largest value that the
+        animation reaches. A block of text at the left gives the
+        frequency, the phase and that largest value.
+
+        The values are the values of openEMS for its excitation, which
+        has an amplitude of 1. Thus V/m and A/m are correct units, but
+        the size of the input signal, and not 1 W, sets the size of the
+        numbers.
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation
+        from matplotlib.patches import Rectangle
         ports = sorted(p for k2, p in self.field_h5s if k2 == kind)
         if port is None:
             port = ports[0]
@@ -1046,41 +1568,87 @@ class ResultsFrame(wx.Frame):
             self._field[key] = _load_field(self.field_h5s[key])
         x, y, F, f_hz = self._field[key]
         frames = 24
+        unit = "V/m" if kind == "E" else "A/m"
 
-        if kind == "E":
-            comp = F[..., 2]                 # the vertical E below the track
-        else:
-            hx, hy = np.abs(F[..., 0]).max(), np.abs(F[..., 1]).max()
-            comp = F[..., 0] if hx >= hy else F[..., 1]  # the largest H
-        lim = float(np.percentile(np.abs(comp), 99)) or 1.0
-        mesh = ax.pcolormesh(x, y, np.real(comp), cmap="RdBu_r",
-                             vmin=-lim, vmax=lim, shading="gouraud")
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[1.0, 3.2])
+        info_ax = self.figure.add_subplot(gs[0])
+        info_ax.axis("off")
+        ax = self.figure.add_subplot(gs[1])
+
+        def mag(i):
+            """The size of the real field vector at the phase of frame i."""
+            return np.linalg.norm(
+                np.real(F * np.exp(2j * np.pi * i / frames)), axis=-1)
+
+        # The scale is fixed for the whole animation: a scale that moves
+        # with the frame makes every frame look the same. The colour
+        # runs smoothly from zero to the largest value: a scale of
+        # steps, as the bar of CST, makes bands of one colour that look
+        # like large pixels.
+        vmax = max(float(mag(i).max()) for i in range(frames)) or 1.0
+        ticks = np.linspace(0.0, vmax, 10)
+        mesh = ax.pcolormesh(x, y, mag(0), cmap="jet", vmin=0.0, vmax=vmax,
+                             shading="gouraud")
+        bar = self.figure.colorbar(mesh, ax=ax, shrink=0.85, ticks=ticks)
+        # The unit sits over the bar, as CST, and not at its side: a
+        # word that stands up needs the reader to turn their head.
+        bar.ax.set_title(unit, fontsize=9)
+        # Each mark carries its own value, and the two ends of the bar
+        # carry theirs. A common factor above the bar, which is the
+        # default, hides how large a step is.
+        bar.ax.set_yticklabels(["%.3g" % t for t in ticks], fontsize=7)
 
         top = self.model["ports"][0]["layer"]
         for poly in self.model["polygons"].get(top, []):
             ax.plot([p[0] for p in poly] + [poly[0][0]],
                     [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
+        # **The ports, in the same lime as the Board layout view.** The
+        # field views are the pictures that leave the tool, and a
+        # reviewer of 2026-08-03 read the port at the wrong place
+        # because no picture showed it.
+        for p in self.model["ports"]:
+            hl, hw = 0.5 * p["length"], 0.5 * p["width"]
+            ax.add_patch(Rectangle((p["x"] - hl, p["y"] - hw),
+                                   2 * hl, 2 * hw, facecolor="none",
+                                   edgecolor="lime", lw=1.2, zorder=5))
+            ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
+                        color="lime", fontsize=8, ha="center", va="center",
+                        zorder=6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s-Field (f=%g GHz)%s" % (
-            kind, f_hz / 1e9,
-            " (Port %d)" % port if len(ports) > 1 else ""))
+        ax.set_title("%s-Field (f=%g GHz)%s"
+                     % (kind, f_hz / 1e9,
+                        " (Port %d)" % port if len(ports) > 1 else ""),
+                     fontsize=10)
         ax.set_aspect("equal")
 
+        # The block of numbers at the left. The PLANE goes with them:
+        # it is the plane that `runner.build` dumps, the middle of the
+        # substrate between the layer of the excited port and the layer
+        # below it, and a field picture with no plane shows nothing.
+        head = ("Frequency: %.2f GHz\n" % (f_hz / 1e9))
+        tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(substrate mid-plane)"
+                % (vmax, unit, self._dump_z(port)))
+        info = info_ax.text(0.0, 0.5, head + "Phase: 0\N{DEGREE SIGN}" + tail,
+                            fontsize=9, va="center", ha="left",
+                            linespacing=1.8)
+
         def step(i):
-            ph = np.exp(2j * np.pi * i / frames)
-            mesh.set_array(np.real(comp * ph).ravel())
-            return (mesh,)
+            mesh.set_array(mag(i).ravel())
+            info.set_text(head + "Phase: %d\N{DEGREE SIGN}"
+                          % round(360.0 * i / frames) + tail)
+            return (mesh, info)
 
         self._anim = FuncAnimation(self.figure, step, frames=frames,
                                    interval=60, blit=False,
                                    cache_frame_data=False)
 
-    def _plot_farfield3d(self, ff, ptag=""):
+    def _plot_farfield3d(self, ff, ptag="", pnum=None):
         """Show a transparent 3D balloon of the directivity.
 
         The PCB is a reference plate. The radius and the colour give the
-        dBi in a range of 30 dB. +z is the normal of the board.
+        dBi in a range of 30 dB. +z is the normal of the board. A block
+        of text at the left gives the numbers, in the style of CST.
         """
         import numpy as np
         from matplotlib import cm, colors
@@ -1095,7 +1663,10 @@ class ResultsFrame(wx.Frame):
         Y = R * np.sin(th) * np.sin(ph)
         Z = R * np.cos(th)
 
-        ax = self.figure.add_subplot(111, projection="3d")
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[1.0, 3.2])
+        info_ax = self.figure.add_subplot(gs[0])
+        info_ax.axis("off")
+        ax = self.figure.add_subplot(gs[1], projection="3d")
         norm = colors.Normalize(vmin=rmin, vmax=float(D.max()))
         fc = cm.jet(norm(D))
         fc[..., 3] = 0.3  # a transparent balloon: you can see the board
@@ -1136,10 +1707,49 @@ class ResultsFrame(wx.Frame):
         ax.set_zlim(-m, m)
         ax.set_box_aspect((1, 1, 1))
         ax.set_axis_off()
-        ax.set_title("Farfield (f=%g GHz)%s" % (ff["f_hz"] / 1e9, ptag))
+        ax.set_title("Farfield (f=%g GHz)%s" % (ff["f_hz"] / 1e9, ptag),
+                     fontsize=10)
         sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
         sm.set_array([])
-        self.figure.colorbar(sm, ax=ax, shrink=0.65, label="dBi")
+        # The marks of the default carry round numbers, and they stop
+        # before the two ends of the bar: a reader then cannot see the
+        # value at the top, which is Dmax, or the value at the floor.
+        ticks = np.linspace(rmin, float(D.max()), 9)
+        bar = self.figure.colorbar(sm, ax=ax, shrink=0.65, ticks=ticks)
+        bar.ax.set_yticklabels(["%.1f" % t for t in ticks], fontsize=7)
+        bar.ax.set_title("dBi", fontsize=9)   # over the bar, as CST
+
+        # The block of numbers at the left. The radiation efficiency is
+        # the radiated power over the ACCEPTED power. The total
+        # efficiency also counts the power that the mismatch reflects,
+        # thus it is the radiation efficiency times 1 - |Snn|^2.
+        lines = ["Frequency: %.2f GHz" % (ff["f_hz"] / 1e9)]
+        rad = ff.get("efficiency_pct")
+        if rad:
+            rad_db = 10.0 * np.log10(rad / 100.0)
+            lines.append("Rad. Effic. : %.4f dB" % rad_db)
+            mis = self._mismatch_db(ff["f_hz"], pnum)
+            if mis is not None:
+                lines.append("Tot. Effic. : %.4f dB" % (rad_db + mis))
+        lines.append("Dir. : %.3f dBi" % float(D.max()))
+        info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
+                     va="center", ha="left", linespacing=1.8)
+
+    def _mismatch_db(self, f_hz, pnum):
+        """Give 10*log10(1 - |Snn|^2) at f_hz, or give None.
+
+        This is the part of the total efficiency that the reflection of
+        the port takes away. Port 1 is the port of a run that excited
+        one port only.
+        """
+        import numpy as np
+        n = (pnum or 1) - 1
+        net = self.net
+        if net is None or n >= net.nports:
+            return None
+        i = int(np.argmin(np.abs(net.f - f_hz)))
+        g2 = float(np.abs(net.s[i, n, n]) ** 2)
+        return 10.0 * np.log10(max(1.0 - g2, 1e-12))
 
     def _plot_farfield(self, ff, cut, ptag=""):
         """Show one polar cut of the directivity in absolute dBi.

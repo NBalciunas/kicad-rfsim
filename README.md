@@ -9,17 +9,16 @@ CSXCAD.
 
 ## Features
 
-- Simulate the S-parameters of any number of ports. The plugin plots the magnitude, the phase, a Smith chart, the VSWR and the group delay, and it writes a Touchstone (`.sNp`) file.
-- Calculate the far field with NF2FF. The plugin plots three polar cuts in absolute dBi and a 3D radiation pattern that you can rotate. It also gives Dmax and the radiation efficiency.
-- Animate the E-field and the H-field on the mid-plane of the substrate, with one view for each excited port.
-- Draw the board layout that the solver uses: a preview in the dialog and a view with the results.
-- Extract the geometry directly from the board: the pads, tracks, arcs, vias, filled zones and the graphic shapes on the copper layers.
-- Model the resistors, inductors and capacitors as lumped elements, with the value from the footprint. The plugin also adds the ESL and the ESR of the package, which put the self-resonance of a real part at the correct frequency.
-- Read the impedance of a line and its effective permittivity from a de-embedded port. The plugin plots Z0 against the frequency for the real track on the real stackup.
-- Feed each port as a lumped port, or as a de-embedded microstrip (MSL), coplanar (CPW) or stripline port.
-- Define the substrate: εr, tanδ, the height and the copper thickness.
-- Mesh the structure at three resolutions: coarse, medium and fine.
-- The solver runs in a different process. Thus, a crash cannot stop KiCad, and the same runner also works without a GUI.
+- Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
+- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
+- Animate the E-field and the H-field on the mid-plane of the substrate.
+- Calculate the far field with NF2FF: three polar cuts, a 3D pattern, Dmax and the efficiency.
+- Measure the impedance of a line and its effective permittivity from a de-embedded port.
+- Model the R, L and C parts as lumped elements, with the parasitics of the package.
+- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
+- Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
+- Draw the board layout that the solver uses.
+- Set the substrate, the mesh preset and the CPU threads in the dialog.
 
 ## Installation
 
@@ -57,57 +56,74 @@ CSXCAD.
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog. It shows the ports, the R/L/C parts and the domain, and it follows the "Domain margin" field and the "Model" checkboxes.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the port impedance, the number and the type of each port, the substrate, the mesh preset, the domain margin and the output directory.
+4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
 5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports
 
-The dialog shows each port as `Port N`, with the pad, the footprint and the net in the tooltip. A port that has no track shows `Port N (no track, lumped only)`.
+**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** It is not at the edge of the board. The box covers the whole pad in x and y, and the whole substrate in z.
 
-A port needs a ground return: copper on the reference layer (the adjacent copper layer) that reaches at least the edge of the pad. Without it the plugin refuses to run. A CPW is the one exception, because its return path is the copper at the sides of the line.
+Each port needs a ground return: copper on the reference layer below the pad. Without it the plugin refuses to run. A CPW port is the one exception, because its return path is the copper at the sides of the line.
 
 The dialog gives only the types that the geometry permits:
 
-| Type | It needs | Notes |
-|---|---|---|
-| Lumped | nothing | It drives the pad against the reference layer. It operates everywhere. |
-| Microstrip (MSL) | a track that leaves the pad on the x-axis or the y-axis | De-embedded. |
-| Coplanar (CPW) | the same track, and copper at the two sides of it | The plugin measures the gap from the board. |
-| Stripline | the same track, and a plane above the strip and a plane below it | Put the port on an inner layer. |
+| Type | Requires |
+|---|---|
+| Lumped Port | No requirements |
+| Microstrip (MSL) Port | Feed line on the x or y axis |
+| Coplanar (CPW) Port | Feed line on the x or y axis; Copper on both sides of it |
+| Stripline Port | Feed line on the x or y axis; Plane above and below it |
 
-> **The CPW port and the stripline port are new, and their results are not correct yet.** They find the correct mode, but openEMS v0.37.0-rc1 does not calibrate their probes correctly: the impedance of the line is 20% to 50% too small, and the S-parameters can give out more power than they take in. The plugin gives a warning when it finds this condition. Use these two types to look at the fields and at the mode, and do not use their numbers.
-
-Each excited port costs one full FDTD run. Port 1 supplies the field views and the far-field views.
+> Each excited port costs one full FDTD run. The plugin gives a warning when a port gives out more power than it takes in. Run again at the medium or the fine preset when you see it.
 
 ### The impedance of a line
 
-A de-embedded port measures the impedance of the line and its effective permittivity from its own probes. The results window shows them in the "Line impedance" view, and the solver writes `lines.json`. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
+The microstrip, the coplanar and the stripline ports measure their own line. The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds every value, the effective permittivity included. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
 
-The coarse preset gives a value that is too small: the microstrip of `validation/` gives 44 ohm at coarse, 47 ohm at medium, and the theory gives 50 ohm. Use medium or fine when the number is important.
+The coarse preset reads a little low: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.9 ohm at fine, against 49.8 ohm from the theory. Use medium or fine when the number is important.
 
 ### The substrate and the domain
 
-The values in the dialog always have priority, and the plugin makes a uniform stackup from them. It reads the `(stackup ...)` section of the board file only for a run without a GUI. KiCad does not give that section to Python, thus you must save the board first.
+The plugin makes a uniform stackup from the values in the dialog. Four presets fill εr and tanδ, and "Custom" leaves the two fields to you:
 
-The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge. For an antenna, give the radiator more space before the absorber: a margin of 15 mm or more (about λ/8 at 2.4 GHz), not the default 4 mm.
+| Preset | εr | tanδ |
+|---|---|---|
+| FR-4 | 4.5 | 0.02 |
+| Rogers RO4350B | 3.48 | 0.0037 |
+| Rogers RO4003C | 3.38 | 0.0027 |
+| PTFE | 2.20 | 0.0009 |
+
+The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
 
 ### Accuracy
 
-The coarse preset is for a first look. A small lumped element reads too large at that resolution, so use medium or fine when the value of the element matters. For the behavior of the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+The mesh preset gives the number of cells for each wavelength. The wavelength is the shortest one of the sweep, in the substrate:
 
-The plugin adds the parasitics of the package to each R/L/C part: an ESL from the package code of the footprint, and an ESR. The values are for the body of the part only, because the mesh already contains the loop of the pads and the tracks. A capacitor becomes ESR + ESL + C, which is the usual model of a real capacitor. An inductor gets its DCR, but the model does not give its self-resonance. Select "No parasitics" in the row of a part for an ideal element, or change `esl` and `esr` in `model.json`.
+| Preset | Cells per wavelength | Cell on FR-4, sweep to 6 GHz |
+|---|---|---|
+| Coarse | 10 | 2.36 mm |
+| Medium | 20 | 1.18 mm |
+| Fine | 40 | 0.59 mm |
 
-The "Lumped elements" part of the dialog gives one row for each R/L/C part. Each row shows what the part is and what value the plugin read from the board:
+The preset controls this step alone. The cells across the strip of a port, the cells in the gap of a CPW and the cells through the substrate stay the same at each preset, because the geometry and not the wavelength gives them.
 
-```
-[ Resistor "R1"  ] [ 50 ohm ]     Parasitics: [ Custom       ]  ESR: [ 0    ] ohm  ESL: [ 0.4  ] nH  [x] Model
-[ Capacitor "C2" ] [ 4.7 pF ]     Parasitics: [ 0402 Package ]  ESR: [ 0.03 ] ohm  ESL: [ 0.25 ] nH  [x] Model
-[ Inductor "L3"  ] [ 10 nH  ]     Parasitics: [ No parasitics ]                                 [x] Model
-```
+The coarse preset is for a first look. A small lumped element reads too large at that resolution, thus use medium or fine when a number is important. For the behavior of the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
 
-"Model" is on for each part. Remove it from one part, and the model does not contain that part: its pads stay in the copper, thus the gap between them stays open. This is the same control as "Excite" at a port, but for one part.
+### Lumped elements
 
-The plugin reads the package from the name of the footprint: `R_0402_1005Metric` gives `0402`. It knows 0201, 0402, 0603, 0805, 1206, 1210, 2010 and 2512, and it selects that preset ("0603 Package"). A name that has no such code (a metric-only name, a SOT-23, or a library of your own) gives "Custom", and you put in the two values. Select a different preset to change the ESL, or type a value to move the row to "Custom". "No parasitics" makes that part an ideal element: the two fields go off, but they keep their text for when you select a package again. The solver names the package of each part in its log.
+Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog. **The first letter of the reference gives the type**: R, L or C. Every other 2-terminal part, for example a diode or a ferrite bead, starts at "Unknown" with its "Model" checkbox off, and it changes no simulation until you select a type and give a value.
+
+**The Value field of the footprint gives the value.** Each type has its own prefix letters, thus a "p" on a resistor cannot become pico:
+
+| Type | Prefixes | Examples |
+|---|---|---|
+| Resistor | R k M G | `50` = 50 ohm, `4k7` = 4.7 kohm, `5G` = 5 Gohm |
+| Capacitor | p n u µ | `100nF` = 100 nF, `3n3` = 3.3 nF |
+| Inductor | p n u µ m | `10u` = 10 µH, `50m` = 50 mH, `3n3` = 3.3 nH |
+
+A letter also stands in the place of the decimal point (`4R7` = 4.7 ohm), the unit letter is not necessary, and text after a space (`100nF 10%`) has no effect. "DNP" and the other words for a part that is not there give no value.
+
+**Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
 
 ## Examples
 
@@ -123,7 +139,7 @@ The following example shows the board layout, a top view of the structure that t
 
 ![Board layout view](docs/example-4.png)
 
-The following example shows the E-field on the mid-plane of the substrate. The plugin draws one view for each excited port.
+The following example shows the size of the E-field on the mid-plane of the substrate. The plugin draws one view for each excited port.
 
 ![E-field animation](docs/example-5.png)
 
@@ -141,19 +157,31 @@ set KIPY="C:\Program Files\KiCad\10.0\bin\python.exe"
 ```
 
 * **`run_rlc.py [mesh] [R1|L1|C1]`**  
-Used to validate R, L and C against the theory for a series impedance between two Z0 lines. |S21| stays flat for R, it decreases for L, and it increases for C. The opposite slopes cannot come from an element that the solver ignored.
+R, L and C as a series impedance between two Z0 lines. |S21| stays flat for R, it falls for L and it rises for C. An element that the solver ignored cannot give these slopes.
 * **`run_lumped.py [mesh]`**  
-Used to validate the lumped elements: a series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the ideal resistive divider. A gap that stays open gives about 0 dB.
+A series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the ideal divider. A gap that stays open gives about 0 dB.
+* **`run_shunt.py [mesh] [packages|two]`**  
+The package parasitics. A capacitor in shunt to ground makes a notch in |S21| at its series resonance, and the frequency of that notch gives the body inductance back, also below 1 nH. `packages` repeats this for the 8 chip packages on their KiCad land patterns. `two` puts two parts in series to ground, thus they interact.
 * **`run_cpw.py [mesh] [cpw|stripline]`**  
-Used to validate the CPW port and the stripline port against closed-form theory. The eps_eff of a stripline must be exactly εr, thus this is the most exact test in the directory. The test does not hold the impedance of the line: refer to the note about the two new port types above.
+The CPW port and the stripline port against closed-form theory, both the impedance and eps_eff. The eps_eff of a stripline must be exactly εr, thus this is the most exact test here.
+* **`run_zone_holes.py [mesh]`**  
+A filled zone with a void of 8 x 6 mm below the line, against the same board with none. The void must make a large step in S11, which shows that the hole stays open.
+* **`run_stability.py`**  
+The timestep rule for a lumped inductor, on 6 geometries. Each cell gives the margin between the timestep that the plugin selects and the timestep at which the run diverges. About 15 minutes.
+* **`test_ports.py`**  
+The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, and the cells near a CPW and a stripline. It needs no KiCad and no solver, thus it takes seconds. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
-Used to validate the full path from the board to the Touchstone file. A microstrip line of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
+The full path from the board to the Touchstone file. A microstrip of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  
-Used to find why the plugin does not simulate an R/L/C part. It shows the result of each test, for each part.
+Why the plugin does not simulate an R/L/C part. It shows the result of each test, for each part.
+* **`test_dialog.py`**  
+The dialog with no display: the rows of the parts, the packages, the parasitics and the values that `get_settings` gives back.
+* **`test_views.py`**  
+Every view of the results window, with no display. It reads back the title, the labels and the color bar, and it needs `validation/out_coarse` from `run_headless.py coarse`.
 * **`test_touchstone.py`**  
-Used to validate the Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
+The Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
 * **`make_test_board.py`**  
-Used to make the microstrip board that `run_headless.py` needs, and the CPW board and the stripline board that `run_cpw.py` needs.
+Makes the microstrip board of `run_headless.py`, and the CPW board and the stripline board of `run_cpw.py`.
 
 `%KIPY% plugins\board_reader.py` is the self-test of the value parser (21 cases).
 
