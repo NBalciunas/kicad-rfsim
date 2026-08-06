@@ -444,6 +444,47 @@ def test_the_run_limits_reach_the_settings():
     print("the run limits OK (max timesteps, end criteria, timestep factor)")
 
 
+def test_the_x_of_the_dialog_does_not_start_the_run():
+    """Close the window and NO simulation starts (problem 17).
+
+    The dialog held the Run button alone, and its ID is wxID_OK. The
+    default close handler of wxWidgets searches for a button with
+    wxID_CANCEL, then wxID_OK, and it sends a click to the first one
+    that it finds. Thus the X of the title bar clicked Run Simulation
+    and the run started. `Close()` here makes the same event as the X.
+
+    This test shows the dialog modally, which the other tests do not do,
+    because the defect is in the ANSWER of `ShowModal` and not in a
+    control.
+    """
+    d = dialog()
+    ran = []
+    d.Bind(wx.EVT_BUTTON, lambda e: (ran.append(1), e.Skip()), id=wx.ID_OK)
+    wx.CallAfter(d.Close)
+    assert d.ShowModal() == wx.ID_CANCEL, \
+        "the X of the dialog started the simulation"
+    assert not ran, "the X clicked the Run button"
+    d.Destroy()
+
+    # The Cancel button is what the close handler must find first.
+    d = dialog()
+    cancel = [c for c in d.GetChildren()
+              if isinstance(c, wx.Button) and c.GetId() == wx.ID_CANCEL]
+    assert cancel, "the dialog has no Cancel button, thus the X clicks Run"
+    wx.CallAfter(fire, cancel[0], wx.EVT_BUTTON)
+    assert d.ShowModal() == wx.ID_CANCEL
+    d.Destroy()
+
+    # And the Run button must still start the run.
+    d = dialog()
+    run = [c for c in d.GetChildren()
+           if isinstance(c, wx.Button) and c.GetId() == wx.ID_OK][0]
+    wx.CallAfter(fire, run, wx.EVT_BUTTON)
+    assert d.ShowModal() == wx.ID_OK, "the Run button does not start the run"
+    d.Destroy()
+    print("the X and Cancel give ID_CANCEL OK (Run still gives ID_OK)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -458,4 +499,5 @@ if __name__ == "__main__":
     test_the_inductor_warning_follows_the_value()
     test_the_substrate_starts_at_fr4()
     test_the_run_limits_reach_the_settings()
+    test_the_x_of_the_dialog_does_not_start_the_run()
     print("PASS")

@@ -639,6 +639,14 @@ class SettingsDialog(wx.Dialog):
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
+        # **The Cancel button is not decoration: it stops a run.** The
+        # dialog had the Run button ALONE, and the X of the title bar
+        # then started the simulation. The default close handler of
+        # wxWidgets searches for a button with wxID_CANCEL, then
+        # wxID_OK, and it sends a click to the first one that it finds.
+        # With no Cancel it clicked Run. The EVT_CLOSE below makes the
+        # answer of this dialog independent of that search.
+        cancel = wx.Button(self, wx.ID_CANCEL, "Cancel")
         # The rows must have their size before the dialog takes its own.
         self._fit_rows()
         # **The WHOLE dialog scrolls.** The rows of the parts scrolled
@@ -650,13 +658,13 @@ class SettingsDialog(wx.Dialog):
         #
         # Every control above is a child of the dialog, thus this moves
         # them into a scrolled body afterwards, in the place of a change
-        # to each of the 60 constructors. The Run button stays OUTSIDE
+        # to each of the 60 constructors. The two buttons stay OUTSIDE
         # the body: a button that scrolls out of view is the defect that
         # this corrects.
         body = wx.ScrolledWindow(self, style=wx.VSCROLL)
         body.SetScrollRate(0, 12)
         for child in list(self.GetChildren()):
-            if child is not body and child is not run:
+            if child is not body and child is not run and child is not cancel:
                 child.Reparent(body)
         body.SetSizer(top)
         body.FitInside()
@@ -670,13 +678,17 @@ class SettingsDialog(wx.Dialog):
         body.SetInitialSize(content)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(body, 1, wx.EXPAND)
-        outer.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        buttons.Add(run, 0, wx.RIGHT, 8)
+        buttons.Add(cancel, 0)
+        outer.Add(buttons, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
         self.SetSizer(outer)
         self.Fit()
         body.SetMinSize((content.GetWidth(), 120))
         self.SetMinSize((520, 240))
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
         if self._prev_fig is not None:
@@ -929,6 +941,18 @@ class SettingsDialog(wx.Dialog):
     def _on_substrate_edit(self, evt):
         self.preset.SetSelection(len(SUBSTRATE_PRESETS) - 1)  # Custom
         evt.Skip()
+
+    def _on_close(self, evt):
+        """Close the dialog with NO run: the X of the title bar, Alt+F4.
+
+        `EndModal` needs a modal dialog, thus the test of `IsModal`: the
+        tests and `capture_windows.py` make this dialog and never show
+        it modally.
+        """
+        if self.IsModal():
+            self.EndModal(wx.ID_CANCEL)
+        else:
+            self.Destroy()
 
     def _on_ok(self, evt):
         try:
