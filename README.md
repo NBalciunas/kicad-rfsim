@@ -84,7 +84,11 @@ The coarse preset reads a little low: the microstrip of `validation/` gives 47.7
 
 ### The substrate and the domain
 
-The plugin makes a uniform stackup from the values in the dialog. Four presets fill εr and tanδ, and "Custom" leaves the two fields to you:
+"KiCad's Stackup" takes εr, tanδ and the thickness from Board Setup > Physical Stackup, layer by layer. The dialog starts there when the board has a stackup, and the four fields then show what the board gives and stay read-only.
+
+> Save the board first. The plugin reads the saved file.
+
+The other presets make a uniform stackup from the values in the dialog. They fill εr and tanδ, and "Custom" leaves the two fields to you:
 
 | Preset | εr | tanδ |
 |---|---|---|

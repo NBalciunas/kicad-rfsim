@@ -123,6 +123,12 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                      sorted(zip(order, port_feed), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
+        # **None is the "KiCad's Stackup" preset of the dialog.** The
+        # substrate goes to extract() as None, thus the (stackup ...)
+        # block of the board file gives every layer its own er, tan d
+        # and thickness, and model["stackup_source"] becomes "file".
+        if any(v is None for v in substrate.values()):
+            substrate = None
         # The parasitics of each R/L/C part, from the rows of the dialog.
         # They go into the elements below, and not into the settings:
         # model.json must hold the values that the solver uses.

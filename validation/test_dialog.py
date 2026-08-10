@@ -35,11 +35,27 @@ def fire(ctrl, evt_type):
     ctrl.GetEventHandler().ProcessEvent(ev)
 
 
-def dialog(extra=()):
+# The board of these tests holds NO (stackup ...) block, thus
+# `extract()` gives "default" and the dialog starts at FR-4. This is
+# the model of a board that HAS one: a Rogers RO4350B of 0.508 mm.
+# `dialog(stackup=...)` puts it into the preview, which is the only
+# thing that the dialog reads (P8/F7/B7).
+ROGERS = {
+    "stackup_source": "file",
+    "dielectric_layers": [{"name": "dielectric 1", "z_top": 0.508,
+                           "z_bottom": 0.0, "epsilon": 3.48,
+                           "loss_tangent": 0.0037}],
+    "copper_layers": [{"name": "F.Cu", "z": 0.508, "thickness": 0.018},
+                      {"name": "B.Cu", "z": 0.0, "thickness": 0.018}],
+}
+
+
+def dialog(extra=(), stackup=None):
     """Give a dialog for the board of run_lumped.py, which holds one R.
 
     `extra` holds more elements, for the tests of a part whose type the
-    board does not give.
+    board does not give. `stackup` replaces the stackup keys of the
+    preview, for the tests of the "KiCad's Stackup" preset.
     """
     board = pcbnew.LoadBoard(BOARD)
     pads = [p for fp in board.GetFootprints()
@@ -49,6 +65,8 @@ def dialog(extra=()):
     assert [e["ref"] for e in pre["lumped_elements"]] == ["R1"], \
         "extract() must find R1 on a board that comes from a file"
     les = list(pre["lumped_elements"]) + list(extra)
+    if stackup:
+        pre.update(stackup)
     d = gui.SettingsDialog(None, pre["ports"], HERE, les, preview=pre,
                            packages=board_reader.package_presets(),
                            esr=board_reader.esr_presets())
@@ -385,18 +403,33 @@ def test_the_substrate_starts_at_fr4():
         "the dialog default er %s does not agree with the FR4 of "
         "board_reader (%s): one board would then give two substrates"
         % (got[0], board_reader.DEF_EPSILON))
+    # This board gives NO stackup, thus the dialog starts at FR-4 and
+    # not at "KiCad's Stackup", which is the first entry.
     assert d.preset.GetStringSelection() == "FR-4",         d.preset.GetStringSelection()
+    assert gui.SUBSTRATE_PRESETS[0][0] == gui.BOARD_PRESET
     # Every preset must write its two values, and "Custom" must write
     # none: it is the entry that a hand-typed value moves the row to.
-    for i, (name, er, tand) in enumerate(gui.SUBSTRATE_PRESETS):
-        d.preset.SetSelection(i)
-        d._on_preset(None)
-        if er is None:
-            continue
-        assert float(d.er.GetValue()) == er, (name, d.er.GetValue())
-        assert float(d.tand.GetValue()) == tand, (name, d.tand.GetValue())
+    # "KiCad's Stackup" on a board that gives none speaks and goes back
+    # to FR-4, thus wx.MessageBox needs no person here.
+    old_box, said = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (said.append(msg), wx.OK)[1]
+    try:
+        for i, (name, er, tand) in enumerate(gui.SUBSTRATE_PRESETS):
+            d.preset.SetSelection(i)
+            d._on_preset(None)
+            if name == gui.BOARD_PRESET:
+                assert said, "a board with no stackup must say so"
+                assert d.preset.GetStringSelection() == "FR-4", \
+                    "the selection must go back to a preset that HAS values"
+                continue
+            if er is None:
+                continue
+            assert float(d.er.GetValue()) == er, (name, d.er.GetValue())
+            assert float(d.tand.GetValue()) == tand, (name, d.tand.GetValue())
+    finally:
+        wx.MessageBox = old_box
     # get_settings must give what the fields show.
-    d.preset.SetSelection(0)
+    d.preset.SetSelection(1)  # FR-4
     d._on_preset(None)
     s = d.get_settings()
     assert s["er"] == 4.5 and s["tand"] == 0.02, s
@@ -442,6 +475,72 @@ def test_the_run_limits_reach_the_settings():
         wx.MessageBox = old_box
     d.Destroy()
     print("the run limits OK (max timesteps, end criteria, timestep factor)")
+
+
+def test_the_kicad_stackup_preset_gives_the_board():
+    """A board that HAS a stackup starts at "KiCad's Stackup" (P8/F7/B7).
+
+    The four fields then show what the board gives and they are
+    read-only, and `get_settings` gives None for the four. None is the
+    signal for `rfsim`: it calls `extract()` with no substrate, thus the
+    stackup of the file gives every layer its own values.
+    """
+    d = dialog(stackup=ROGERS)
+    assert d.preset.GetStringSelection() == gui.BOARD_PRESET, \
+        "a board with a stackup must not start at FR-4 (problem 8)"
+    assert d.uses_board_stackup()
+    got = (d.er.GetValue(), d.tand.GetValue(), d.h.GetValue(),
+           d.cu_t.GetValue())
+    assert got == ("3.48", "0.0037", "0.508", "0.018"), got
+    for c in (d.er, d.tand, d.h, d.cu_t):
+        assert not c.IsEnabled(), \
+            "a value of the BOARD must not look like a value of the user"
+    s = d.get_settings()
+    assert (s["er"], s["tand"], s["h"], s["cu_t"]) == (None,) * 4, s
+    # _on_ok must not refuse the dialog: it must NOT read the fields.
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert not stopped, stopped
+    finally:
+        wx.MessageBox = old_box
+
+    # Another preset takes over, and the fields come back with the
+    # values that they held before the board preset.
+    d.preset.SetSelection(1)  # FR-4
+    d._on_preset(None)
+    assert not d.uses_board_stackup()
+    got = (d.er.GetValue(), d.tand.GetValue(), d.h.GetValue(),
+           d.cu_t.GetValue())
+    assert got == ("4.5", "0.02", "1.6", "0.035"), got
+    for c in (d.er, d.tand, d.h, d.cu_t):
+        assert c.IsEnabled(), "the fields must be open again"
+    s = d.get_settings()
+    assert (s["er"], s["h"]) == (4.5, 1.6), s
+    # And back again.
+    d.preset.SetSelection(0)
+    d._on_preset(None)
+    assert d.er.GetValue() == "3.48" and not d.er.IsEnabled()
+    d.Destroy()
+
+    # Two dielectrics that differ: ONE field cannot hold two numbers,
+    # thus it shows both and the run uses the stackup layer by layer.
+    two = {"stackup_source": "file",
+           "dielectric_layers": [
+               dict(ROGERS["dielectric_layers"][0]),
+               {"name": "dielectric 2", "z_top": 1.016, "z_bottom": 0.508,
+                "epsilon": 4.5, "loss_tangent": 0.02}],
+           "copper_layers": ROGERS["copper_layers"]}
+    d = dialog(stackup=two)
+    assert d.er.GetValue() == "3.48 / 4.5", d.er.GetValue()
+    assert d.tand.GetValue() == "0.0037 / 0.02", d.tand.GetValue()
+    assert d.h.GetValue() == "1.016", d.h.GetValue()   # the two together
+    assert d.cu_t.GetValue() == "0.018", d.cu_t.GetValue()  # one value only
+    assert d.get_settings()["er"] is None
+    d.Destroy()
+    print("the KiCad's Stackup preset OK (read-only, and None in the "
+          "settings)")
 
 
 def test_the_x_of_the_dialog_does_not_start_the_run():
@@ -499,5 +598,6 @@ if __name__ == "__main__":
     test_the_inductor_warning_follows_the_value()
     test_the_substrate_starts_at_fr4()
     test_the_run_limits_reach_the_settings()
+    test_the_kicad_stackup_preset_gives_the_board()
     test_the_x_of_the_dialog_does_not_start_the_run()
     print("PASS")

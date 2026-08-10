@@ -33,10 +33,22 @@ DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 # The SI multipliers. The letter case is important (m = milli, M = mega).
 # The letters 'r' and 'R' show the position of the decimal point.
 _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
-       "r": 1.0, "R": 1.0, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
-# The permitted prefix letters for each type of part. They prevent an
-# incorrect result, for example a 'p' on a resistor read as pico.
-_PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
+       "r": 1.0, "R": 1.0, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9,
+       "T": 1e12}
+# **The prefixes are the SAME for R, L and C** (B23). Each type had its
+# own set until 2026-08-06, thus a resistor of 5 milliohm, a capacitor
+# of 1 mF and an inductor of 2.2 mH were all "not understood", and a
+# user had to know which letter each type permits. 'K' is an alias of
+# 'k'. The case rule stays: m = milli and M = mega, thus a resistor
+# "1m" is 1 milliohm and NOT 1 Mohm. The dialog shows the number that
+# this function read, thus the user sees which one it took.
+_PREFIX = "pnuµmkKMGT"
+# 'r' and 'R' are the letter of the OHM, and not a multiplier, thus a
+# resistor ONLY: "4R7" is 4.7 ohm. An inductor marked "4R7" is 4.7 µH
+# on the package of the part, and no rule here can know that. Thus L
+# and C refuse the letter, the value is "not understood", and the user
+# gives it in the dialog. That is better than 4.7 H with no message.
+_OHM_MARK = "rR"
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
@@ -79,10 +91,22 @@ def _parse_value(text, kind):
     obeys the RKM convention, where a letter shows the position of the
     decimal point (4R7 = 4.7 ohm, 3n3 = 3.3 nH or 3.3 nF). If the text is
     DNP, or if the function cannot read the text, it gives None.
+
+    **Every type takes every prefix** (`_PREFIX`): p, n, u/µ, m, k, M, G
+    and T. Only the ohm mark 'r'/'R' is for a resistor.
     """
     if not text:
         return None
-    tok = text.strip().split()[0] if text.strip() else ""  # remove " 1%" etc.
+    words = text.strip().split()
+    tok = words[0] if words else ""            # this removes " 1%" etc.
+    # **The unit can be a word of its own**: "10 kOhm", "4.7 uF", "10 nH".
+    # The first word is then a bare number, and the prefix goes away with
+    # NO message: "10 kOhm" gave 10 ohm and "4.7 uF" gave 4.7 F. Thus
+    # join the second word when it starts with a prefix or with a unit
+    # letter. A tolerance starts with a DIGIT ("1%"), and a voltage
+    # rating too ("25V"), thus neither one joins.
+    if len(words) > 1 and words[1][:1] in _PREFIX + _OHM_MARK + "fFhHoO":
+        tok += words[1]
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -95,7 +119,7 @@ def _parse_value(text, kind):
     if not tok:
         return None
     for i, ch in enumerate(tok):
-        if ch in _PREFIX[kind]:
+        if ch in _PREFIX or (kind == "R" and ch in _OHM_MARK):
             left, right = tok[:i], tok[i + 1:]
             num = (left + "." + right) if right else (left or "0")
             try:
@@ -1098,6 +1122,28 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
         ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
         ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
+        # B23: the prefixes are the same for the three types. The first
+        # column of each line is what the parser refused before it.
+        ("5m", "R", 5e-3), ("0m5", "R", 5e-4), ("2G2", "R", 2.2e9),
+        ("1T", "R", 1e12), ("1K5", "R", 1500.0), ("4p7", "R", 4.7e-12),
+        ("1mF", "C", 1e-3), ("2m2F", "C", 2.2e-3), ("1kF", "C", 1e3),
+        ("2.2mH", "L", 2.2e-3), ("10mH", "L", 1e-2), ("1kH", "L", 1e3),
+        ("100p", "L", 100e-12), ("1G", "L", 1e9),
+        # The case rule: m is milli and M is mega, on every type.
+        ("1m", "R", 1e-3), ("1M", "L", 1e6),
+        # The ohm mark stays on the resistor. An inductor marked "4R7"
+        # is 4.7 µH on its package, thus the parser must NOT give 4.7 H.
+        ("4R7", "L", None), ("4R7", "C", None), ("0R", "R", 0.0),
+        # The unit as a word of its own. Each one of these gave the bare
+        # number before 2026-08-06, thus 1000 times too much or too
+        # little, with no message.
+        ("10 kOhm", "R", 10e3), ("10 mOhm", "R", 1e-2),
+        ("4.7 uF", "C", 4.7e-6), ("10 nH", "L", 10e-9),
+        ("100 ohm", "R", 100.0), ("1 M", "R", 1e6),
+        # A tolerance and a voltage rating must NOT join: they start
+        # with a digit.
+        ("4.7 1%", "R", 4.7), ("10u 25V", "C", 10e-6),
+        ("4.7 kOhm 1%", "R", 4700.0), ("1 nF 50V", "C", 1e-9),
     ]
     for _t, _k, _want in _CASES:
         _got = _parse_value(_t, _k)
@@ -1105,6 +1151,38 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
             _got is not None and abs(_got - _want) <= 1e-15 + 1e-6 * abs(_want))
         assert _ok, "%r/%s -> %r, want %r" % (_t, _k, _got, _want)
     print("parser OK (%d cases)" % len(_CASES))
+
+    # The (stackup ...) block of a board file. It is the source of the
+    # "KiCad's Stackup" preset of the dialog (P8/F7/B7), thus a change
+    # of this parser changes what a Rogers board simulates as.
+    import tempfile
+    _PCB = """(kicad_pcb (version 20241229)
+      (setup
+        (stackup
+          (layer "F.Cu" (type "copper") (thickness 0.018))
+          (layer "dielectric 1" (type "core") (thickness 0.508)
+            (material "RO4350B") (epsilon_r 3.48) (loss_tangent 0.0037))
+          (layer "B.Cu" (type "copper") (thickness 0.018))
+          (copper_finish "None")
+        )
+      )
+    )"""
+    with tempfile.TemporaryDirectory() as _dir:
+        _path = os.path.join(_dir, "t.kicad_pcb")
+        with open(_path, "w", encoding="utf-8") as _fh:
+            _fh.write(_PCB)
+        _st = _stackup_from_file(_path)
+        with open(_path, "w", encoding="utf-8") as _fh:
+            _fh.write("(kicad_pcb (version 20241229) (setup))")
+        _none = _stackup_from_file(_path)
+    assert [it["kind"] for it in _st] == ["copper", "dielectric", "copper"], _st
+    assert _st[1]["epsilon"] == 3.48 and _st[1]["loss_tangent"] == 0.0037, _st
+    assert _st[1]["thickness"] == 0.508 and _st[0]["thickness"] == 0.018, _st
+    # **A file with no stackup gives None, and NOT the FR4 fallback.**
+    # The dialog tests this: it must not show the default values of the
+    # code as if the board gave them.
+    assert _none is None, _none
+    print("stackup OK (a Rogers core, and a file with no stackup)")
 
     # The gap of a CPW: a strip of 1.0 mm wide on the x axis, with a
     # ground at each side. The gap is 0.2 mm.

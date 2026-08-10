@@ -35,6 +35,45 @@ ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
 ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
 
 
+def _board_substrate_text(model):
+    """Give the text of the four substrate fields that the BOARD gives.
+
+    `model` is the preview from `board_reader.extract` with NO substrate
+    argument, thus its stackup came from the board file. The function
+    gives (er, tan d, h, cu_t) as text, or None when the board gives no
+    stackup.
+
+    **A source of "default" gives None**, and not the values. Those
+    values are the FR4 fallback of `board_reader`, thus they would show
+    the defaults of the CODE as if the board gave them. That rule comes
+    from the attempt of 2026-08-05.
+
+    A stackup holds each dielectric on its own, and they can differ.
+    Thus a field shows every value that the board gives, joined with
+    " / ": a field is READ-ONLY under this preset, and the run uses the
+    stackup layer by layer and not the text.
+    """
+    if not model or model.get("stackup_source") != "file":
+        return None
+    diel = model.get("dielectric_layers") or []
+    if not diel:
+        return None
+
+    def join(values):
+        out = []
+        for v in values:
+            t = "%g" % v
+            if t not in out:
+                out.append(t)
+        return " / ".join(out)
+
+    cu = [c["thickness"] for c in model.get("copper_layers") or []]
+    return (join(d["epsilon"] for d in diel),
+            join(d["loss_tangent"] for d in diel),
+            "%g" % sum(d["z_top"] - d["z_bottom"] for d in diel),
+            join(cu) if cu else "")
+
+
 def _qty_label(kind):
     """Give the label in front of the value of a part."""
     return KIND_QUANTITY.get(kind, "Value") + ":"
@@ -69,7 +108,15 @@ def _entry_text(kind, value_si):
 # simulates with the process value reads about 5% high in impedance.
 # The design values are not here, because nobody has measured which one
 # agrees with this solver: refer to the todo list.
-SUBSTRATE_PRESETS = [("FR-4", 4.5, 0.02),
+# **The first entry is the board itself, and it is not a laminate.** It
+# holds no er and no tan d here: the values come from the
+# `(stackup ...)` block of the board, LAYER BY LAYER, thus two numbers
+# cannot hold them. `_board_substrate_text` makes the text of the four
+# fields, and `get_settings` gives None for the four, which tells
+# `extract()` to read the stackup itself (P8/F7/B7).
+BOARD_PRESET = "KiCad's Stackup"
+SUBSTRATE_PRESETS = [(BOARD_PRESET, None, None),
+                     ("FR-4", 4.5, 0.02),
                      ("Rogers RO4350B", 3.48, 0.0037),
                      ("Rogers RO4003C", 3.38, 0.0027),
                      # The values are those of RT/duroid 5880, which is
@@ -563,7 +610,11 @@ class SettingsDialog(wx.Dialog):
         sg = grid_in(sbox)
         self.preset = row(sg, "Presets:", wx.Choice(
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
-        self.preset.SetSelection(0)
+        self.preset.SetToolTip(
+            "%s takes er, the loss tangent and the thickness from the "
+            "(stackup ...) block of the board, layer by layer.\n"
+            "It reads the SAVED file, thus save the board after a change "
+            "in Board Setup > Physical Stackup." % BOARD_PRESET)
         # The default values are the FR-4 preset: refer to
         # SUBSTRATE_PRESETS. 1.6 mm and 35 um (1 oz) go with them.
         self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
@@ -572,18 +623,29 @@ class SettingsDialog(wx.Dialog):
                      wx.TextCtrl(self, value="1.6"), "mm")
         self.cu_t = row(sg, "Copper thickness:",
                         wx.TextCtrl(self, value="0.035"), "mm")
-        # **The dialog does NOT read the stackup of the board.** It fills
-        # the four fields from the FR-4 preset and nothing else, thus a
-        # user always sees the same start and gives the values that the
-        # board needs. A version that filled them from the
-        # `(stackup ...)` block of the file, with a label under the
-        # fields that named the source, went in and came out again on
-        # 2026-08-05 at the request of the owner. B7 holds that work, and
-        # problem 8 is the reason to do it one day: a Rogers board
-        # simulates as FR4 until the user types the values.
+        self._sub_fields = (self.er, self.tand, self.h, self.cu_t)
+        # **The board decides the start** (P8/F7/B7). A board whose file
+        # holds a `(stackup ...)` block starts at `BOARD_PRESET`, thus a
+        # Rogers board no longer simulates as FR4 with no message. A
+        # board with no stackup starts at FR-4, as before: the fallback
+        # values of `board_reader` must NOT look like the board.
         #
+        # The dialog does not READ the file: `preview` is the model of
+        # `board_reader.extract` with no substrate, thus its stackup is
+        # already the stackup of the board.
+        #
+        # An earlier version filled the four fields from the file and
+        # left them OPEN, with a label under them that named the source.
+        # It went in and came out again on 2026-08-05, at the request of
+        # the owner. The fields are READ-ONLY under this preset now, thus
+        # a value that the board gave cannot look like a value that the
+        # user typed.
+        self._board_substrate = _board_substrate_text(preview)
+        self._saved_substrate = [c.GetValue() for c in self._sub_fields]
+        self.preset.SetSelection(0 if self._board_substrate else 1)
+        self._apply_preset()
         # `model["stackup_source"]` stays in the model: it tells a reader
-        # of model.json where the substrate came from, and B7 needs it.
+        # of model.json where the substrate came from.
         self.preset.Bind(wx.EVT_CHOICE, self._on_preset)
         for c in (self.er, self.tand):
             c.Bind(wx.EVT_TEXT, self._on_substrate_edit)
@@ -932,9 +994,45 @@ class SettingsDialog(wx.Dialog):
                     va="center", fontsize=7, transform=ax.transAxes)
         self._prev_canvas.draw_idle()
 
+    def uses_board_stackup(self):
+        """Is the substrate the stackup of the board, and not the fields?"""
+        return (SUBSTRATE_PRESETS[self.preset.GetSelection()][0]
+                == BOARD_PRESET)
+
     def _on_preset(self, evt):
-        _, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
-        if er is not None:  # ChangeValue sends no EVT_TEXT: the preset stays
+        """A preset that the USER selected. It can refuse the selection."""
+        if self.uses_board_stackup() and not self._board_substrate:
+            wx.MessageBox(
+                "This board gives no stackup.\n\n"
+                "Open Board Setup > Physical Stackup in the PCB editor, "
+                "give the dielectric its er and its loss tangent, and "
+                "SAVE the board. Or select a preset and type the values.",
+                "RFsim", wx.ICON_INFORMATION)
+            self.preset.SetSelection(1)  # FR-4
+        self._apply_preset()
+
+    def _apply_preset(self):
+        """Put the values of the selected preset into the four fields.
+
+        The fields are READ-ONLY under `BOARD_PRESET`, because the run
+        does not use their text: it uses the stackup of the board, layer
+        by layer. The text that the user typed comes back when the user
+        selects another preset.
+        """
+        name, er, tand = SUBSTRATE_PRESETS[self.preset.GetSelection()]
+        board = name == BOARD_PRESET
+        if board and self._board_substrate:
+            if self._sub_fields[0].IsEnabled():  # keep what the user typed
+                self._saved_substrate = [c.GetValue() for c in self._sub_fields]
+            for c, txt in zip(self._sub_fields, self._board_substrate):
+                c.ChangeValue(txt)
+        elif not self._sub_fields[0].IsEnabled():   # the board preset ends
+            for c, txt in zip(self._sub_fields, self._saved_substrate):
+                c.ChangeValue(txt)
+        for c in self._sub_fields:
+            c.Enable(not board)
+        # ChangeValue sends no EVT_TEXT, thus the preset stays selected.
+        if er is not None:
             self.er.ChangeValue(str(er))
             self.tand.ChangeValue(str(tand))
 
@@ -959,8 +1057,15 @@ class SettingsDialog(wx.Dialog):
             fa, fb = float(self.f_start.GetValue()), float(self.f_stop.GetValue())
             fd = float(self.f_field.GetValue())
             z0 = float(self.z0.GetValue())
-            er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
-            h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
+            # Under BOARD_PRESET the four fields hold the text of the
+            # stackup, which can be "3.48 / 4.5" for a board with two
+            # dielectrics. `float()` cannot read that, and it need not:
+            # the run uses the stackup and not the fields.
+            if self.uses_board_stackup():
+                er, tand, h, cu_t = 4.5, 0.02, 1.6, 0.035
+            else:
+                er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
+                h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
             para = [(float(esl.GetValue()), float(esr.GetValue()))
                     for _, _, _, esl, esr in self.para_rows]
             if (not (0 < fa < fb) or not (fa <= fd <= fb) or z0 <= 0
@@ -1142,15 +1247,20 @@ class SettingsDialog(wx.Dialog):
         evt.Skip()
 
     def get_settings(self):
+        board = self.uses_board_stackup()
         return {
             "f_start": float(self.f_start.GetValue()) * 1e9,
             "f_stop": float(self.f_stop.GetValue()) * 1e9,
             "f_field": float(self.f_field.GetValue()) * 1e9,
             "z0": float(self.z0.GetValue()),
-            "er": float(self.er.GetValue()),
-            "tand": float(self.tand.GetValue()),
-            "h": float(self.h.GetValue()),
-            "cu_t": float(self.cu_t.GetValue()),
+            # **None means "the stackup of the board"** (BOARD_PRESET):
+            # `rfsim` then calls `extract()` with NO substrate, thus the
+            # `(stackup ...)` block of the file gives every layer its own
+            # er, tan d and thickness. A number here overrides the block.
+            "er": None if board else float(self.er.GetValue()),
+            "tand": None if board else float(self.tand.GetValue()),
+            "h": None if board else float(self.h.GetValue()),
+            "cu_t": None if board else float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
             # "Auto" is item 0 and it gives None: the runner then reads the
             # cell count and selects the value. Item i gives i threads.
