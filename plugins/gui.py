@@ -14,7 +14,7 @@ import wx
 
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
-MESH_LEVELS = ["coarse", "medium", "fine"]
+MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
 # The rows of the R/L/C parts that the dialog shows without a scroll.
 # Each row is about 29 px tall, and the dialog is already 1053 px tall
 # with one part on a screen of 1920x1080.

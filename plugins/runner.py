@@ -13,6 +13,7 @@ openEMS. It does not import pcbnew or wx.
 The runner excites each port in sequence. N ports give N runs, which fill
 the full S-matrix.
 """
+import bisect
 import glob
 import json
 import os
@@ -52,7 +53,15 @@ import numpy as np
 
 C0 = 299792458.0
 EPS0 = 8.8541878128e-12
-RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
+# Cells per wavelength. **The preset controls the step of the AIR and of
+# the plain substrate only.** The copper gives its own lines, thus a
+# track that is narrower than the step still gets its cells: refer to
+# `_mesh` and to `POLY_FEATURE_CELLS`.
+# The ultrafine preset costs 8 times the cells of fine and half the
+# timestep, thus about 16 times the work. It is for a structure whose
+# detail is much smaller than the wavelength, such as a divider or a
+# coupler, and not for a first look.
+RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0, "ultrafine": 80.0}
 # The port types that openEMS de-embeds. Each one gives the impedance of
 # the line and the propagation constant. A lumped port does not.
 TL_PORTS = ("msl", "cpw", "stripline")
@@ -80,6 +89,29 @@ CPW_STRIP_CELLS = 8
 # converge, which is what a mesh rule must do. Raise this to 8 for a
 # more exact microstrip when no board holds a lumped element.
 MSL_STRIP_CELLS = 4
+# The tolerance that makes an edge of a polygon STRAIGHT. `board_reader`
+# rounds every coordinate to 1e-5 mm, thus the two ends of a straight
+# edge are EXACTLY equal and any value under that grid serves.
+FLAT_MM = 1e-7
+# The number of mesh cells across a copper feature that is narrower than
+# `res` and that no port covers: a track, a gap between two pads, or a
+# slot. 2 cells put ONE line inside the feature, and its two edge lines
+# hold the width.
+#
+# **Two lines are not enough on their own.** CSXCAD counts a point that
+# lies exactly ON the boundary of a polygon as inside, thus the two edge
+# lines do carry current and the copper is not lost. But one cell across
+# a track is the "none" row of the table at MSL_STRIP_CELLS: the
+# microstrip of `validation/` gave 44.3 ohm at coarse and 47.2 at medium
+# against 49.8 ohm from Hammerstad and Jensen, and it did NOT converge.
+#
+# **Nobody has measured this number against the theory.** Every line of
+# every validation board carries a port, and `_feature_lines` skips a
+# feature that holds a line already, thus the rig cannot see this rule.
+# Raise it with a measurement, and grade the mesh outward from the
+# feature at the same time, as the port branches of `_mesh` do: a cell
+# of w/4 beside a cell of `res` is a step that reflects the wave.
+POLY_FEATURE_CELLS = 2
 # The safety margin of the timestep rule for a lumped inductor. The
 # largest stable factor follows 1/sqrt(L[nH]), and the measurement of
 # 2026-08-05 over 6 geometries gives a margin of 1.0 to 2.7 for the bare
@@ -278,6 +310,48 @@ def _merge_close(vals, tol, anchors=()):
     return out
 
 
+def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS):
+    """Give the lines that divide each narrow feature of the copper.
+
+    `edges` holds the coordinates of the straight edges of the copper on
+    one axis, and `lines` holds the mesh lines that the other rules made
+    already. Two edges beside each other hold a FEATURE: a track, a gap
+    between two pads, or a slot. `SmoothMeshLines` fills the interval
+    between two fixed lines, thus a feature that is not wider than `res`
+    keeps its two edge lines and NOTHING between them, which is one cell
+    across a track. Refer to POLY_FEATURE_CELLS for why that is too few.
+
+    **A feature that holds a line already keeps that line alone.** The
+    cells across the strip of a port, the lines of a CPW gap and the two
+    faces of a lumped element all sit inside a feature, and a second line
+    beside them makes the mesh finer for nothing. This also keeps every
+    board of `validation/` at the mesh that measured its number.
+
+    A feature whose cells would come out smaller than `tol` gets NO
+    line: `_merge_close` removes such a line again, and a cell that
+    small also cuts the timestep of the full run. The two ends of a
+    sliver that a boolean union leaves behind are the usual cause. Such
+    a feature keeps its two edge lines, thus a track still conducts and
+    a gap stays open; only the width is then one cell. The result is
+    (the lines, the width of each feature that stays whole).
+    """
+    out, narrow = set(), []
+    edges = sorted(edges)
+    lines = sorted(lines)
+    for a, b in zip(edges, edges[1:]):
+        if b - a > res:
+            continue                     # SmoothMeshLines divides it
+        i = bisect.bisect_right(lines, a)
+        if i < len(lines) and lines[i] < b:
+            continue                     # a line is inside it already
+        if (b - a) / cells <= tol:
+            narrow.append(b - a)
+            continue
+        for k in range(1, cells):
+            out.add(a + (b - a) * k / cells)
+    return out, narrow
+
+
 def _port_geometry(model, res):
     """Calculate the boxes and the planes of the ports.
 
@@ -383,12 +457,42 @@ def _mesh(model, ports, res):
     r = model["region"]
     xs = set(_pml_band(r["x0"], r["x1"], margin))
     ys = set(_pml_band(r["y0"], r["y1"], margin))
+    # A mesh line ON every straight edge of the copper.
+    #
+    # Before, this loop gave the BOX of each polygon and nothing else,
+    # thus no edge INSIDE a polygon had a line. A structure that is finer
+    # than `res` then fell BETWEEN the lines: a 2.45 GHz Wilkinson
+    # divider with tracks of 0.265 mm, at the fine preset with a step of
+    # 0.589 mm, came apart into 63 pieces of copper that touch nothing,
+    # and S21 read -94.4 dB. **openEMS gives NO message for it**: it
+    # writes "Unused primitive" only when the WHOLE primitive gets no
+    # edge, and one large polygon that loses its middle stays "used".
+    # The log of 2026-08-18 (1).
+    #
+    # A DIAGONAL edge and the segments of an arc give NO line: such an
+    # edge holds no single coordinate, and one line for each vertex of a
+    # round pad or of a curved zone would multiply the mesh for nothing.
+    # The box of the polygon stays for the same reason: a shape whose
+    # edges are all diagonal, such as a diamond, still keeps its two
+    # ends. The cost is small on a real board, because the copper of a
+    # PCB is rectilinear: the zone board of `validation/` has 379 points
+    # and gives 10 x lines and 7 y lines.
+    poly_x, poly_y = set(), set()
     for polys in model["polygons"].values():
         for poly in polys:
             px = [pt[0] for pt in poly]
             py = [pt[1] for pt in poly]
-            xs.update((min(px), max(px)))
-            ys.update((min(py), max(py)))
+            poly_x.update((min(px), max(px)))
+            poly_y.update((min(py), max(py)))
+            for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+                flat_x = abs(x1 - x0) < FLAT_MM
+                flat_y = abs(y1 - y0) < FLAT_MM
+                if flat_x and not flat_y:
+                    poly_x.add(x0)
+                elif flat_y and not flat_x:
+                    poly_y.add(y0)
+    xs |= poly_x
+    ys |= poly_y
     for v in model["vias"]:
         # The CENTER line is necessary, and not only the two edges.
         # openEMS makes a metal primitive into PEC on the edges of the
@@ -594,6 +698,26 @@ def _mesh(model, ports, res):
     # before. Thus openEMS scales R, L and C correctly over the box, and
     # this code needs no rule for the cell count. Only the two FACES
     # matter, and the anchors above hold them.
+
+    # The lines INSIDE the narrow copper come last, and for two reasons.
+    # The rule skips a feature that a port, a via or a lumped element
+    # divides already, thus it must see every other line first. And it
+    # needs `tol`, because a line that the merge removes again is worse
+    # than no line at all.
+    fx, narrow_x = _feature_lines(poly_x, xs, res, tol)
+    fy, narrow_y = _feature_lines(poly_y, ys, res, tol)
+    xs |= fx
+    ys |= fy
+    narrow = narrow_x + narrow_y
+    if narrow:
+        print("[rfsim] WARNING: %d copper feature(s) are narrower than "
+              "%.4f mm and keep ONE cell across them; the narrowest is "
+              "%.4f mm. A track that thin gives an incorrect impedance, and "
+              "its two edges can make the SMALLEST cell of the mesh, thus a "
+              "slower run. Remove the very thin copper, or use a finer mesh "
+              "preset."
+              % (len(narrow), POLY_FEATURE_CELLS * tol, min(narrow)),
+              flush=True)
     return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
             _merge_close(zs, tol_z))
 

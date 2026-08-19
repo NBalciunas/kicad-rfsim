@@ -67,12 +67,12 @@ Each port needs a ground return: copper on the reference layer below the pad. Wi
 
 The dialog gives only the types that the geometry permits:
 
-| Type | Requires |
-|---|---|
-| Lumped Port | No requirements |
-| Microstrip (MSL) Port | Feed line on the x or y axis |
-| Coplanar (CPW) Port | Feed line on the x or y axis; Copper on both sides of it |
-| Stripline Port | Feed line on the x or y axis; Plane above and below it |
+| Type                  | Requires                                                 |
+|-----------------------|----------------------------------------------------------|
+| Lumped Port           | No requirements                                          |
+| Microstrip (MSL) Port | Feed line on the x or y axis                             |
+| Coplanar (CPW) Port   | Feed line on the x or y axis; Copper on both sides of it |
+| Stripline Port        | Feed line on the x or y axis; Plane above and below it   |
 
 > Each excited port costs one full FDTD run. The plugin gives a warning when a port gives out more power than it takes in. Run again at the medium or the fine preset when you see it.
 
@@ -90,12 +90,12 @@ The coarse preset reads a little low: the microstrip of `validation/` gives 47.7
 
 The other presets make a uniform stackup from the values in the dialog. They fill εr and tanδ, and "Custom" leaves the two fields to you:
 
-| Preset | εr | tanδ |
-|---|---|---|
-| FR-4 | 4.5 | 0.02 |
+| Preset         | εr   | tanδ   |
+|----------------|------|--------|
+| FR-4           | 4.5  | 0.02   |
 | Rogers RO4350B | 3.48 | 0.0037 |
 | Rogers RO4003C | 3.38 | 0.0027 |
-| PTFE | 2.20 | 0.0009 |
+| PTFE           | 2.20 | 0.0009 |
 
 The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
 
@@ -103,11 +103,12 @@ The domain fits the full board and adds the margin as air around it. The plugin 
 
 The mesh preset gives the number of cells for each wavelength. The wavelength is the shortest one of the sweep, in the substrate:
 
-| Preset | Cells per wavelength | Cell on FR-4, sweep to 6 GHz |
-|---|---|---|
-| Coarse | 10 | 2.36 mm |
-| Medium | 20 | 1.18 mm |
-| Fine | 40 | 0.59 mm |
+| Preset    | Cells per wavelength | Cell on FR-4, sweep to 6 GHz |
+|-----------|----------------------|------------------------------|
+| Coarse    | 10                   | 2.36 mm                      |
+| Medium    | 20                   | 1.18 mm                      |
+| Fine      | 40                   | 0.59 mm                      |
+| Ultrafine | 80                   | 0.29 mm                      |
 
 The preset controls this step alone. The cells across the strip of a port, the cells in the gap of a CPW and the cells through the substrate stay the same at each preset, because the geometry and not the wavelength gives them.
 
@@ -119,11 +120,11 @@ Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "L
 
 **The Value field of the footprint gives the value.** Each type has its own prefix letters, thus a "p" on a resistor cannot become pico:
 
-| Type | Prefixes | Examples |
-|---|---|---|
-| Resistor | R k M G | `50` = 50 ohm, `4k7` = 4.7 kohm, `5G` = 5 Gohm |
-| Capacitor | p n u µ | `100nF` = 100 nF, `3n3` = 3.3 nF |
-| Inductor | p n u µ m | `10u` = 10 µH, `50m` = 50 mH, `3n3` = 3.3 nH |
+| Type      | Prefixes  | Examples                                       |
+|-----------|-----------|------------------------------------------------|
+| Resistor  | R k M G   | `50` = 50 ohm, `4k7` = 4.7 kohm, `5G` = 5 Gohm |
+| Capacitor | p n u µ   | `100nF` = 100 nF, `3n3` = 3.3 nF               |
+| Inductor  | p n u µ m | `10u` = 10 µH, `50m` = 50 mH, `3n3` = 3.3 nH   |
 
 A letter also stands in the place of the decimal point (`4R7` = 4.7 ohm), the unit letter is not necessary, and text after a space (`100nF 10%`) has no effect. "DNP" and the other words for a part that is not there give no value.
 
