@@ -118,15 +118,23 @@ The coarse preset is for a first look. A small lumped element reads too large at
 
 Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog. **The first letter of the reference gives the type**: R, L or C. Every other 2-terminal part, for example a diode or a ferrite bead, starts at "Unknown" with its "Model" checkbox off, and it changes no simulation until you select a type and give a value.
 
-**The Value field of the footprint gives the value.** Each type has its own prefix letters, thus a "p" on a resistor cannot become pico:
+**The Value field of the footprint gives the value.** One text, three readings: the same letters serve all three types, and the type of the part decides the unit. The case is important, thus `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
 
-| Type      | Prefixes  | Examples                                       |
-|-----------|-----------|------------------------------------------------|
-| Resistor  | R k M G   | `50` = 50 ohm, `4k7` = 4.7 kohm, `5G` = 5 Gohm |
-| Capacitor | p n u µ   | `100nF` = 100 nF, `3n3` = 3.3 nF               |
-| Inductor  | p n u µ m | `10u` = 10 µH, `50m` = 50 mH, `3n3` = 3.3 nH   |
+| Letter      | Prefix | Text              | Resistor | Capacitor | Inductor |
+|-------------|--------|-------------------|----------|-----------|----------|
+| `p`         | pico   | `4p7`             | 4.7 pohm | 4.7 pF    | 4.7 pH   |
+| `n`         | nano   | `4n7`             | 4.7 nohm | 4.7 nF    | 4.7 nH   |
+| `u` or `µ`  | micro  | `4u7`             | 4.7 µohm | 4.7 µF    | 4.7 µH   |
+| `m`         | milli  | `4m7`             | 4.7 mohm | 4.7 mF    | 4.7 mH   |
+| `R` `F` `H` | unit   | `4R7` `4F7` `4H7` | 4.7 ohm  | 4.7 F     | 4.7 H    |
+| `k` or `K`  | kilo   | `4k7`             | 4.7 kohm | 4.7 kF    | 4.7 kH   |
+| `M`         | mega   | `4M7`             | 4.7 Mohm | 4.7 MF    | 4.7 MH   |
+| `G`         | giga   | `4G7`             | 4.7 Gohm | 4.7 GF    | 4.7 GH   |
+| `T`         | tera   | `4T7`             | 4.7 Tohm | 4.7 TF    | 4.7 TH   |
 
-A letter also stands in the place of the decimal point (`4R7` = 4.7 ohm), the unit letter is not necessary, and text after a space (`100nF 10%`) has no effect. "DNP" and the other words for a part that is not there give no value.
+**Each type has its own mark for the unit**, thus `4F7` on a resistor and `4R7` on an inductor give no value. An inductor with `4R7` on its body is 4.7 µH, and no rule can know that from the text alone: give such a value in the dialog. The lower case does the same (`4r7`, `4f7`, `4h7`).
+
+The letter can also come after the number (`4.7k` = 4.7 kohm, `22p` = 22 pF). **The unit letter is optional**, thus `4p7F` and `10uH` read the same as `4p7` and `10u`, and the unit can be a word of its own (`10 kOhm`, `4.7 uF`, `10 nH`). A word that starts with a digit after a space has no effect (`100nF 10%`, `10u 25V`). "DNP" and the other words for a part that is not there give no value. The dialog shows the number that the plugin read, thus you see which value it took.
 
 **Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
 
@@ -188,7 +196,7 @@ The Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
 * **`make_test_board.py`**  
 Makes the microstrip board of `run_headless.py`, and the CPW board and the stripline board of `run_cpw.py`.
 
-`%KIPY% plugins\board_reader.py` is the self-test of the value parser (21 cases).
+`%KIPY% plugins\board_reader.py` is the self-test of the value parser (62 cases).
 
 ## License
 

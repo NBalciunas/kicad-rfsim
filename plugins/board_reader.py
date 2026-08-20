@@ -31,10 +31,11 @@ MODEL_VERSION = 1
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 
 # The SI multipliers. The letter case is important (m = milli, M = mega).
-# The letters 'r' and 'R' show the position of the decimal point.
+# The letters 'r'/'R', 'f'/'F' and 'h'/'H' show the position of the
+# decimal point, thus they multiply by 1.
 _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
-       "r": 1.0, "R": 1.0, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9,
-       "T": 1e12}
+       "r": 1.0, "R": 1.0, "f": 1.0, "F": 1.0, "h": 1.0, "H": 1.0,
+       "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
 # **The prefixes are the SAME for R, L and C** (B23). Each type had its
 # own set until 2026-08-06, thus a resistor of 5 milliohm, a capacitor
 # of 1 mF and an inductor of 2.2 mH were all "not understood", and a
@@ -43,12 +44,18 @@ _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
 # "1m" is 1 milliohm and NOT 1 Mohm. The dialog shows the number that
 # this function read, thus the user sees which one it took.
 _PREFIX = "pnuµmkKMGT"
-# 'r' and 'R' are the letter of the OHM, and not a multiplier, thus a
-# resistor ONLY: "4R7" is 4.7 ohm. An inductor marked "4R7" is 4.7 µH
-# on the package of the part, and no rule here can know that. Thus L
-# and C refuse the letter, the value is "not understood", and the user
-# gives it in the dialog. That is better than 4.7 H with no message.
-_OHM_MARK = "rR"
+# The mark of the UNIT. It shows the position of the decimal point and
+# multiplies by 1, thus "4R7" is 4.7 ohm, "4F7" is 4.7 F and "4H7" is
+# 4.7 H (F12). **Each type takes its OWN mark and no other one**,
+# because the mark names the quantity: "4F7" on a resistor and "4H7" on
+# a capacitor give no value.
+#
+# **An inductor refuses 'R' on purpose.** A real inductor with "4R7" on
+# its body is 4.7 µH, and no rule here can know that from the text
+# alone. Thus the value stays "not understood" and the user gives it in
+# the dialog, which is better than 4.7 H with no message. A capacitor
+# refuses it for the same reason.
+_UNIT_MARK = {"R": "rR", "C": "fF", "L": "hH"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
@@ -93,7 +100,9 @@ def _parse_value(text, kind):
     DNP, or if the function cannot read the text, it gives None.
 
     **Every type takes every prefix** (`_PREFIX`): p, n, u/µ, m, k, M, G
-    and T. Only the ohm mark 'r'/'R' is for a resistor.
+    and T. The mark of the UNIT is the exception: a resistor takes
+    'r'/'R', a capacitor takes 'f'/'F' and an inductor takes 'h'/'H',
+    and no type takes the mark of another one (`_UNIT_MARK`).
     """
     if not text:
         return None
@@ -105,7 +114,7 @@ def _parse_value(text, kind):
     # join the second word when it starts with a prefix or with a unit
     # letter. A tolerance starts with a DIGIT ("1%"), and a voltage
     # rating too ("25V"), thus neither one joins.
-    if len(words) > 1 and words[1][:1] in _PREFIX + _OHM_MARK + "fFhHoO":
+    if len(words) > 1 and words[1][:1] in _PREFIX + "rRfFhHoO":
         tok += words[1]
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
@@ -119,7 +128,7 @@ def _parse_value(text, kind):
     if not tok:
         return None
     for i, ch in enumerate(tok):
-        if ch in _PREFIX or (kind == "R" and ch in _OHM_MARK):
+        if ch in _PREFIX or ch in _UNIT_MARK.get(kind, ""):
             left, right = tok[:i], tok[i + 1:]
             num = (left + "." + right) if right else (left or "0")
             try:
@@ -1134,6 +1143,16 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # The ohm mark stays on the resistor. An inductor marked "4R7"
         # is 4.7 µH on its package, thus the parser must NOT give 4.7 H.
         ("4R7", "L", None), ("4R7", "C", None), ("0R", "R", 0.0),
+        # F12: the mark of the unit is not for the resistor alone. A
+        # medial 'F' or 'H' gave None before 2026-08-20.
+        ("4F7", "C", 4.7), ("1F5", "C", 1.5), ("4f7", "C", 4.7),
+        ("4H7", "L", 4.7), ("2H2", "L", 2.2), ("4h7", "L", 4.7),
+        # ...but each type takes its OWN mark and no other one.
+        ("4F7", "L", None), ("4F7", "R", None),
+        ("4H7", "C", None), ("4H7", "R", None),
+        # A mark with no number is not a value. The trailing unit goes
+        # away first, thus the token is empty and not "0" (compare 0R).
+        ("F", "C", None), ("H", "L", None),
         # The unit as a word of its own. Each one of these gave the bare
         # number before 2026-08-06, thus 1000 times too much or too
         # little, with no message.

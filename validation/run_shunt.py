@@ -64,6 +64,23 @@ ESL_CASES = (0.25e-9, 1.0e-9)   # the two bodies that the tool must measure
 F_START, F_STOP, N_FREQ = 0.5e9, 5e9, 601
 FIT_HALF_WIDTH = 8      # the bins at each side of the minimum, for the fit
 NOTCH_MIN_DB = -10.0    # a notch that is not deeper than this is not a notch
+# The depth window that makes two dips a TIE. The deepest bin does NOT
+# always give the series resonance: the 2512 land with its ESL has a dip
+# at 0.8525 GHz and a second at 1.3325 GHz, and the mesh of P18 put them
+# 0.016 dB apart. The pick flipped to the higher one, thus L_total came
+# out SMALLER than the board alone and the run gave an ESL of -1.1646 nH.
+# `notch` takes the LOWEST dip that comes within this margin of the
+# deepest one: the series resonance of C with L_total is the FIRST
+# resonance of the branch, and a dip above it belongs to the board or to
+# the line.
+#
+# **The margin is measured, and not chosen.** Over the 33 runs on disk of
+# 2026-08-18 the true notch of the 2512 land stands 0.02 dB above the
+# deepest dip, and the nearest FALSE dip under a true notch (the 1210
+# land, 0.83 GHz) stands 21.94 dB above it. Thus the window must be
+# larger than 0.02 dB and smaller than 21.94 dB. 6 dB is a factor of 2 in
+# magnitude, and it keeps a margin of 3.7 times against the false dip.
+NOTCH_TIE_DB = 6.0
 L_BOARD_RANGE = (0.2e-9, 5e-9)  # the pads, the gap and a via of 1.6 mm
 # The tolerances come from the runs of 2026-08-04, at the coarse preset
 # and at the medium one. The control gave 1.0% at each preset, and the
@@ -138,12 +155,27 @@ def notch(f, s21):
     which is smooth there, and takes the vertex of it. It does not fit
     the dB values: a deep notch is a cusp in dB.
 
+    **The deepest bin is not always the correct dip**, thus the tool
+    takes the lowest dip that comes within NOTCH_TIE_DB of the deepest
+    one. A second resonance of the board cannot then take the place of
+    the series resonance of the part.
+
     Magnitudes only, and no phase: the reference plane of each port is
     about 15 mm from the part, and that line rotates the phase. A matched
     line with no loss cannot change |S21|, thus it cannot move the notch.
     """
     mag = np.abs(s21)
-    i = int(np.argmin(mag))
+    deepest = int(np.argmin(mag))
+    limit = mag[deepest] * 10 ** (NOTCH_TIE_DB / 20.0)
+    # Every local minimum that is deep enough, and then the FIRST of
+    # them: the frequency goes up along the array, thus the first one is
+    # the lowest. `deepest` itself is such a minimum, thus the search
+    # always finds one, and a dip at an end of the sweep falls to the
+    # assertion below.
+    here = mag[1:-1]
+    deep = np.flatnonzero(
+        (here <= mag[:-2]) & (here < mag[2:]) & (here <= limit))
+    i = int(deep[0]) + 1 if len(deep) else deepest
     lo, hi = i - FIT_HALF_WIDTH, i + FIT_HALF_WIDTH + 1
     assert lo >= 0 and hi <= len(f), \
         "the notch is at the edge of the sweep (%.3f GHz)" % (f[i] / 1e9)
@@ -385,6 +417,15 @@ def packages(mesh="coarse"):
             if d > NOTCH_MIN_DB:
                 fails.append("%s (%s): the notch is only %.1f dB deep"
                              % (pkg, tag, d))
+        # An ESL adds to L_total, thus L_total cannot fall. A fall means
+        # that one of the two runs measured the wrong dip.
+        if got <= 0:
+            fails.append("%s: L_total FELL from %.4f nH to %.4f nH when "
+                         "the ESL went in. No ESL can do that, thus one "
+                         "run measured the wrong dip: refer to "
+                         "NOTCH_TIE_DB"
+                         % (pkg, l_board * 1e9, l_tot * 1e9))
+            continue
         if abs(got - esl) > max(ESL_TOL * esl, ESL_FLOOR_H):
             fails.append("%s: the table says %.2f nH and the run gives "
                          "%.4f nH" % (pkg, esl * 1e9, got * 1e9))
@@ -447,6 +488,13 @@ def main(mesh="coarse", mode="method"):
         print("   %9.2f     %7.4f     %8.4f   %13.4f   %+.1f%%"
               % (esl * 1e9, f0 / 1e9, ltot * 1e9, got * 1e9,
                  100 * (got - esl) / esl))
+        if got <= 0:
+            fails.append("the ESL of %.2f nH made L_total FALL from "
+                         "%.4f nH to %.4f nH. No ESL can do that, thus "
+                         "one run measured the wrong dip: refer to "
+                         "NOTCH_TIE_DB"
+                         % (esl * 1e9, l_board * 1e9, ltot * 1e9))
+            continue
         if abs(got - esl) > tol:
             fails.append("ESL %.2f nH measured as %.4f nH (tolerance %.3f nH)"
                          % (esl * 1e9, got * 1e9, tol * 1e9))
