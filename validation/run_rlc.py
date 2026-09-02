@@ -144,8 +144,13 @@ def simulate(ref, val, mesh):
         print(log.stdout[-3000:])
         print(log.stderr[-2000:])
         raise SystemExit("solver failed for %s" % ref)
+    # "timesteps" keeps the line that says HOW the run ended (B29). The
+    # log gave the numbers of a run and no way to see whether it met its
+    # end criteria or stopped at the limit, and a run that stops at the
+    # limit measures a notch that is not yet at its full depth.
     for line in log.stdout.splitlines():
-        if "lumped" in line or "ERROR" in line or "WARNING" in line:
+        if ("lumped" in line or "ERROR" in line or "WARNING" in line
+                or "timesteps" in line):
             print("  " + line.strip())
 
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))

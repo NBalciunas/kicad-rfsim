@@ -130,7 +130,14 @@ def _parse_value(text, kind):
     for i, ch in enumerate(tok):
         if ch in _PREFIX or ch in _UNIT_MARK.get(kind, ""):
             left, right = tok[:i], tok[i + 1:]
-            num = (left + "." + right) if right else (left or "0")
+            # A mark with NO digit on either side of it is not a
+            # quantity: "R" alone names the type of the part and gives
+            # no number. It gave 0.0 before, thus `build()` put a metal
+            # SHORT across the two pads. "0R" and "R47" still carry a
+            # number, thus they stay as they are.
+            if not left and not right:
+                return None
+            num = (left + "." + right) if right else left
             try:
                 return float(num) * _SI[ch]
             except ValueError:
@@ -139,6 +146,22 @@ def _parse_value(text, kind):
         return float(tok)
     except ValueError:
         return None
+
+
+def _unit_mark_only(text, kind):
+    """Tell if the Value field holds the unit of `kind` and no number.
+
+    A resistor whose Value field is "R" names its TYPE and gives no
+    quantity, and "R 0402" is the same field with the package after it.
+    The part is real, thus `extract` keeps it with no value: the dialog
+    then shows it as a resistor with an empty field, and the user gives
+    the number. A field that the parser cannot read ("xyz"), and DNP,
+    are different. Those keep their warning and the part stays out.
+    """
+    if not text or not kind:
+        return False
+    words = text.strip().split()
+    return bool(words) and words[0] in _UNIT_MARK.get(kind, "")
 
 
 def _lname(layer_id):
@@ -245,7 +268,6 @@ def _stackup_from_file(path):
                                                 [DEF_LOSS_TAN])[0]),
             })
     return items or None
-
 
 def _uniform_stackup(cu_names, diel_total, eps, tand, cu_t):
     """Make n copper sheets with dielectric layers of equal thickness.
@@ -840,9 +862,20 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         # the user for both.
         val = _parse_value(fp.GetValue(), kind) if kind else None
         if kind and val is None:
-            warnings.append("%s: value \"%s\" not understood -> not modeled"
-                            % (ref, fp.GetValue()))
-            continue
+            # "R" alone names the type and no quantity. KEEP that part:
+            # the dialog shows it as a resistor with an empty value, the
+            # user gives the number, and the type stays open in the same
+            # way as it is for every other row. A part that still has no
+            # value goes no further than the dialog, because rfsim.py
+            # takes only an element that holds a type AND a value.
+            if _unit_mark_only(fp.GetValue(), kind):
+                warnings.append(
+                    "%s: value \"%s\" gives the type and no quantity -> give "
+                    "the value in the dialog" % (ref, fp.GetValue()))
+            else:
+                warnings.append("%s: value \"%s\" not understood -> not "
+                                "modeled" % (ref, fp.GetValue()))
+                continue
         b1, b2 = pads[0].GetBoundingBox(), pads[1].GetBoundingBox()
         c1 = (_mm(b1.Centre().x), -_mm(b1.Centre().y))
         c2 = (_mm(b2.Centre().x), -_mm(b2.Centre().y))
@@ -993,6 +1026,29 @@ def extract(board, pads, margin_mm, substrate=None):
     # has ERROR_INSIDE, and ConvertBrdLayerToPolygonalContours includes
     # the text.
     warnings = []
+    # The stackup comes from the board FILE, thus a change in Board Setup
+    # that the user did not save is NOT in the run: the run finishes and
+    # it gives a number for the OLD substrate. **The silence is the
+    # harm**, and not the extra save. SWIG gives no access to
+    # BOARD_STACKUP (P12), thus the plugin cannot read the change; it can
+    # say that the change may be there.
+    #
+    # `substrate` means that the user typed the values in the dialog,
+    # thus the file is not the source and there is nothing to say.
+    if not substrate:
+        try:
+            unsaved = bool(board.IsModified())
+        except Exception:
+            # A board that comes from LoadBoard has the method. Keep the
+            # run alive for any binding that does not.
+            unsaved = False
+        if unsaved:
+            warnings.append(
+                "The board has unsaved changes. The substrate (er, tan d, "
+                "thickness) is read from the SAVED file, so a change in "
+                "Board Setup > Physical Stackup that you did not save is "
+                "NOT in this run and the result will be wrong for it. Save "
+                "the board and run again.")
     if clipped:
         warnings.append(
             "Copper on %s extends beyond the simulation domain and is cut "
@@ -1153,6 +1209,11 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # A mark with no number is not a value. The trailing unit goes
         # away first, thus the token is empty and not "0" (compare 0R).
         ("F", "C", None), ("H", "L", None),
+        # B24: the resistor took no such path, thus "R" alone gave 0.0
+        # and `build()` put a metal SHORT across the two pads. A zero
+        # ohm link still writes "0R", and it must keep its 0.0 above.
+        ("R", "R", None), ("r", "R", None), ("R 0402", "R", None),
+        ("n", "C", None), ("k", "R", None),
         # The unit as a word of its own. Each one of these gave the bare
         # number before 2026-08-06, thus 1000 times too much or too
         # little, with no message.

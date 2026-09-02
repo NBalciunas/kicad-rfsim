@@ -122,6 +122,21 @@ POLY_FEATURE_CELLS = 2
 # body ESL is under 1 nH, thus the factor stays at 1.0.
 # `validation/run_stability.py` measures the margin again.
 LE_STAB_MARGIN = 0.7
+# `_diverged` calls a run UNSTABLE when the largest |u| of the last tenth
+# of the port data passes this multiple of the largest |u| of the first
+# half. A passive structure cannot end above the level that its own
+# excitation made, thus the physical limit is 1 and everything above it
+# is margin. The margin covers a resonator that keeps energy from the
+# pulse and rings at the end of the run: such a trace holds a ratio near
+# 1, and it must NOT give a false alarm.
+# Measured on the 0603 ESL board of `run_shunt.py`: 8 runs that ended
+# well gave 0.0008 to 0.0023, and the run that grew gave 1.65e8. Thus 10
+# stands about 4300 times above every good run and 7 orders below the
+# bad one, and no value in that range separates them differently.
+GROWTH_LIMIT = 10.0
+# A trace this short holds the excitation alone, thus its end says
+# nothing about the decay and the test above does not run.
+GROWTH_MIN_ROWS = 200
 # The newest version of model.json that this runner can read. It must
 # agree with `board_reader.MODEL_VERSION`, and the two files cannot
 # import each other: board_reader imports pcbnew, and this file must not.
@@ -170,8 +185,12 @@ def _time_step_factor(model):
     same geometry that controls the stability.
 
     This stays an approximation. Thus `_diverged()` examines the port
-    data for NaN after each run and tells the user to set
+    data after each run and tells the user to set
     settings["time_step_factor"], which has priority over this value.
+
+    **This factor does not cover every unstable run.** `_diverged()`
+    also finds a run that GREW and never reached NaN, and no factor
+    corrects that one: refer to its docstring.
     """
     s = model["settings"]
     if s.get("time_step_factor"):
@@ -191,6 +210,20 @@ def _time_step_factor(model):
     if not ind:
         return None
     return min(1.0, LE_STAB_MARGIN / (max(ind) * 1e9) ** 0.5)
+
+
+def _max_timesteps(model):
+    """Give the step limit that the engine receives.
+
+    A smaller timestep needs more steps for the same simulated time,
+    thus `settings["max_timesteps"]` is a limit on the TIME and not on
+    the count. `build()` gives this value to openEMS, and `main()` needs
+    the same number to tell whether a run met its end criteria or
+    stopped at the limit.
+    """
+    nrts = model["settings"]["max_timesteps"]
+    tsf = _time_step_factor(model)
+    return int(nrts / tsf) if tsf and tsf < 1.0 else nrts
 
 
 def _cell_count(fdtd):
@@ -263,17 +296,105 @@ def _parasitic_components(e):
     return out
 
 
-def _diverged(sim_path):
-    """Give the name of a port file that contains NaN.
+def _run_length(sim_path):
+    """Give (the timesteps of the run, the timestep, the subsample), or
+    give None.
 
-    NaN shows that the FDTD run diverged. Do this test: openEMS writes
-    '-nan(ind)' into the time-domain data of the port, and CalcPort then
-    stops with an unclear "could not convert string to float" ValueError.
+    openEMS writes its report to the console and it leaves no file that
+    this code can read after `Run`. Two files hold the answer together:
+
+    - `et` holds the excitation, ONE row for each timestep, thus the
+      difference of its first two times is the timestep.
+    - the port data is SUBSAMPLED, but its last row still carries the
+      time of the last step that the engine wrote.
+
+    The count is therefore exact to the subsample interval, and the
+    caller receives that interval as well.
     """
-    for fn in sorted(glob.glob(os.path.join(sim_path, "port_ut_*"))):
+    et = os.path.join(sim_path, "et")
+    uts = sorted(glob.glob(os.path.join(sim_path, "port_ut_*")))
+    if not os.path.isfile(et) or not uts:
+        return None
+    try:
+        e = np.loadtxt(et, comments=("%", "#"))
+        u = np.loadtxt(uts[0], comments=("%", "#"))
+    except (ValueError, OSError):
+        return None                  # a NaN run: `_diverged` reports it
+    if e.ndim != 2 or len(e) < 2 or u.ndim != 2 or len(u) < 2:
+        return None
+    dt = e[1, 0] - e[0, 0]
+    if not dt > 0:
+        return None
+    steps = int(round(u[-1, 0] / dt))
+    return steps, dt, max(1, int(round(steps / (len(u) - 1))))
+
+
+def _report_end(sim_path, nrts, end_criteria):
+    """Say how the run ended: the end criteria, or the step limit.
+
+    A run that stops at the limit is not finished. Its S-matrix then
+    holds the energy that was still in the structure, which reads as a
+    resonance that is too shallow or as a ripple, and openEMS gives no
+    message that the user sees in the log of the plugin. A structure
+    with a high Q is the usual cause (P7).
+    """
+    end = _run_length(sim_path)
+    if not end:
+        return
+    steps, dt, every = end
+    ns = steps * dt * 1e9
+    if steps + every >= nrts:
+        print("[rfsim] WARNING: the run stopped at the STEP LIMIT of %d "
+              "timesteps (%.1f ns) and NOT at its end criteria of %.3g, "
+              "thus the field had not decayed and the result is not "
+              "complete. A resonance with a high Q needs more time: raise "
+              "\"Max timesteps\", or make \"End criteria\" larger."
+              % (nrts, ns, end_criteria), flush=True)
+    else:
+        print("[rfsim] the run met its end criteria of %.3g after %d of %d "
+              "timesteps (%.1f ns)" % (end_criteria, steps, nrts, ns),
+              flush=True)
+
+
+def _diverged(sim_path):
+    """Give (the name of a port file, the cause), or give None.
+
+    The cause is "nan" or "growth", and the two need different advice.
+
+    **NaN** comes from a timestep that is too long for a lumped
+    inductor, and a shorter one corrects it. openEMS writes '-nan(ind)'
+    into the time-domain data of the port, and CalcPort then stops with
+    an unclear "could not convert string to float" ValueError. Thus this
+    test comes first, and it reads the file as text.
+
+    **Growth** is a run that is not stable and that never reaches NaN.
+    The field of a passive structure decays after the excitation, thus
+    a trace that ENDS above its own early level did not decay. Such a
+    run still writes a well-formed Touchstone file, and its S-matrix
+    comes out flat near 1 over the whole sweep, thus nothing else in
+    this code refuses it. A shorter timestep does NOT correct it: the
+    rate of that growth does not follow the timestep.
+    """
+    names = sorted(glob.glob(os.path.join(sim_path, "port_ut_*")))
+    for fn in names:
         with open(fn) as fh:
             if "nan" in fh.read().lower():
-                return os.path.basename(fn)
+                return os.path.basename(fn), "nan"
+    for fn in names:
+        # openEMS takes '%' as the comment mark, and it SUBSAMPLES the
+        # port data: a run of 300000 timesteps writes about 7900 rows.
+        # Column 0 is the time and column 1 is the voltage.
+        try:
+            a = np.loadtxt(fn, comments=("%", "#"))
+        except (ValueError, OSError):
+            continue                     # not a table: leave it to CalcPort
+        if a.ndim != 2 or len(a) < GROWTH_MIN_ROWS:
+            continue
+        u = np.abs(a[:, 1])
+        head = u[:len(u) // 2].max()
+        tail = u[-(len(u) // 10):].max()
+        if head > 0 and tail > GROWTH_LIMIT * head:
+            return os.path.basename(fn), "growth"
     return None
 
 
@@ -334,6 +455,20 @@ def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS):
     a feature keeps its two edge lines, thus a track still conducts and
     a gap stays open; only the width is then one cell. The result is
     (the lines, the width of each feature that stays whole).
+
+    **The mesh does NOT grade outward from a feature.** The cells that
+    this rule makes are much smaller than `res`, thus the cell beside
+    the feature is a step, and the port branches of `_mesh` do grade
+    away from a strip and from a CPW gap for that reason. A grade here
+    was written and measured on 2026-09-01, and it is not worth its
+    cost: with the 2 cells that POLY_FEATURE_CELLS gives, it moves the
+    eps_eff of a 0.4 mm line by 0.04%, while a grade at EVERY narrow
+    feature moves the mesh of 44 of the 71 boards of `validation/` and
+    adds as much as 76% more cells, and a grade only where `tol`
+    refuses the division moves 26 of them and adds as much as 81%. It
+    is worth about 5% ONLY at one cell across the feature, which is
+    what `tol` leaves behind. `validation/run_feature.py` holds the
+    measurement.
     """
     out, narrow = set(), []
     edges = sorted(edges)
@@ -477,20 +612,31 @@ def _mesh(model, ports, res):
     # ends. The cost is small on a real board, because the copper of a
     # PCB is rectilinear: the zone board of `validation/` has 379 points
     # and gives 10 x lines and 7 y lines.
+    # **Every layer keeps its own edges as well.** The union below makes
+    # the mesh lines, and one line serves every layer. But a FEATURE is
+    # the space between two edges of the SAME copper: an F.Cu edge and a
+    # B.Cu edge that stand close to each other are not a narrow track,
+    # and the union would read them as one. Thus `_feature_lines` takes
+    # one layer at a time.
     poly_x, poly_y = set(), set()
-    for polys in model["polygons"].values():
+    layer_x, layer_y = {}, {}
+    for name, polys in model["polygons"].items():
+        lx = layer_x.setdefault(name, set())
+        ly = layer_y.setdefault(name, set())
         for poly in polys:
             px = [pt[0] for pt in poly]
             py = [pt[1] for pt in poly]
-            poly_x.update((min(px), max(px)))
-            poly_y.update((min(py), max(py)))
+            lx.update((min(px), max(px)))
+            ly.update((min(py), max(py)))
             for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
                 flat_x = abs(x1 - x0) < FLAT_MM
                 flat_y = abs(y1 - y0) < FLAT_MM
                 if flat_x and not flat_y:
-                    poly_x.add(x0)
+                    lx.add(x0)
                 elif flat_y and not flat_x:
-                    poly_y.add(y0)
+                    ly.add(y0)
+        poly_x |= lx
+        poly_y |= ly
     xs |= poly_x
     ys |= poly_y
     for v in model["vias"]:
@@ -704,11 +850,16 @@ def _mesh(model, ports, res):
     # divides already, thus it must see every other line first. And it
     # needs `tol`, because a line that the merge removes again is worse
     # than no line at all.
-    fx, narrow_x = _feature_lines(poly_x, xs, res, tol)
-    fy, narrow_y = _feature_lines(poly_y, ys, res, tol)
-    xs |= fx
-    ys |= fy
-    narrow = narrow_x + narrow_y
+    # One layer at a time, and `xs` / `ys` stay the POOLED lines: a
+    # feature that any rule divides already keeps that line, whichever
+    # layer put it there.
+    narrow = []
+    for name in sorted(layer_x):
+        fx, narrow_x = _feature_lines(layer_x[name], xs, res, tol)
+        fy, narrow_y = _feature_lines(layer_y[name], ys, res, tol)
+        xs |= fx
+        ys |= fy
+        narrow += narrow_x + narrow_y
     if narrow:
         print("[rfsim] WARNING: %d copper feature(s) are narrower than "
               "%.4f mm and keep ONE cell across them; the narrowest is "
@@ -742,11 +893,10 @@ def build(model, excite_idx, res, want_ff=False):
     f0 = 0.5 * (s["f_start"] + s["f_stop"])
     fc = 0.5 * (s["f_stop"] - s["f_start"])
     # A smaller timestep needs more steps for the same simulated time.
-    # Thus the code increases the number of steps by the same ratio.
+    # `_max_timesteps` holds that rule, because `main()` needs the same
+    # number to say how the run ended.
     tsf = _time_step_factor(model)
-    nrts = s["max_timesteps"]
-    if tsf and tsf < 1.0:
-        nrts = int(nrts / tsf)
+    nrts = _max_timesteps(model)
     fdtd = openEMS(NrTS=nrts, EndCriteria=s["end_criteria"])
     if tsf and tsf < 1.0:
         fdtd.SetTimeStepFactor(tsf)
@@ -1133,15 +1283,29 @@ def main(model_path, outdir):
                   flush=True)
         fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
                  numThreads=threads)
+        _report_end(sim_path, _max_timesteps(model), s["end_criteria"])
         bad = _diverged(sim_path)
         if bad:
+            name, cause = bad
             tsf = _time_step_factor(model) or 1.0
+            if cause == "nan":
+                raise SystemExit(
+                    "[rfsim] ERROR: the FDTD run diverged — NaN in %s.\n"
+                    "A lumped inductor is the usual cause: it needs a "
+                    "sub-Courant timestep. This run used time_step_factor "
+                    "%.3g; set a smaller \"time_step_factor\" in the model's "
+                    "settings (e.g. %.3g) and re-run." % (name, tsf, tsf / 2.0))
             raise SystemExit(
-                "[rfsim] ERROR: the FDTD run diverged — NaN in %s.\n"
-                "A lumped inductor is the usual cause: it needs a "
-                "sub-Courant timestep. This run used time_step_factor "
-                "%.3g; set a smaller \"time_step_factor\" in the model's "
-                "settings (e.g. %.3g) and re-run." % (bad, tsf, tsf / 2.0))
+                "[rfsim] ERROR: the FDTD run is not stable — the port data of "
+                "%s ends more than %g times above its own earlier level, thus "
+                "the field grew and did not decay.\n"
+                "The run would still write an S-matrix, and that S-matrix is "
+                "NOT valid: |S11| and |S21| come out flat near 1 over the "
+                "whole sweep, with no NaN in the file.\n"
+                "A shorter timestep does NOT correct this, and this run used "
+                "time_step_factor %.3g. The growth comes from a lumped "
+                "element: take that element out of the model, or give it a "
+                "smaller inductance." % (name, GROWTH_LIMIT, tsf))
         # Read the impedance of the line of the excited port first. The
         # wave of that port is the cleanest, and CalcPort replaces the
         # value some lines below.

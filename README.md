@@ -179,8 +179,10 @@ The package parasitics. A capacitor in shunt to ground makes a notch in |S21| at
 The CPW port and the stripline port against closed-form theory, both the impedance and eps_eff. The eps_eff of a stripline must be exactly εr, thus this is the most exact test here.
 * **`run_zone_holes.py [mesh]`**  
 A filled zone with a void of 8 x 6 mm below the line, against the same board with none. The void must make a large step in S11, which shows that the hole stays open.
-* **`run_stability.py`**  
-The timestep rule for a lumped inductor, on 6 geometries. Each cell gives the margin between the timestep that the plugin selects and the timestep at which the run diverges. About 15 minutes.
+* **`run_feature.py [mesh] [stub width in mm]`**  
+The number of mesh cells across a copper feature that no port covers, against closed-form theory. An open stub is a quarter-wave resonator, thus the notch of |S21| gives its eps_eff, and two stub lengths remove the end effects. Run it with the python of the solver.
+* **`run_stability.py [fast|slow|all]`**  
+The timestep rule for a lumped inductor. `fast` compares the timestep of the plugin against the one at which the run diverges, on 6 geometries, in about 15 minutes. `slow` finds a different failure: a lumped inductor also carries a mode that grows. That stage does not pass at present: a body inductance below 1 nH keeps a margin of 7 times, and 10 nH keeps none.
 * **`test_ports.py`**  
 The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, and the cells near a CPW and a stripline. It needs no KiCad and no solver, thus it takes seconds. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
@@ -196,7 +198,7 @@ The Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
 * **`make_test_board.py`**  
 Makes the microstrip board of `run_headless.py`, and the CPW board and the stripline board of `run_cpw.py`.
 
-`%KIPY% plugins\board_reader.py` is the self-test of the value parser (62 cases).
+`%KIPY% plugins\board_reader.py` is the self-test of the value parser (67 cases).
 
 ## License
 
