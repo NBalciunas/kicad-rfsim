@@ -17,6 +17,7 @@ CSXCAD.
 - Model the R, L and C parts as lumped elements, with the parasitics of the package.
 - Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
+- Export an optional port-focused rectangular subregion instead of the full board.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
 
@@ -56,8 +57,8 @@ CSXCAD.
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog. It shows the ports, the R/L/C parts and the domain, and it follows the "Domain margin" field and the "Model" checkboxes.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
-5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
+4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory. Use the **Subregion** tab to select a port-focused export when the structure under test is local to the selected ports.
+5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory. The runner removes stale `excN` output directories before each run, including read-only Windows reparse points.
 
 ### Ports
 
@@ -93,7 +94,9 @@ The plugin makes a uniform stackup from the values in the dialog. Four presets f
 | Rogers RO4003C | 3.38 | 0.0027 |
 | PTFE | 2.20 | 0.0009 |
 
-The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
+By default, the domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
+
+The **Subregion** tab can instead enable **Export port-focused rectangular subregion**. This uses the bounding box of the selected port pads and expands every side by twice the Domain margin: one margin-width is clear air and the other is the PML absorber. Only copper, vias, and eligible two-terminal R/L/C components that intersect this rectangle are exported. The solver log records the chosen scope, bounds, geometry counts, and R/L/C references. Use full-board mode for antennas, radiating structures, and any analysis where remote board geometry contributes to the result.
 
 ### Accuracy
 
@@ -123,7 +126,9 @@ Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "L
 
 A letter also stands in the place of the decimal point (`4R7` = 4.7 ohm), the unit letter is not necessary, and text after a space (`100nF 10%`) has no effect. "DNP" and the other words for a part that is not there give no value.
 
-**Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
+**Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and selects package-aware fallback ESL and series-loss values from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
+
+The fallback trend is informed by MLCC impedance data available through [KEMET K-SIM](https://ksim.kemet.com/) and [Murata SimSurfing](https://ds.murata.co.jp/simsurfing/en-us/). It is not an MPN-specific manufacturer model: ESR and ESL vary with capacitance, dielectric, voltage rating, DC bias, frequency, termination geometry, and test fixture. RFsim models PCB pads, tracks, and nearby via loops directly, so its table represents body-only ESL; copying a published mounted ESL value would double-count some board inductance. Use the per-component controls to enter values derived from the exact manufacturer part's impedance or S-parameter data.
 
 ## Examples
 
@@ -170,6 +175,8 @@ A filled zone with a void of 8 x 6 mm below the line, against the same board wit
 The timestep rule for a lumped inductor, on 6 geometries. Each cell gives the margin between the timestep that the plugin selects and the timestep at which the run diverges. About 15 minutes.
 * **`test_ports.py`**  
 The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, and the cells near a CPW and a stripline. It needs no KiCad and no solver, thus it takes seconds. Run it with the python of the solver.
+* **`test_subregion.py`**
+The port-focused rectangle and R/L/C filter. It verifies the margin/PML expansion, inclusion of a local component, and exclusion of a remote component. Run it with the Python of KiCad.
 * **`run_headless.py [mesh] [msl|lumped]`**  
 The full path from the board to the Touchstone file. A microstrip of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  

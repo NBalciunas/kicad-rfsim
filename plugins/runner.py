@@ -1118,7 +1118,17 @@ def main(model_path, outdir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: python runner.py model.json output_dir")
-    os.makedirs(sys.argv[2], exist_ok=True)
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == "--geometry":
+        with open(sys.argv[2], encoding="utf-8") as fh:
+            preview_model = json.load(fh)
+        eps_max = max(layer["epsilon"] for layer in preview_model["dielectric_layers"])
+        preview_resolution = C0 / preview_model["settings"]["f_stop"] \
+            / np.sqrt(eps_max) * 1e3 / RES_DIV[preview_model["settings"]["mesh"]]
+        fdtd, _, _ = build(preview_model, 0, preview_resolution, want_ff=False)
+        fdtd.GetCSX().Write2XML(sys.argv[3])
+        print("[rfsim] geometry preview written: %s" % sys.argv[3], flush=True)
+    elif len(sys.argv) == 3:
+        os.makedirs(sys.argv[2], exist_ok=True)
+        main(sys.argv[1], sys.argv[2])
+    else:
+        raise SystemExit("usage: python runner.py [--geometry model.json geometry.xml] | model.json output_dir")

@@ -14,6 +14,62 @@ from . import board_reader, gui, solverenv
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
+def _preview_geometry(board, pads, settings):
+    """Export the current dialog geometry to XML and open AppCSXCAD."""
+    settings = dict(settings)
+    port_types = settings.pop("port_types")
+    port_feed = settings.pop("port_feed")
+    order = settings.pop("order")
+    pads = [p for _, p in sorted(zip(order, pads), key=lambda item: item[0])]
+    port_types = [p for _, p in sorted(zip(order, port_types), key=lambda item: item[0])]
+    port_feed = [p for _, p in sorted(zip(order, port_feed), key=lambda item: item[0])]
+    outdir = settings.pop("outdir")
+    substrate = {key: settings.pop(key) for key in ("er", "tand", "h", "cu_t")}
+    parasitics = settings.pop("lumped_parasitics", None) or {}
+    subregion = bool(settings.pop("port_focused_subregion", False))
+    model = board_reader.extract(board, pads, settings["margin_mm"], substrate,
+                                 full_board=not subregion)
+    for element in model["lumped_elements"]:
+        chosen = parasitics.get(element["ref"])
+        if chosen:
+            element.update(package=chosen["package"], esl=chosen["esl"],
+                           esr=chosen["esr"])
+            if chosen.get("type"):
+                element["type"] = chosen["type"]
+            if chosen.get("value") is not None:
+                element["value"] = chosen["value"]
+    model["lumped_elements"] = [
+        element for element in model["lumped_elements"]
+        if parasitics.get(element["ref"], {}).get("model", True)
+        and element.get("type") and element.get("value") is not None]
+    for port, port_type, feed in zip(model["ports"], port_types, port_feed):
+        port["type"] = port_type
+        if feed and not port["direction"]:
+            port["direction"], port["track_width"] = feed
+            key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y", (0, -1): "-y"}[tuple(port["direction"])]
+            port["gap"] = (port.get("gaps") or {}).get(key)
+            port["copper_run"] = board_reader.copper_run(
+                model["polygons"].get(port["layer"], []), port["x"], port["y"], port["direction"])
+    model["settings"] = settings
+    os.makedirs(outdir, exist_ok=True)
+    model_path = os.path.join(outdir, "geometry_preview_model.json")
+    geometry_path = os.path.join(outdir, "geometry_preview.xml")
+    with open(model_path, "w", encoding="utf-8") as fh:
+        json.dump(model, fh, indent=1)
+    runner = os.path.join(os.path.dirname(__file__), "runner.py")
+    solver_py = solverenv.solver_python() or _kicad_python()
+    cmd = [solver_py, runner, "--geometry", model_path, geometry_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+    if result.returncode:
+        raise RuntimeError(result.stderr or result.stdout or "Geometry export failed.")
+    viewer = next((os.path.join(directory, "AppCSXCAD.exe")
+                   for directory in solverenv.openems_dirs()
+                   if os.path.isfile(os.path.join(directory, "AppCSXCAD.exe"))), None)
+    if viewer is None:
+        raise RuntimeError("AppCSXCAD.exe was not found under OPENEMS_PATH or C:\\openEMS.")
+    subprocess.Popen([viewer, geometry_path], creationflags=NO_WINDOW)
+
+
 def _kicad_python():
     """Give the python.exe of KiCad (sys.executable can be pcbnew.exe)."""
     exe = sys.executable or ""
@@ -104,7 +160,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  preview.get("lumped_elements", []),
                                  preview=preview,
                                  packages=board_reader.package_presets(),
-                                 esr=board_reader.esr_presets())
+                                 esr=board_reader.esr_presets(),
+                                 on_view_geometry=lambda settings: _preview_geometry(
+                                     board, pads, settings))
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return

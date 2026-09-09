@@ -81,6 +81,8 @@ def _port_subregion_text(ports, margin_mm, lumped=()):
     if bounds is None:
         return "No selected ports."
     rx0, rx1, ry0, ry1 = bounds
+    margin = 2.0 * float(margin_mm)
+    x0, x1, y0, y1 = rx0 + margin, rx1 - margin, ry0 + margin, ry1 - margin
     refs = []
     for element in lumped:
         if _element_in_port_subregion(element, ports, margin_mm):
@@ -271,7 +273,7 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None, esr=None):
+                 packages=None, esr=None, on_view_geometry=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
         # {the code of the package: the ESL in H} and {the type of the
         # part: the ESR in ohm}. board_reader keeps both tables, thus
@@ -281,6 +283,7 @@ class SettingsDialog(wx.Dialog):
         self._esr = dict(esr or {})
         self._pkg_values = []
         self.part_rows = []
+        self._on_view_geometry = on_view_geometry
         self._build(ports, default_outdir, lumped, preview)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
@@ -701,6 +704,9 @@ class SettingsDialog(wx.Dialog):
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
         close = wx.Button(self, wx.ID_CANCEL, "Close")
+        view = wx.Button(self, label="View Exported Geometry")
+        load = wx.Button(self, label="Load Settings")
+        save = wx.Button(self, label="Save Settings")
         # The rows must have their size before the dialog takes its own.
         self._fit_rows()
         # **The WHOLE dialog scrolls.** The rows of the parts scrolled
@@ -718,7 +724,7 @@ class SettingsDialog(wx.Dialog):
         body = wx.ScrolledWindow(self, style=wx.VSCROLL)
         body.SetScrollRate(0, 12)
         for child in list(self.GetChildren()):
-            if child is not body and child is not run:
+            if child not in (body, close, load, save, view, run):
                 child.Reparent(body)
         body.SetSizer(top)
         body.FitInside()
@@ -734,6 +740,9 @@ class SettingsDialog(wx.Dialog):
         outer.Add(body, 1, wx.EXPAND)
         actions = wx.BoxSizer(wx.HORIZONTAL)
         actions.Add(close, 0, wx.ALL, 12)
+        actions.Add(load, 0, wx.ALL, 12)
+        actions.Add(save, 0, wx.ALL, 12)
+        actions.Add(view, 0, wx.ALL, 12)
         actions.Add(run, 0, wx.ALL, 12)
         outer.Add(actions, 0, wx.ALIGN_CENTER_HORIZONTAL)
         self.SetSizer(outer)
@@ -743,6 +752,9 @@ class SettingsDialog(wx.Dialog):
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CLOSE, self._on_close)
+        view.Bind(wx.EVT_BUTTON, self._on_view)
+        load.Bind(wx.EVT_BUTTON, self._on_load_settings)
+        save.Bind(wx.EVT_BUTTON, self._on_save_settings)
         # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
         if self._prev_fig is not None:
@@ -789,6 +801,81 @@ class SettingsDialog(wx.Dialog):
 
     def _on_close(self, evt):
         self.EndModal(wx.ID_CANCEL)
+
+    def _on_view(self, evt):
+        if self._on_view_geometry is None:
+            wx.MessageBox("Geometry preview is unavailable.", "RFsim", wx.ICON_ERROR)
+            return
+        try:
+            self._on_view_geometry(self.get_settings())
+        except Exception as exc:
+            wx.MessageBox(str(exc), "RFsim geometry preview", wx.ICON_ERROR)
+
+    def _on_save_settings(self, evt):
+        dlg = wx.FileDialog(self, "Save RFsim settings", wildcard="RFsim settings (*.json)|*.json",
+                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
+        if dlg.ShowModal() == wx.ID_OK:
+            with open(dlg.GetPath(), "w", encoding="utf-8") as fh:
+                json.dump(self.get_settings(), fh, indent=2)
+        dlg.Destroy()
+
+    def _on_load_settings(self, evt):
+        dlg = wx.FileDialog(self, "Load RFsim settings", wildcard="RFsim settings (*.json)|*.json",
+                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+        try:
+            with open(dlg.GetPath(), encoding="utf-8") as fh:
+                saved = json.load(fh)
+            self._apply_settings(saved)
+        except (OSError, ValueError, TypeError) as exc:
+            wx.MessageBox("Could not load settings: %s" % exc, "RFsim", wx.ICON_ERROR)
+        finally:
+            dlg.Destroy()
+
+    def _apply_settings(self, saved):
+        """Apply scalar settings and component choices saved by this dialog."""
+        for ctrl, key, scale in ((self.f_start, "f_start", 1e9),
+                                 (self.f_stop, "f_stop", 1e9),
+                                 (self.f_field, "f_field", 1e9),
+                                 (self.z0, "z0", 1.0), (self.er, "er", 1.0),
+                                 (self.tand, "tand", 1.0), (self.h, "h", 1.0),
+                                 (self.cu_t, "cu_t", 1.0)):
+            if key in saved:
+                ctrl.ChangeValue("%g" % (float(saved[key]) / scale))
+        self.margin.SetValue(float(saved.get("margin_mm", self.margin.GetValue())))
+        self.port_focused_subregion.SetValue(bool(saved.get(
+            "port_focused_subregion", self.port_focused_subregion.GetValue())))
+        self.max_steps.ChangeValue(str(saved.get("max_timesteps", self.max_steps.GetValue())))
+        self.end_crit.ChangeValue("%g" % float(saved.get("end_criteria", self.end_crit.GetValue())))
+        tsf = saved.get("time_step_factor")
+        self.tsf.ChangeValue("" if tsf is None else "%g" % float(tsf))
+        if saved.get("mesh") in MESH_LEVELS:
+            self.mesh.SetSelection(MESH_LEVELS.index(saved["mesh"]))
+        thread = saved.get("threads")
+        self.threads.SetSelection(int(thread) if thread else 0)
+        self.outdir.SetPath(str(saved.get("outdir", self.outdir.GetPath())))
+        saved_parts = saved.get("lumped_parasitics", {})
+        for index, (ref, check, package, esl, esr) in enumerate(self.para_rows):
+            part = saved_parts.get(ref)
+            if not part:
+                continue
+            check.SetValue(bool(part.get("model", check.GetValue())))
+            package_name = part.get("package")
+            if package_name in self._pkg_values:
+                package.SetSelection(self._pkg_values.index(package_name))
+            esl.ChangeValue("%g" % (float(part.get("esl", 0.0)) * 1e9))
+            esr.ChangeValue("%g" % float(part.get("esr", 0.0)))
+            kind = part.get("type")
+            if kind in KIND_ORDER:
+                self.part_rows[index]["kind"].SetSelection(KIND_ORDER.index(kind))
+            value = part.get("value")
+            if value is not None and kind in ENTRY_SCALE:
+                self.part_rows[index]["value"].ChangeValue("%g" % (float(value) / ENTRY_SCALE[kind]))
+        self._on_lumped(None)
+        self._on_subregion_change(wx.CommandEvent())
+        self._redraw_preview()
 
     def _on_subregion_change(self, evt):
         self.subregion_info.SetLabel(_port_subregion_text(

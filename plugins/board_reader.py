@@ -102,6 +102,7 @@ def _parse_value(text, kind):
     if not text:
         return None
     tok = text.strip().split()[0] if text.strip() else ""  # remove " 1%" etc.
+    tok = tok.split("/", 1)[0]  # remove attached voltage/rating suffixes
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -702,13 +703,14 @@ def package_presets():
 
 
 def esr_presets():
-    """Give the body ESR of each type of part, in ohm.
+    """Give the unknown-package series-loss fallback for each part type.
 
     The dialog needs it for a part whose type the USER selects: the ESR
-    comes from the type, in the same way as it does for a part that the
-    refdes describes. The table stays in this module only.
+    comes from the type because an unknown part has no package from which
+    to select a package-specific default. The table stays in this module
+    only.
     """
-    return dict(_ESR_OHM)
+    return dict(_SERIES_LOSS_DEFAULT_OHM)
 
 
 def _package(name):
@@ -1121,6 +1123,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("1M", "R", 1e6), ("50", "R", 50.0), ("4.7 1%", "R", 4.7),
         ("1.2pF", "C", 1.2e-12), ("100nF", "C", 100e-9), ("3n3", "C", 3.3e-9),
         ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
+        ("10uF/", "C", 10e-6), ("10uF/16V", "C", 10e-6),
         ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
         ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
     ]

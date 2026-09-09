@@ -31,6 +31,9 @@ def test_port_bounds_include_the_pml_margin():
     assert bounds is not None
     for actual, expected in zip(bounds, want):
         assert abs(actual - expected) < 1e-9, (bounds, want)
+    text = gui._port_subregion_text(PORTS, 3.5)
+    assert "Port bounds: X 134.43..148.21 mm" in text, text
+    assert "Export bounds: X 127.43..155.21 mm" in text, text
     print("subregion bounds OK")
 
 
