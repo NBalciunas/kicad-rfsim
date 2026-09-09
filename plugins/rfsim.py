@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 import pcbnew
 import wx
@@ -81,6 +82,18 @@ def _kicad_python():
         if os.path.isfile(c):
             return c
     return "python"
+
+
+def _run_output_dir(base_dir):
+    """Create a timestamped result directory without overwriting prior runs."""
+    stamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    candidate = os.path.join(base_dir, stamp)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(base_dir, "%s_%02d" % (stamp, suffix))
+        suffix += 1
+    os.makedirs(candidate)
+    return candidate
 
 
 def _solver_missing(exe):
@@ -182,6 +195,10 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         port_feed = [f for _, f in
                      sorted(zip(order, port_feed), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
+        separate_run_folder = bool(settings.pop("separate_run_folder", True))
+        if separate_run_folder:
+            os.makedirs(outdir, exist_ok=True)
+            outdir = _run_output_dir(outdir)
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
         # The parasitics of each R/L/C part, from the rows of the dialog.
         # They go into the elements below, and not into the settings:
@@ -245,6 +262,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
         model["settings"] = settings
+        model["run_output_dir"] = outdir
 
         os.makedirs(outdir, exist_ok=True)
         model_path = os.path.join(outdir, "model.json")

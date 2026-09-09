@@ -704,6 +704,13 @@ class SettingsDialog(wx.Dialog):
         rg.Add(lim, 0, wx.EXPAND)
         self.outdir = row(rg, "Output directory:", wx.DirPickerCtrl(
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
+        self.separate_run_folder = row(
+            rg, "Output folders:",
+            wx.CheckBox(self, label="Create a separate folder for each run"))
+        self.separate_run_folder.SetValue(True)
+        self.separate_run_folder.SetToolTip(
+            "Write each simulation into a timestamped subfolder so prior "
+            "Touchstone, field, and geometry results are preserved.")
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
         close = wx.Button(self, wx.ID_CANCEL, "Close")
@@ -825,10 +832,25 @@ class SettingsDialog(wx.Dialog):
         if self._on_open_results is None:
             wx.MessageBox("Results viewer is unavailable.", "RFsim", wx.ICON_ERROR)
             return
-        results = sorted(glob.glob(os.path.join(self.outdir.GetPath(), "results.s*p")),
-                         key=os.path.getmtime, reverse=True)
-        result_path = results[0] if results else ""
-        if not result_path:
+        results = sorted(
+            glob.glob(os.path.join(self.outdir.GetPath(), "**", "results.s*p"),
+                      recursive=True),
+            key=os.path.getmtime, reverse=True)
+        result_path = ""
+        choices = [os.path.relpath(path, self.outdir.GetPath()) for path in results]
+        choices.append("Browse...")
+        choice = wx.SingleChoiceDialog(
+            self, "Select a prior RFsim Touchstone result.",
+            "Open Previous Results", choices)
+        browse = False
+        if choice.ShowModal() == wx.ID_OK:
+            selected = choice.GetSelection()
+            if selected < len(results):
+                result_path = results[selected]
+            else:
+                browse = True
+        choice.Destroy()
+        if browse:
             picker = wx.FileDialog(self, "Open RFsim results",
                                    wildcard="Touchstone results (*.s1p;*.s2p;*.s3p;*.s4p)|*.s1p;*.s2p;*.s3p;*.s4p",
                                    style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
@@ -887,6 +909,8 @@ class SettingsDialog(wx.Dialog):
         thread = saved.get("threads")
         self.threads.SetSelection(int(thread) if thread else 0)
         self.outdir.SetPath(str(saved.get("outdir", self.outdir.GetPath())))
+        self.separate_run_folder.SetValue(bool(saved.get(
+            "separate_run_folder", self.separate_run_folder.GetValue())))
         saved_parts = saved.get("lumped_parasitics", {})
         for index, (ref, check, package, esl, esr) in enumerate(self.para_rows):
             part = saved_parts.get(ref)
@@ -1368,6 +1392,7 @@ class SettingsDialog(wx.Dialog):
                       "value": self._part_value(i)}
                 for i, (ref, cb, ch, esl, esr) in enumerate(self.para_rows)},
             "outdir": self.outdir.GetPath(),
+            "separate_run_folder": self.separate_run_folder.GetValue(),
             "n_freq": 401,
             "max_timesteps": int(float(self.max_steps.GetValue())),
             "end_criteria": float(self.end_crit.GetValue()),
