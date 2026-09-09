@@ -7,6 +7,17 @@ of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver. The
 geometry goes from the native board objects of KiCad to the primitives of
 CSXCAD.
 
+See the [RFsim Settings Guide](docs/RFSIM_SETTINGS.md) for a field-by-field
+reference, subregion-boundary practice, output management, and stability
+debugging.
+
+## Versioning
+
+RFsim uses semantic versions: `v1.2.0` in the dialog and `1.2.0` in KiCad
+package metadata. Increment the patch number for a compatible bug fix, the
+minor number for a backward-compatible feature, and the major number only for
+an incompatible behavior or configuration change.
+
 ## Features
 
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.

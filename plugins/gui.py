@@ -277,6 +277,7 @@ class SettingsDialog(wx.Dialog):
                  packages=None, esr=None, on_view_geometry=None,
                  on_open_results=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
+        wx.ToolTip.SetDelay(700)
         # {the code of the package: the ESL in H} and {the type of the
         # part: the ESR in ohm}. board_reader keeps both tables, thus
         # there is one source of truth. This module must not import it:
@@ -292,7 +293,7 @@ class SettingsDialog(wx.Dialog):
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(self, label="RFsim v1.1")
+        title = wx.StaticText(self, label="RFsim v1.2.0")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
@@ -714,6 +715,7 @@ class SettingsDialog(wx.Dialog):
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
         close = wx.Button(self, wx.ID_CANCEL, "Close")
+        help_btn = wx.Button(self, wx.ID_HELP, "Help")
         view = wx.Button(self, label="View Exported Geometry")
         open_results = wx.Button(self, label="Open Previous Results")
         load = wx.Button(self, label="Load Settings")
@@ -735,7 +737,7 @@ class SettingsDialog(wx.Dialog):
         body = wx.ScrolledWindow(self, style=wx.VSCROLL)
         body.SetScrollRate(0, 12)
         for child in list(self.GetChildren()):
-            if child not in (body, close, load, save, view, open_results, run):
+            if child not in (body, close, help_btn, load, save, view, open_results, run):
                 child.Reparent(body)
         body.SetSizer(top)
         body.FitInside()
@@ -751,6 +753,7 @@ class SettingsDialog(wx.Dialog):
         outer.Add(body, 1, wx.EXPAND)
         actions = wx.BoxSizer(wx.HORIZONTAL)
         actions.Add(close, 0, wx.ALL, 12)
+        actions.Add(help_btn, 0, wx.ALL, 12)
         actions.Add(load, 0, wx.ALL, 12)
         actions.Add(save, 0, wx.ALL, 12)
         actions.Add(view, 0, wx.ALL, 12)
@@ -764,7 +767,9 @@ class SettingsDialog(wx.Dialog):
         self._fit_to_screen()
         run.Bind(wx.EVT_BUTTON, self._on_ok)
         close.Bind(wx.EVT_BUTTON, self._on_cancel)
+        help_btn.Bind(wx.EVT_BUTTON, self._open_help)
         self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_help_key)
         view.Bind(wx.EVT_BUTTON, self._on_view)
         open_results.Bind(wx.EVT_BUTTON, self._on_open_previous_results)
         load.Bind(wx.EVT_BUTTON, self._on_load_settings)
@@ -780,6 +785,7 @@ class SettingsDialog(wx.Dialog):
             for _, cb, _, _, _ in self.para_rows:
                 cb.Bind(wx.EVT_CHECKBOX, self._on_lumped)
             self._on_lumped(None)
+        self._set_help_tooltips()
 
     def _add_preview(self, top):
         """Make the thumbnail of the board layout.
@@ -818,6 +824,54 @@ class SettingsDialog(wx.Dialog):
 
     def _on_cancel(self, evt):
         self.EndModal(wx.ID_CANCEL)
+
+    def _open_help(self, evt=None):
+        """Open the local RFsim settings reference in the system viewer."""
+        path = os.path.join(os.path.dirname(__file__), "docs",
+                    "RFSIM_SETTINGS.md")
+        if not os.path.isfile(path):
+            wx.MessageBox("RFsim settings guide was not found:\n%s" % path,
+                          "RFsim", wx.ICON_ERROR)
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                import webbrowser
+                webbrowser.open("file://" + path)
+        except OSError as exc:
+            wx.MessageBox("Could not open RFsim help: %s" % exc,
+                          "RFsim", wx.ICON_ERROR)
+
+    def _on_help_key(self, evt):
+        if evt.GetKeyCode() == wx.WXK_F1:
+            self._open_help()
+            return
+        evt.Skip()
+
+    def _set_help_tooltips(self):
+        """Attach concise field help; F1 opens the full settings reference."""
+        tips = {
+            self.f_start: "Sweep start in GHz. Must be positive and lower than Stop. Press F1 for the settings guide.",
+            self.f_stop: "Sweep stop in GHz. It controls the shortest wavelength used by the mesh. Press F1 for details.",
+            self.f_field: "Frequency in GHz for E/H field dumps and far-field output. It must be within the sweep.",
+            self.z0: "Reference impedance for S-parameters, normally 50 ohm.",
+            self.er: "Relative permittivity of the modeled substrate.",
+            self.tand: "Dielectric loss tangent of the modeled substrate.",
+            self.h: "Total dielectric thickness in mm; set this from the fabrication stackup.",
+            self.cu_t: "Copper thickness in mm used by the conducting-sheet model.",
+            self.threads: "openEMS CPU worker threads. Auto lets RFsim choose.",
+            self.mesh: "Coarse, Medium, Fine correspond to 10, 20, 40 cells per shortest substrate wavelength.",
+            self.margin: "One margin-width forms the PML; an adjacent margin-width is intended clear space around the structure.",
+            self.port_focused_subregion: "Exports only the port-bounds rectangle plus margin. Include the local return path and stitching vias.",
+            self.max_steps: "Maximum FDTD iterations. Increase only for a stable high-Q structure.",
+            self.end_crit: "FDTD energy ratio at which openEMS stops. Smaller values run longer.",
+            self.tsf: "Courant timestep fraction. Leave blank for automatic; try 0.5 or 0.25 for an unstable lumped network.",
+            self.outdir: "Parent folder for simulation runs and saved result files.",
+            self.separate_run_folder: "Creates a timestamped child folder for every run to preserve prior results.",
+        }
+        for control, text in tips.items():
+            control.SetToolTip(text)
 
     def _on_view(self, evt):
         if self._on_view_geometry is None:
@@ -1562,6 +1616,7 @@ class ResultsFrame(wx.Frame):
         import skrf
 
         wx.Frame.__init__(self, parent, title="RFsim", size=(820, 620))
+        self.touchstone_path = os.path.abspath(touchstone_path)
         self.net = skrf.Network(touchstone_path)
         import numpy as np
         plots = ["S-Parameters [Magnitude]", "S-Parameters [Phase]"]
@@ -1641,6 +1696,7 @@ class ResultsFrame(wx.Frame):
         toolbar.Realize()
         save_animation = wx.Button(self, label="Save Field Animation")
         export_paraview = wx.Button(self, label="Export Field for ParaView")
+        compare_results = wx.Button(self, label="Compare Results")
         close = wx.Button(self, wx.ID_CLOSE, "Close")
 
         s = wx.BoxSizer(wx.VERTICAL)
@@ -1650,12 +1706,14 @@ class ResultsFrame(wx.Frame):
         exports = wx.BoxSizer(wx.HORIZONTAL)
         exports.Add(save_animation, 0, wx.ALL, 6)
         exports.Add(export_paraview, 0, wx.ALL, 6)
+        exports.Add(compare_results, 0, wx.ALL, 6)
         exports.Add(close, 0, wx.ALL, 6)
         s.Add(exports, 0, wx.ALIGN_CENTER_HORIZONTAL)
         self.SetSizer(s)
         self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
         save_animation.Bind(wx.EVT_BUTTON, self._save_field_animation)
         export_paraview.Bind(wx.EVT_BUTTON, self._export_field_paraview)
+        compare_results.Bind(wx.EVT_BUTTON, self._compare_results)
         close.Bind(wx.EVT_BUTTON, self._on_close)
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self._plot()
@@ -1676,6 +1734,35 @@ class ResultsFrame(wx.Frame):
         """Give the E/H field selected in the result view, or None."""
         selection = self.choice.GetStringSelection()
         return selection[0] if selection.startswith(("E-Field", "H-Field")) else None
+
+    def _compare_results(self, evt):
+        """Choose two or more Touchstone files and open shared S-parameter plots."""
+        picker = wx.FileDialog(
+            self, "Select two or more RFsim Touchstone results",
+            wildcard="Touchstone results (*.s1p;*.s2p;*.s3p;*.s4p)|*.s1p;*.s2p;*.s3p;*.s4p",
+            defaultDir=self.outdir,
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE)
+        if picker.ShowModal() != wx.ID_OK:
+            picker.Destroy()
+            return
+        paths = [self.touchstone_path] + [
+            path for path in picker.GetPaths()
+            if os.path.abspath(path) != self.touchstone_path]
+        picker.Destroy()
+        if len(paths) < 2:
+            wx.MessageBox("Select one or more additional Touchstone files to "
+                          "compare against the currently open result.",
+                          "RFsim", wx.ICON_INFORMATION)
+            return
+        try:
+            try:
+                from .rfsim_compare import ResultsComparisonFrame
+            except ImportError:  # direct execution outside the plugin package
+                from rfsim_compare import ResultsComparisonFrame
+            ResultsComparisonFrame(self, paths).Show()
+        except Exception as exc:
+            wx.MessageBox("Could not compare results: %s" % exc,
+                          "RFsim", wx.ICON_ERROR)
 
     def _save_field_animation(self, evt):
         """Save the current E/H field phase animation as a GIF."""
