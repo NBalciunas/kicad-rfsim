@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import shutil
+import stat
 import sys
 import warnings
 
@@ -36,6 +37,33 @@ def _show_warning(message, category, filename, lineno, file=None, line=None):
 
 
 warnings.showwarning = _show_warning
+
+
+def _remove_output_path(path):
+    """Remove a prior solver output path, including Windows reparse points."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    is_reparse = bool(getattr(info, "st_file_attributes", 0)
+                      & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    if os.path.isdir(path) and not os.path.islink(path) and not is_reparse:
+        shutil.rmtree(path, onerror=_clear_readonly)
+    else:
+        os.rmdir(path) if stat.S_ISDIR(info.st_mode) else os.unlink(path)
+
+
+def _clear_readonly(func, path, exc_info):
+    """Retry a Windows output removal after clearing its read-only bit."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        raise exc_info[1]
 
 import solverenv  # the directory of this file is sys.path[0] for a script
 
@@ -988,7 +1016,7 @@ def main(model_path, outdir):
     # looks current to the GUI. This occurs with a different set of
     # excited ports, or after a far field that failed.
     for d in glob.glob(os.path.join(outdir, "exc*")):
-        shutil.rmtree(d, ignore_errors=True)
+        _remove_output_path(d)
     for fpath in (glob.glob(os.path.join(outdir, "farfield*.json"))
                   + [os.path.join(outdir, "lines.json")]):
         try:
