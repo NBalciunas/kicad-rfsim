@@ -51,6 +51,30 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
+def _port_subregion_text(ports, margin_mm, lumped=()):
+    """Give the approximate port-bbox export bounds shown in the dialog."""
+    if not ports:
+        return "No selected ports."
+    x0 = min(p["x"] - 0.5 * p["length"] for p in ports)
+    x1 = max(p["x"] + 0.5 * p["length"] for p in ports)
+    y0 = min(p["y"] - 0.5 * p["width"] for p in ports)
+    y1 = max(p["y"] + 0.5 * p["width"] for p in ports)
+    margin = 2.0 * float(margin_mm)
+    rx0, rx1, ry0, ry1 = x0 - margin, x1 + margin, y0 - margin, y1 + margin
+    refs = []
+    for element in lumped:
+        start, stop = element["start"], element["stop"]
+        ex0, ex1 = sorted((start[0], stop[0]))
+        ey0, ey1 = sorted((start[1], stop[1]))
+        if ex1 >= rx0 and ex0 <= rx1 and ey1 >= ry0 and ey0 <= ry1:
+            refs.append(element["ref"])
+    chosen = ", ".join(refs) if refs else "none"
+    return ("Port bounds: X %.2f..%.2f mm, Y %.2f..%.2f mm\n"
+            "Export bounds: X %.2f..%.2f mm, Y %.2f..%.2f mm\n"
+            "R/L/C candidates in export: %s"
+            % (x0, x1, y0, y1, rx0, rx1, ry0, ry1, chosen))
+
+
 # The er and the tan d of each preset. **FR-4 must agree with
 # `board_reader.DEF_EPSILON`**, which is the value that the plugin uses
 # when the board file holds no stackup. The two were 4.2 here and 4.5
@@ -255,6 +279,8 @@ class SettingsDialog(wx.Dialog):
         # _build, because it needs self.margin. If matplotlib fails, the
         # icon replaces the thumbnail.
         self._preview_model = preview
+        self._preview_ports = ports
+        self._preview_lumped = tuple(lumped)
         self._prev_fig = None
         if not self._add_preview(top):
             icon = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
@@ -600,6 +626,24 @@ class SettingsDialog(wx.Dialog):
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+
+        domain_tabs = wx.Notebook(self)
+        subregion_tab = wx.Panel(domain_tabs)
+        subregion_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.port_focused_subregion = wx.CheckBox(
+            subregion_tab, label="Export port-focused rectangular subregion")
+        self.port_focused_subregion.SetValue(False)
+        self.port_focused_subregion.SetToolTip(
+            "Use the selected port-pad bounding box plus the domain margin; "
+            "only intersecting copper, vias, and R/L/C parts are exported.")
+        subregion_sizer.Add(self.port_focused_subregion, 0, wx.ALL, 8)
+        self.subregion_info = wx.StaticText(
+            subregion_tab, label=_port_subregion_text(
+                ports, self.margin.GetValue(), self._preview_lumped))
+        subregion_sizer.Add(self.subregion_info, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        subregion_tab.SetSizer(subregion_sizer)
+        domain_tabs.AddPage(subregion_tab, "Subregion")
+        top.Add(domain_tabs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
         # A structure with a high Q rings for a long time. The run then
         # stops at the step limit before the energy comes down to the end
         # criteria, and the S-parameters are not correct. The two limits
@@ -639,6 +683,7 @@ class SettingsDialog(wx.Dialog):
             self, path=default_outdir, style=wx.DIRP_USE_TEXTCTRL))
 
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
+        close = wx.Button(self, wx.ID_CANCEL, "Close")
         # The rows must have their size before the dialog takes its own.
         self._fit_rows()
         # **The WHOLE dialog scrolls.** The rows of the parts scrolled
@@ -670,19 +715,24 @@ class SettingsDialog(wx.Dialog):
         body.SetInitialSize(content)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(body, 1, wx.EXPAND)
-        outer.Add(run, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        actions.Add(close, 0, wx.ALL, 12)
+        actions.Add(run, 0, wx.ALL, 12)
+        outer.Add(actions, 0, wx.ALIGN_CENTER_HORIZONTAL)
         self.SetSizer(outer)
         self.Fit()
         body.SetMinSize((content.GetWidth(), 120))
         self.SetMinSize((520, 240))
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         # The preview needs self.margin and the rows. Thus draw it
         # last, and keep it in agreement with the two controls.
         if self._prev_fig is not None:
             for evt in (wx.EVT_SPINCTRLDOUBLE, wx.EVT_TEXT):
                 self.margin.Bind(evt, self._on_preview_change)
             self._redraw_preview()
+        self.margin.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_subregion_change)
         if self.para_rows:
             for _, cb, _, _, _ in self.para_rows:
                 cb.Bind(wx.EVT_CHECKBOX, self._on_lumped)
@@ -718,6 +768,15 @@ class SettingsDialog(wx.Dialog):
 
     def _on_preview_change(self, evt):
         self._redraw_preview()
+        evt.Skip()
+
+    def _on_close(self, evt):
+        self.EndModal(wx.ID_CANCEL)
+
+    def _on_subregion_change(self, evt):
+        self.subregion_info.SetLabel(_port_subregion_text(
+            self._preview_ports, self.margin.GetValue(), self._preview_lumped))
+        self.Layout()
         evt.Skip()
 
     def _on_port_number(self, evt):
@@ -1128,6 +1187,7 @@ class SettingsDialog(wx.Dialog):
             "h": float(self.h.GetValue()),
             "cu_t": float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
+            "port_focused_subregion": self.port_focused_subregion.GetValue(),
             # "Auto" is item 0 and it gives None: the runner then reads the
             # cell count and selects the value. Item i gives i threads.
             "threads": self.threads.GetSelection() or None,

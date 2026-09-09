@@ -907,15 +907,16 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm, substrate=None):
+def extract(board, pads, margin_mm, substrate=None, full_board=True):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
-    plus margin_mm. The coordinates are in mm, the y axis points up, and
-    z=0 is at the bottom of the board. If you give `substrate`, it
-    replaces the stackup of the board with a uniform stackup. Its keys
-    are "er", "tand", "h" (the total dielectric thickness in mm) and
-    "cu_t" (in mm).
+    plus margin_mm. Set `full_board` to True for an antenna/full-board
+    simulation, or False to retain only a rectangular port-focused
+    subregion. The coordinates are in mm, the y axis points up, and z=0
+    is at the bottom of the board. If you give `substrate`, it replaces
+    the stackup of the board with a uniform stackup. Its keys are "er",
+    "tand", "h" (the total dielectric thickness in mm) and "cu_t" (in mm).
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
@@ -924,12 +925,9 @@ def extract(board, pads, margin_mm, substrate=None):
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
     for p in pads[1:]:
         region.Merge(p.GetBoundingBox())
-    # Fit the domain to the full board (Edge.Cuts). Before, a domain that
-    # had the size of the pad bbox cut the antennas. ponytail: the domain
-    # is the full board. Use the bbox of the selection again if very large
-    # boards make this operation too slow.
+    port_box = pcbnew.BOX2I(region.GetPosition(), region.GetSize())
     brd = board.GetBoardEdgesBoundingBox()
-    if brd.GetWidth() > 0 and brd.GetHeight() > 0:
+    if full_board and brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
     # Use 2 times the margin: the inner band is clear air and the outer
     # band is the PML absorber. The code crops the copper at the outer
@@ -1077,6 +1075,12 @@ def extract(board, pads, margin_mm, substrate=None):
         "version": MODEL_VERSION,
         # "file", "default" or "dialog": refer to _stackup().
         "stackup_source": stack_src,
+        "subregion": {
+            "enabled": not full_board,
+            "margin_mm": float(margin_mm),
+            "port_bounds": rect_mm(port_box),
+            "export_bounds": rect_mm(region),
+        },
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),

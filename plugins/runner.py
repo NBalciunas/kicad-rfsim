@@ -953,6 +953,20 @@ def main(model_path, outdir):
     if n < 1:
         raise SystemExit("expected at least 1 port, got %d" % n)
 
+    subregion = model.get("subregion", {})
+    scope = "port-focused subregion" if subregion.get("enabled") else "full board"
+    region = model["region"]
+    print("[rfsim] geometry scope: %s" % scope, flush=True)
+    print("[rfsim] export bounds: X %.3f..%.3f mm, Y %.3f..%.3f mm"
+          % (region["x0"], region["x1"], region["y0"], region["y1"]),
+          flush=True)
+    print("[rfsim] exported geometry: copper=%d polygons, vias=%d, RLC=%d"
+          % (sum(len(polys) for polys in model.get("polygons", {}).values()),
+             len(model.get("vias", [])), len(model.get("lumped_elements", []))),
+          flush=True)
+    refs = ", ".join(element["ref"] for element in model.get("lumped_elements", []))
+    print("[rfsim] exported RLC: %s" % (refs or "none"), flush=True)
+
     # A lumped inductor needs openEMS v0.37 or later, which has lumped
     # RLC. An older engine writes "Lumped Element R or C not specified!
     # skipping" and models an open circuit. Thus refuse to run, because

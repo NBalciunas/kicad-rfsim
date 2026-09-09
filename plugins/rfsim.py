@@ -128,8 +128,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         # model.json must hold the values that the solver uses.
         para = settings.pop("lumped_parasitics", None) or {}
 
+        subregion = bool(settings.pop("port_focused_subregion", False))
         model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate)
+                         substrate, full_board=not subregion)
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
