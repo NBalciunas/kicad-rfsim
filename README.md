@@ -60,6 +60,15 @@ CSXCAD.
 4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory. Use the **Subregion** tab to select a port-focused export when the structure under test is local to the selected ports.
 5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory. The runner removes stale `excN` output directories before each run, including read-only Windows reparse points.
 
+The result window can reopen prior Touchstone data, save the selected E/H field as a GIF animation, or export that field for ParaView. The standalone `plugins/rfsim_viewer.py` provides the same exports outside KiCad:
+
+```bat
+"C:\Program Files\KiCad\10.0\bin\python.exe" plugins\rfsim_viewer.py --save-animation rfsim_results --field E
+C:\openEMS\venv\Scripts\python.exe plugins\rfsim_viewer.py --export-paraview rfsim_results --field E --open-paraview
+```
+
+ParaView opens the resulting `.xdmf` file, which refers to an adjacent HDF5 file with the real and imaginary vector components of the selected field.
+
 ### Ports
 
 **A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** It is not at the edge of the board. The box covers the whole pad in x and y, and the whole substrate in z.

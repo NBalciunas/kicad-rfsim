@@ -15,6 +15,7 @@ import wx
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine"]
+_FDTD_DIVERGENCE_RE = re.compile(r"Energy:\s*~?\s*[+-]?\s*(?:nan|inf)", re.I)
 # The rows of the R/L/C parts that the dialog shows without a scroll.
 # Each row is about 29 px tall, and the dialog is already 1053 px tall
 # with one part on a screen of 1920x1080.
@@ -273,7 +274,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None, esr=None, on_view_geometry=None):
+                 packages=None, esr=None, on_view_geometry=None,
+                 on_open_results=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
         # {the code of the package: the ESL in H} and {the type of the
         # part: the ESR in ohm}. board_reader keeps both tables, thus
@@ -284,6 +286,7 @@ class SettingsDialog(wx.Dialog):
         self._pkg_values = []
         self.part_rows = []
         self._on_view_geometry = on_view_geometry
+        self._on_open_results = on_open_results
         self._build(ports, default_outdir, lumped, preview)
 
     def _build(self, ports, default_outdir, lumped, preview=None):
@@ -705,6 +708,7 @@ class SettingsDialog(wx.Dialog):
         run = wx.Button(self, wx.ID_OK, "Run Simulation")
         close = wx.Button(self, wx.ID_CANCEL, "Close")
         view = wx.Button(self, label="View Exported Geometry")
+        open_results = wx.Button(self, label="Open Previous Results")
         load = wx.Button(self, label="Load Settings")
         save = wx.Button(self, label="Save Settings")
         # The rows must have their size before the dialog takes its own.
@@ -724,7 +728,7 @@ class SettingsDialog(wx.Dialog):
         body = wx.ScrolledWindow(self, style=wx.VSCROLL)
         body.SetScrollRate(0, 12)
         for child in list(self.GetChildren()):
-            if child not in (body, close, load, save, view, run):
+            if child not in (body, close, load, save, view, open_results, run):
                 child.Reparent(body)
         body.SetSizer(top)
         body.FitInside()
@@ -743,6 +747,7 @@ class SettingsDialog(wx.Dialog):
         actions.Add(load, 0, wx.ALL, 12)
         actions.Add(save, 0, wx.ALL, 12)
         actions.Add(view, 0, wx.ALL, 12)
+        actions.Add(open_results, 0, wx.ALL, 12)
         actions.Add(run, 0, wx.ALL, 12)
         outer.Add(actions, 0, wx.ALIGN_CENTER_HORIZONTAL)
         self.SetSizer(outer)
@@ -750,9 +755,11 @@ class SettingsDialog(wx.Dialog):
         body.SetMinSize((content.GetWidth(), 120))
         self.SetMinSize((520, 240))
         self._fit_to_screen()
-        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        run.Bind(wx.EVT_BUTTON, self._on_ok)
+        close.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.Bind(wx.EVT_CLOSE, self._on_close)
         view.Bind(wx.EVT_BUTTON, self._on_view)
+        open_results.Bind(wx.EVT_BUTTON, self._on_open_previous_results)
         load.Bind(wx.EVT_BUTTON, self._on_load_settings)
         save.Bind(wx.EVT_BUTTON, self._on_save_settings)
         # The preview needs self.margin and the rows. Thus draw it
@@ -802,6 +809,9 @@ class SettingsDialog(wx.Dialog):
     def _on_close(self, evt):
         self.EndModal(wx.ID_CANCEL)
 
+    def _on_cancel(self, evt):
+        self.EndModal(wx.ID_CANCEL)
+
     def _on_view(self, evt):
         if self._on_view_geometry is None:
             wx.MessageBox("Geometry preview is unavailable.", "RFsim", wx.ICON_ERROR)
@@ -810,6 +820,27 @@ class SettingsDialog(wx.Dialog):
             self._on_view_geometry(self.get_settings())
         except Exception as exc:
             wx.MessageBox(str(exc), "RFsim geometry preview", wx.ICON_ERROR)
+
+    def _on_open_previous_results(self, evt):
+        if self._on_open_results is None:
+            wx.MessageBox("Results viewer is unavailable.", "RFsim", wx.ICON_ERROR)
+            return
+        results = sorted(glob.glob(os.path.join(self.outdir.GetPath(), "results.s*p")),
+                         key=os.path.getmtime, reverse=True)
+        result_path = results[0] if results else ""
+        if not result_path:
+            picker = wx.FileDialog(self, "Open RFsim results",
+                                   wildcard="Touchstone results (*.s1p;*.s2p;*.s3p;*.s4p)|*.s1p;*.s2p;*.s3p;*.s4p",
+                                   style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+            if picker.ShowModal() == wx.ID_OK:
+                result_path = picker.GetPath()
+            picker.Destroy()
+        if not result_path:
+            return
+        try:
+            self._on_open_results(result_path)
+        except Exception as exc:
+            wx.MessageBox("Could not open results: %s" % exc, "RFsim", wx.ICON_ERROR)
 
     def _on_save_settings(self, evt):
         dlg = wx.FileDialog(self, "Save RFsim settings", wildcard="RFsim settings (*.json)|*.json",
@@ -1359,6 +1390,8 @@ class RunDialog(wx.Dialog):
         self.log.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE,
                                  wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         self.btn = wx.Button(self, wx.ID_CANCEL, "Cancel")
+        self._output_tail = ""
+        self._stopped_for_divergence = False
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(self.log, 1, wx.ALL | wx.EXPAND, 8)
         s.Add(self.btn, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
@@ -1369,6 +1402,7 @@ class RunDialog(wx.Dialog):
                                      stderr=subprocess.STDOUT,
                                      creationflags=flags)
         self.Bind(wx.EVT_BUTTON, self._on_cancel, id=wx.ID_CANCEL)
+        self.Bind(wx.EVT_CLOSE, self._on_cancel)
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -1379,6 +1413,12 @@ class RunDialog(wx.Dialog):
                 break
             text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
             wx.CallAfter(self._append, text.replace("\r", "\n"))
+            output = self._output_tail + text
+            self._output_tail = output[-128:]
+            if not self._stopped_for_divergence and _FDTD_DIVERGENCE_RE.search(output):
+                self._stopped_for_divergence = True
+                wx.CallAfter(self._stop_diverged_run)
+                break
         rc = self.proc.wait()
         wx.CallAfter(self._done, rc)
 
@@ -1388,16 +1428,35 @@ class RunDialog(wx.Dialog):
     def _done(self, rc):
         if not self:
             return
+        if self._stopped_for_divergence:
+            self.btn.SetLabel("Close")
+            return
         if rc == 0:
             self.EndModal(wx.ID_OK)
         else:
             self._append("\n*** solver failed (exit code %s) ***\n" % rc)
             self.btn.SetLabel("Close")
 
+    def _stop_diverged_run(self):
+        """Stop an invalid FDTD run as soon as openEMS reports NaN/Inf energy."""
+        if not self:
+            return
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self._append(
+            "\n\n*** FDTD DIVERGENCE DETECTED: solver stopped ***\n"
+            "openEMS reported non-finite field energy (NaN or Inf), so any "
+            "result from this run is invalid.\n"
+            "Try the copper-and-port baseline with all R/L/C models disabled. "
+            "If that is stable, enable one local R/L/C component at a time. "
+            "For a remaining unstable element, use a smaller timestep factor "
+            "such as 0.25 and verify its pad/return geometry.\n")
+        self.btn.SetLabel("Close")
+
     def _on_cancel(self, evt):
         if self.proc.poll() is None:
             self.proc.kill()
-        evt.Skip()
+        self.EndModal(wx.ID_CANCEL)
 
 
 def _load_field(h5_path):
@@ -1555,19 +1614,84 @@ class ResultsFrame(wx.Frame):
         self.canvas.SetMinSize((320, 240))
         toolbar = NavigationToolbar2WxAgg(self.canvas)
         toolbar.Realize()
+        save_animation = wx.Button(self, label="Save Field Animation")
+        export_paraview = wx.Button(self, label="Export Field for ParaView")
+        close = wx.Button(self, wx.ID_CLOSE, "Close")
 
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(self.choice, 0, wx.ALL, 6)
         s.Add(self.canvas, 1, wx.EXPAND)
         s.Add(toolbar, 0, wx.EXPAND)
+        exports = wx.BoxSizer(wx.HORIZONTAL)
+        exports.Add(save_animation, 0, wx.ALL, 6)
+        exports.Add(export_paraview, 0, wx.ALL, 6)
+        exports.Add(close, 0, wx.ALL, 6)
+        s.Add(exports, 0, wx.ALIGN_CENTER_HORIZONTAL)
         self.SetSizer(s)
         self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
+        save_animation.Bind(wx.EVT_BUTTON, self._save_field_animation)
+        export_paraview.Bind(wx.EVT_BUTTON, self._export_field_paraview)
+        close.Bind(wx.EVT_BUTTON, self._on_close)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         self._plot()
         # The canvas takes the size from the sizer only after a size
         # event. Without this call, the figure paints at its native size
         # and the label of the bottom axis stays clipped until the user
         # changes the size of the window. the window
         wx.CallAfter(self.SendSizeEvent)
+
+    def _on_close(self, evt):
+        """Stop field animation before closing the standalone result frame."""
+        if self._anim:
+            self._anim.event_source.stop()
+            self._anim = None
+        self.Destroy()
+
+    def _selected_field_kind(self):
+        """Give the E/H field selected in the result view, or None."""
+        selection = self.choice.GetStringSelection()
+        return selection[0] if selection.startswith(("E-Field", "H-Field")) else None
+
+    def _save_field_animation(self, evt):
+        """Save the current E/H field phase animation as a GIF."""
+        kind = self._selected_field_kind()
+        if kind is None:
+            wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
+                          wx.ICON_INFORMATION)
+            return
+        from rfsim_viewer import save_animation
+        picker = wx.FileDialog(self, "Save RFsim field animation",
+                               wildcard="GIF animation (*.gif)|*.gif",
+                               defaultDir=self.outdir,
+                               defaultFile="%s_field.gif" % kind,
+                               style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
+        if picker.ShowModal() == wx.ID_OK:
+            try:
+                path = save_animation(self.outdir, kind, picker.GetPath())
+                wx.MessageBox("Animation saved:\n%s" % path, "RFsim", wx.ICON_INFORMATION)
+            except Exception as exc:
+                wx.MessageBox("Could not save animation: %s" % exc, "RFsim", wx.ICON_ERROR)
+        picker.Destroy()
+
+    def _export_field_paraview(self, evt):
+        """Write the current E/H field as XDMF/HDF5 and open it in ParaView."""
+        kind = self._selected_field_kind()
+        if kind is None:
+            wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
+                          wx.ICON_INFORMATION)
+            return
+        from rfsim_viewer import export_paraview
+        try:
+            xdmf_path = export_paraview(self.outdir, kind)
+            viewer = r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe"
+            if os.path.isfile(viewer):
+                subprocess.Popen([viewer, xdmf_path])
+            else:
+                wx.MessageBox("ParaView export written:\n%s" % xdmf_path,
+                              "RFsim", wx.ICON_INFORMATION)
+        except Exception as exc:
+            wx.MessageBox("Could not export ParaView data: %s" % exc,
+                          "RFsim", wx.ICON_ERROR)
 
     def _plot(self):
         import numpy as np

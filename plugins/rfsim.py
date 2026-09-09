@@ -162,7 +162,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  packages=board_reader.package_presets(),
                                  esr=board_reader.esr_presets(),
                                  on_view_geometry=lambda settings: _preview_geometry(
-                                     board, pads, settings))
+                                     board, pads, settings),
+                                 on_open_results=lambda path: gui.ResultsFrame(
+                                     None, path).Show())
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
