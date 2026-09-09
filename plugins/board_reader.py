@@ -40,17 +40,36 @@ _PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
-# The body ESL of a chip part with 2 terminals, in nH, against the code of
-# the imperial package. These values are for the BODY only. They are
-# smaller than the "mounted ESL" of a datasheet, because the FDTD model
-# already contains the loop of the pads and the tracks: that copper is in
-# the mesh. If you add the mounted value, you count the loop two times.
-_ESL_NH = {"0201": 0.20, "0402": 0.25, "0603": 0.35, "0805": 0.45,
-           "1206": 0.60, "1210": 0.70, "2010": 0.80, "2512": 0.90}
-_ESL_DEFAULT_NH = 0.40  # a part whose package the code cannot read
-# The series loss of the body: the ESR of a capacitor and the DCR of an
-# inductor. A resistor gives its own value, thus it has no entry.
-_ESR_OHM = {"C": 0.03, "L": 0.10}
+# The body ESL of a two-terminal chip, in nH, against its imperial size.
+# These are body-only estimates: the FDTD model already includes the pads,
+# tracks, and nearby via loop, so using a manufacturer *mounted* ESL here
+# would double-count board inductance. The trend is consistent with MLCC
+# impedance data from KEMET K-SIM (https://ksim.kemet.com/) and Murata
+# SimSurfing (https://ds.murata.co.jp/simsurfing/en-us/): a larger terminal
+# separation has higher inductance. Neither source supplies one universal
+# value per package; their impedance/S-parameter curves are specific to the
+# exact MPN, capacitance, dielectric, voltage rating, and test fixture.
+# These numbers are therefore trend-derived body-only fallbacks, not copied
+# KEMET or Murata specifications. Exact ESL remains a per-part override in
+# the dialog.
+_ESL_NH = {"0201": 0.15, "0402": 0.25, "0603": 0.35, "0805": 0.50,
+         "1206": 0.70, "1210": 0.80, "2010": 1.00, "2512": 1.20}
+_ESL_DEFAULT_NH = 0.50  # a part whose package the code cannot read
+
+# Nominal series loss in ohm by type and package. MLCC ESR depends on the
+# exact capacitance, dielectric, DC bias, frequency, and termination style;
+# inductor DCR also depends strongly on inductance and construction. These
+# values follow the package trends visible in KEMET K-SIM and Murata
+# SimSurfing, but are only stable fallback values for the dialog, not part
+# specifications. Enter manufacturer impedance/S-parameter-derived ESR and
+# ESL in the per-component controls when the exact MPN is known.
+_SERIES_LOSS_OHM = {
+    "C": {"0201": 0.050, "0402": 0.035, "0603": 0.025, "0805": 0.020,
+        "1206": 0.015, "1210": 0.012, "2010": 0.010, "2512": 0.010},
+    "L": {"0201": 0.150, "0402": 0.120, "0603": 0.100, "0805": 0.080,
+        "1206": 0.060, "1210": 0.050, "2010": 0.040, "2512": 0.030},
+}
+_SERIES_LOSS_DEFAULT_OHM = {"C": 0.030, "L": 0.100}
 # KiCad puts the imperial code first: "R_0402_1005Metric". Thus the first
 # match is the correct one. The tests for a digit on each side prevent a
 # match inside the metric code.
@@ -731,7 +750,9 @@ def _parasitics(fp, kind):
         name = None
     pkg, warn = _package(name)
     esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
-    return pkg, esl, _ESR_OHM.get(kind, 0.0), warn
+    loss = _SERIES_LOSS_OHM.get(kind, {}).get(
+        pkg, _SERIES_LOSS_DEFAULT_OHM.get(kind, 0.0))
+    return pkg, esl, loss, warn
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):

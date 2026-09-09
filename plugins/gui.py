@@ -51,22 +51,39 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
-def _port_subregion_text(ports, margin_mm, lumped=()):
-    """Give the approximate port-bbox export bounds shown in the dialog."""
+def _port_subregion_bounds(ports, margin_mm):
+    """Give the rectangular export bounds derived from the selected ports."""
     if not ports:
-        return "No selected ports."
+        return None
     x0 = min(p["x"] - 0.5 * p["length"] for p in ports)
     x1 = max(p["x"] + 0.5 * p["length"] for p in ports)
     y0 = min(p["y"] - 0.5 * p["width"] for p in ports)
     y1 = max(p["y"] + 0.5 * p["width"] for p in ports)
     margin = 2.0 * float(margin_mm)
-    rx0, rx1, ry0, ry1 = x0 - margin, x1 + margin, y0 - margin, y1 + margin
+    return x0 - margin, x1 + margin, y0 - margin, y1 + margin
+
+
+def _element_in_port_subregion(element, ports, margin_mm):
+    """Tell whether a lumped-element box intersects the port subregion."""
+    bounds = _port_subregion_bounds(ports, margin_mm)
+    if bounds is None:
+        return False
+    rx0, rx1, ry0, ry1 = bounds
+    start, stop = element["start"], element["stop"]
+    ex0, ex1 = sorted((start[0], stop[0]))
+    ey0, ey1 = sorted((start[1], stop[1]))
+    return ex1 >= rx0 and ex0 <= rx1 and ey1 >= ry0 and ey0 <= ry1
+
+
+def _port_subregion_text(ports, margin_mm, lumped=()):
+    """Give the approximate port-bbox export bounds shown in the dialog."""
+    bounds = _port_subregion_bounds(ports, margin_mm)
+    if bounds is None:
+        return "No selected ports."
+    rx0, rx1, ry0, ry1 = bounds
     refs = []
     for element in lumped:
-        start, stop = element["start"], element["stop"]
-        ex0, ex1 = sorted((start[0], stop[0]))
-        ey0, ey1 = sorted((start[1], stop[1]))
-        if ex1 >= rx0 and ex0 <= rx1 and ey1 >= ry0 and ey0 <= ry1:
+        if _element_in_port_subregion(element, ports, margin_mm):
             refs.append(element["ref"])
     chosen = ", ".join(refs) if refs else "none"
     return ("Port bounds: X %.2f..%.2f mm, Y %.2f..%.2f mm\n"
@@ -1015,6 +1032,11 @@ class SettingsDialog(wx.Dialog):
         # the user turned that part on and gave it nothing.
         for i, r in enumerate(self.part_rows):
             if not self.para_rows[i][1].GetValue():
+                continue
+            if (self.port_focused_subregion.GetValue()
+                    and not _element_in_port_subregion(
+                        self._preview_lumped[i], self._preview_ports,
+                        self.margin.GetValue())):
                 continue
             if self._kind_of(i) is None:
                 wx.MessageBox(
