@@ -83,8 +83,7 @@ def check_openems_version():
     """Verify that openEMS supports CPW and StripLine port methods.
     
     Raises:
-        RuntimeError: If openEMS is too old (v0.0.36 or earlier) and lacks
-                     AddCPWPort() and AddStripLinePort() methods.
+        RuntimeError: If openEMS lacks AddCPWPort() and AddStripLinePort() methods.
     """
     try:
         from openEMS import openEMS as openEMS_cls
@@ -94,23 +93,28 @@ def check_openems_version():
         
         if not (has_cpw and has_stripline):
             raise RuntimeError(
-                "[rfsim] ERROR: openEMS v0.0.36 or earlier detected.\n"
+                "[rfsim] ERROR: This openEMS installation lacks AddCPWPort() "
+                "and AddStripLinePort().\n"
                 "\n"
-                "Your openEMS installation is too old. This RFSim version\n"
-                "requires openEMS v0.37.0-rc1 or later, which includes\n"
-                "native AddCPWPort() and AddStripLinePort() methods.\n"
-                "\n"
-                "To upgrade:\n"
-                "  1. Download openEMS v0.37.0-rc2 (or later) from:\n"
-                "     https://github.com/thliebig/openEMS-Project/releases\n"
-                "  2. Extract to C:\\openEMS (or your OPENEMS_PATH)\n"
-                "  3. Run: py -3.14 -m venv C:\\openEMS\\venv\n"
-                "  4. Run: C:\\openEMS\\venv\\Scripts\\python.exe -m pip install\n"
-                "          --find-links C:\\openEMS\\python csxcad openems\n"
-                "  5. Restart KiCad\n"
-                "\n"
-                "Available port methods in current installation:\n"
+                "RFSim v1.2+ requires openEMS with native port methods for\n"
+                "CPW and StripLine traces. Current version only supports:\n"
                 f"  {[m for m in dir(fdtd_test) if 'Port' in m]}\n"
+                "\n"
+                "RECOMMENDED: Install openEMS v0.37.0-rc2 (latest, 2 days old)\n"
+                "  Download: https://github.com/thliebig/openEMS-Project/releases/tag/v0.37.0-rc2\n"
+                "\n"
+                "ALTERNATIVE: Install stable v0.0.36-93 (October 2025, may have\n"
+                "limited port support)\n"
+                "  Download: https://github.com/thliebig/openEMS-Project/releases/tag/v0.0.36-93\n"
+                "\n"
+                "Installation instructions:\n"
+                "  1. Extract to C:\\openEMS (or your OPENEMS_PATH)\n"
+                "  2. Run: py -3.14 -m venv C:\\openEMS\\venv\n"
+                "  3. Run: C:\\openEMS\\venv\\Scripts\\python.exe -m pip install\n"
+                "          --find-links C:\\openEMS\\python csxcad openems\n"
+                "  4. Restart KiCad\n"
+                "\n"
+                "See: https://docs.openems.de/python/install.html#windows\n"
             )
     except ImportError as e:
         raise RuntimeError(f"[rfsim] ERROR: Cannot import openEMS: {e}")
