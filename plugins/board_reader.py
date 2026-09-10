@@ -538,34 +538,45 @@ def _coplanar_gap(polys, x, y, direction):
     line, and the second hit is the edge of the copper on the other side
     of the gap. The result is the median of the measurements, in mm.
 
-    The function gives None if the copper is not on the two sides, or if
-    it is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+    Gives (gap, asymmetry). asymmetry follows the same |a-b|/(a+b) rule
+    as a stripline's plane asymmetry, comparing the median gap of each
+    side. Both are None if the copper is not on the two sides, or if a
+    gap is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
     """
     if not direction or not polys:
-        return None
+        return None, None
     axis = 1 if direction[0] else 0  # the ray goes across the feed line
     dx, dy = direction
     # Take samples along the line and not at the pad. A pad is often wider
     # than the line. A sample that is not on copper (the line stops before
     # that point) gives an even number of hits, and the code ignores it.
-    gaps = []
+    sides = ([], [])  # index 0 = sign +1, index 1 = sign -1
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
         pair = []
-        for sign in (1, -1):
+        for sign, bucket in zip((1, -1), sides):
             hits = _ray_hits(px, py, axis, sign, polys)
             if len(hits) % 2 == 0:  # the start point is not on copper
                 break
             if len(hits) < 2 or hits[1] - hits[0] > MAX_CPW_GAP:
                 break  # no copper at the side of the line: not a CPW
-            pair.append(hits[1] - hits[0])
+            pair.append((bucket, hits[1] - hits[0]))
         if len(pair) == 2:
-            gaps += pair
+            for bucket, g in pair:
+                bucket.append(g)
+    gaps = sides[0] + sides[1]
     if len(gaps) < 4:  # 2 sides at 2 positions or more
-        return None
+        return None, None
     gaps.sort()
     n = len(gaps)
-    return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+    gap = round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+    asym = None
+    if len(sides[0]) >= 2 and len(sides[1]) >= 2:
+        g0 = sorted(sides[0])[len(sides[0]) // 2]
+        g1 = sorted(sides[1])[len(sides[1]) // 2]
+        if g0 + g1 > 0:
+            asym = round(abs(g0 - g1) / (g0 + g1), 4)
+    return gap, asym
 
 
 def copper_along(polys, x, y, direction):
@@ -873,7 +884,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     return elements, warnings
 
 
-def _port(board, pad, number, copper_layers):
+def _port(board, pad, number, copper_layers, polygons):
     layer_name = _pad_layer(pad)
     names = [c["name"] for c in copper_layers]
     if layer_name not in names:
@@ -882,7 +893,16 @@ def _port(board, pad, number, copper_layers):
     idx = names.index(layer_name)
     if len(names) < 2:
         raise ValueError("Board needs at least 2 copper layers (signal + reference)")
-    ref = names[idx - 1] if idx == len(names) - 1 else names[idx + 1]
+    # Prefer the adjacent layer that has ground copper under the pad. The
+    # old rule always picked the layer toward B.Cu, which is wrong when
+    # THAT layer is an unrelated signal with no copper here and the real
+    # return plane is the layer toward F.Cu instead.
+    down = names[idx + 1] if idx < len(names) - 1 else None
+    up = names[idx - 1] if idx > 0 else None
+    box = _pad_box(pad)
+    down_ok = down is not None and _touches(polygons.get(down, []), box)
+    up_ok = up is not None and _touches(polygons.get(up, []), box)
+    ref = up if (up_ok and not down_ok) else (down if down is not None else up)
 
     # A stripline needs a plane above the strip and a plane below it. Thus
     # the port must be on an inner layer. openEMS puts the voltage probes
@@ -1013,13 +1033,15 @@ def extract(board, pads, margin_mm, substrate=None, full_board=True):
                 "z1": z_of.get(top, copper_layers[0]["z"]),
             })
 
-    ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    ports = [_port(board, p, i + 1, copper_layers, polygons)
+             for i, p in enumerate(pads)]
     # Measure the coplanar gap of each port. The copper of the layer must
     # exist first, thus this operation comes after the extraction of the
     # polygons. A port that has a gap can use a CPW port.
     for p, pad in zip(ports, pads):
         polys_l = polygons.get(p["layer"], [])
-        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        p["gap"], p["gap_asymmetry"] = _coplanar_gap(polys_l, p["x"], p["y"],
+                                                      p["direction"])
         # How far the copper runs from the pad along the feed. The
         # runner caps the length of a de-embedded port with it: refer to
         # `copper_run` and to problem 13. None means "further than the
@@ -1042,7 +1064,7 @@ def extract(board, pads, margin_mm, substrate=None, full_board=True):
             # The gap of each candidate direction, for the manual feed
             # of the dialog. A drawn CPW has no track, and the dialog
             # offers the CPW type only for a direction that has a gap.
-            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
+            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)[0]
                          for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
         if p["height"] and p["asymmetry"] > 0.25:
@@ -1052,6 +1074,12 @@ def extract(board, pads, margin_mm, substrate=None, full_board=True):
                 "its reference plane is approximate."
                 % (p["number"], p["label"], p["ref_layer2"], p["ref_layer"],
                    100.0 * p["asymmetry"]))
+        if p["gap_asymmetry"] and p["gap_asymmetry"] > 0.25:
+            warnings.append(
+                "Port %d (%s): the coplanar gap is not symmetric (%.0f%% "
+                "off between the two sides). A Coplanar (CPW) port models "
+                "a centered gap, so its ground return is approximate."
+                % (p["number"], p["label"], 100.0 * p["gap_asymmetry"]))
     # A port needs a ground return: copper on the reference layer that
     # touches any part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
@@ -1155,10 +1183,15 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("no track", _CPW, None, None),
     ]
     for _name, _polys, _dir, _want in _GEO:
-        _got = _coplanar_gap(_polys, 0.0, 0.0, _dir)
+        _got, _ = _coplanar_gap(_polys, 0.0, 0.0, _dir)
         _ok = (_want is None and _got is None) or (
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
+    # An asymmetric CPW: 0.2 mm at +y, 0.5 mm at -y.
+    _gap, _asym = _coplanar_gap(
+        [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -1.0, 20.0, -3.0)],
+        0.0, 0.0, [1, 0])
+    assert _asym is not None and _asym > 0.25, "asymmetric CPW not flagged"
     # A ray that goes exactly through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
     # The copper test for a manual feed direction: the strip goes to +x
