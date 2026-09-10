@@ -78,6 +78,44 @@ if os.name == "nt":
 
 import numpy as np
 
+# openEMS version checking
+def check_openems_version():
+    """Verify that openEMS supports CPW and StripLine port methods.
+    
+    Raises:
+        RuntimeError: If openEMS is too old (v0.0.36 or earlier) and lacks
+                     AddCPWPort() and AddStripLinePort() methods.
+    """
+    try:
+        from openEMS import openEMS as openEMS_cls
+        fdtd_test = openEMS_cls()
+        has_cpw = hasattr(fdtd_test, 'AddCPWPort')
+        has_stripline = hasattr(fdtd_test, 'AddStripLinePort')
+        
+        if not (has_cpw and has_stripline):
+            raise RuntimeError(
+                "[rfsim] ERROR: openEMS v0.0.36 or earlier detected.\n"
+                "\n"
+                "Your openEMS installation is too old. This RFSim version\n"
+                "requires openEMS v0.37.0-rc1 or later, which includes\n"
+                "native AddCPWPort() and AddStripLinePort() methods.\n"
+                "\n"
+                "To upgrade:\n"
+                "  1. Download openEMS v0.37.0-rc2 (or later) from:\n"
+                "     https://github.com/thliebig/openEMS-Project/releases\n"
+                "  2. Extract to C:\\openEMS (or your OPENEMS_PATH)\n"
+                "  3. Run: py -3.14 -m venv C:\\openEMS\\venv\n"
+                "  4. Run: C:\\openEMS\\venv\\Scripts\\python.exe -m pip install\n"
+                "          --find-links C:\\openEMS\\python csxcad openems\n"
+                "  5. Restart KiCad\n"
+                "\n"
+                "Available port methods in current installation:\n"
+                f"  {[m for m in dir(fdtd_test) if 'Port' in m]}\n"
+            )
+    except ImportError as e:
+        raise RuntimeError(f"[rfsim] ERROR: Cannot import openEMS: {e}")
+
+
 C0 = 299792458.0
 EPS0 = 8.8541878128e-12
 RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}  # cells per wavelength
@@ -633,6 +671,7 @@ def build(model, excite_idx, res, want_ff=False):
     try:
         from CSXCAD import ContinuousStructure
         from openEMS import openEMS
+        check_openems_version()  # Verify CPW and StripLine support
     except ImportError as e:
         if "Application Control policy" not in str(e):
             raise
@@ -771,15 +810,11 @@ def build(model, excite_idx, res, want_ff=False):
             if g["type"] == "msl":
                 ports.append(fdtd.AddMSLPort(*args, **kw))
             elif g["type"] == "cpw":
-                # AddCPWPort not available in this openEMS version; use MSL as fallback
-                ports.append(fdtd.AddMSLPort(*args, **kw))
-                note = ", gap %.3f mm (CPW as MSL)" % g["gap"]
+                ports.append(fdtd.AddCPWPort(*args, g["gap"], **kw))
+                note = ", gap %.3f mm" % g["gap"]
             else:
-                # AddStripLinePort not available; use lumped port as fallback
-                ports.append(fdtd.AddLumpedPort(
-                    g["number"], s["z0"], g["start"], g["stop"], "z",
-                    excite=1.0 if excite else 0, priority=20))
-                note = ", %.3f mm to each plane (StripLine as lumped)" % g["height"]
+                ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
+                note = ", %.3f mm to each plane" % g["height"]
             note = "dir " + g["prop_dir"] + note
         else:
             ports.append(fdtd.AddLumpedPort(
