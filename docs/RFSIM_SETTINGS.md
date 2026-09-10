@@ -2,6 +2,19 @@
 
 RFsim converts selected KiCad PCB geometry into an openEMS FDTD model. A result is usable only when the FDTD energy remains finite and decays after the excitation pulse.
 
+## openEMS Requirement
+
+RFsim v1.2.0 requires the native `AddCPWPort()` and `AddStripLinePort()` APIs. Install the Windows 64-bit [openEMS v0.37.0-rc2 pre-release](https://github.com/thliebig/openEMS-Project/releases/tag/v0.37.0-rc2): download the `openEMS_x64_v0.37.0-rc2_msvc.zip` asset and extract it to `C:\openEMS`.
+
+The archive includes wheels for CPython 3.13 and 3.14. Create a Python 3.14 virtual environment and install these local wheels:
+
+```bat
+py -3.14 -m venv C:\openEMS\venv
+C:\openEMS\venv\Scripts\python.exe -m pip install --find-links C:\openEMS\python csxcad openems
+```
+
+For a different extraction location, set `OPENEMS_PATH`. RFsim rejects installations that lack either required port API and reports the available port methods in the solver output.
+
 ## Frequency
 
 | Setting | Meaning |

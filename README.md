@@ -45,11 +45,13 @@ an incompatible behavior or configuration change.
 
    > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
-5) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases). Extract the `openEMS` folder to `C:\openEMS`.
+5) Install openEMS. Download `openEMS_x64_v0.37.0-rc2_msvc.zip` from the [openEMS v0.37.0-rc2 release](https://github.com/thliebig/openEMS-Project/releases/tag/v0.37.0-rc2), then extract the archive to `C:\openEMS`.
 
    > For a different folder, set the `OPENEMS_PATH` environment variable.
 
-6) Install [Python 3.14](https://www.python.org/downloads/), then make the venv of the solver:
+   RFsim v1.2.0 requires this Windows 64-bit pre-release because it supplies the native CPW and StripLine port APIs. The archive includes wheels for CPython 3.13 and 3.14.
+
+6) Install [Python 3.14](https://www.python.org/downloads/), then make the venv of the solver and install the wheels supplied by the extracted package:
 
    ```bat
    py -3.14 -m venv C:\openEMS\venv
@@ -58,6 +60,14 @@ an incompatible behavior or configuration change.
    ```
 
    > The last command must print `ok`. A warning about the version of HDF5 is not a problem.
+
+   Verify the required port APIs before starting KiCad:
+
+   ```bat
+   C:\openEMS\venv\Scripts\python.exe -c "import os; os.add_dll_directory('C:/openEMS'); from openEMS import openEMS; fdtd = openEMS(); print(hasattr(fdtd, 'AddCPWPort'), hasattr(fdtd, 'AddStripLinePort'))"
+   ```
+
+   The command must print `True True`.
 
 7) Restart KiCad. The plugin is now installed.
 
