@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 import pcbnew
 import wx
@@ -12,6 +13,62 @@ import wx
 from . import board_reader, gui, solverenv
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+
+
+def _preview_geometry(board, pads, settings):
+    """Export the current dialog geometry to XML and open AppCSXCAD."""
+    settings = dict(settings)
+    port_types = settings.pop("port_types")
+    port_feed = settings.pop("port_feed")
+    order = settings.pop("order")
+    pads = [p for _, p in sorted(zip(order, pads), key=lambda item: item[0])]
+    port_types = [p for _, p in sorted(zip(order, port_types), key=lambda item: item[0])]
+    port_feed = [p for _, p in sorted(zip(order, port_feed), key=lambda item: item[0])]
+    outdir = settings.pop("outdir")
+    substrate = {key: settings.pop(key) for key in ("er", "tand", "h", "cu_t")}
+    parasitics = settings.pop("lumped_parasitics", None) or {}
+    subregion = bool(settings.pop("port_focused_subregion", False))
+    model = board_reader.extract(board, pads, settings["margin_mm"], substrate,
+                                 full_board=not subregion)
+    for element in model["lumped_elements"]:
+        chosen = parasitics.get(element["ref"])
+        if chosen:
+            element.update(package=chosen["package"], esl=chosen["esl"],
+                           esr=chosen["esr"])
+            if chosen.get("type"):
+                element["type"] = chosen["type"]
+            if chosen.get("value") is not None:
+                element["value"] = chosen["value"]
+    model["lumped_elements"] = [
+        element for element in model["lumped_elements"]
+        if parasitics.get(element["ref"], {}).get("model", True)
+        and element.get("type") and element.get("value") is not None]
+    for port, port_type, feed in zip(model["ports"], port_types, port_feed):
+        port["type"] = port_type
+        if feed and not port["direction"]:
+            port["direction"], port["track_width"] = feed
+            key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y", (0, -1): "-y"}[tuple(port["direction"])]
+            port["gap"] = (port.get("gaps") or {}).get(key)
+            port["copper_run"] = board_reader.copper_run(
+                model["polygons"].get(port["layer"], []), port["x"], port["y"], port["direction"])
+    model["settings"] = settings
+    os.makedirs(outdir, exist_ok=True)
+    model_path = os.path.join(outdir, "geometry_preview_model.json")
+    geometry_path = os.path.join(outdir, "geometry_preview.xml")
+    with open(model_path, "w", encoding="utf-8") as fh:
+        json.dump(model, fh, indent=1)
+    runner = os.path.join(os.path.dirname(__file__), "runner.py")
+    solver_py = solverenv.solver_python() or _kicad_python()
+    cmd = [solver_py, runner, "--geometry", model_path, geometry_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+    if result.returncode:
+        raise RuntimeError(result.stderr or result.stdout or "Geometry export failed.")
+    viewer = next((os.path.join(directory, "AppCSXCAD.exe")
+                   for directory in solverenv.openems_dirs()
+                   if os.path.isfile(os.path.join(directory, "AppCSXCAD.exe"))), None)
+    if viewer is None:
+        raise RuntimeError("AppCSXCAD.exe was not found under OPENEMS_PATH or C:\\openEMS.")
+    subprocess.Popen([viewer, geometry_path], creationflags=NO_WINDOW)
 
 
 def _kicad_python():
@@ -25,6 +82,18 @@ def _kicad_python():
         if os.path.isfile(c):
             return c
     return "python"
+
+
+def _run_output_dir(base_dir):
+    """Create a timestamped result directory without overwriting prior runs."""
+    stamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    candidate = os.path.join(base_dir, stamp)
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(base_dir, "%s_%02d" % (stamp, suffix))
+        suffix += 1
+    os.makedirs(candidate)
+    return candidate
 
 
 def _solver_missing(exe):
@@ -104,7 +173,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  preview.get("lumped_elements", []),
                                  preview=preview,
                                  packages=board_reader.package_presets(),
-                                 esr=board_reader.esr_presets())
+                                 esr=board_reader.esr_presets(),
+                                 on_view_geometry=lambda settings: _preview_geometry(
+                                     board, pads, settings),
+                                 on_open_results=lambda path: gui.ResultsFrame(
+                                     None, path).Show())
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
@@ -122,14 +195,19 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         port_feed = [f for _, f in
                      sorted(zip(order, port_feed), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
+        separate_run_folder = bool(settings.pop("separate_run_folder", True))
+        if separate_run_folder:
+            os.makedirs(outdir, exist_ok=True)
+            outdir = _run_output_dir(outdir)
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
         # The parasitics of each R/L/C part, from the rows of the dialog.
         # They go into the elements below, and not into the settings:
         # model.json must hold the values that the solver uses.
         para = settings.pop("lumped_parasitics", None) or {}
 
+        subregion = bool(settings.pop("port_focused_subregion", False))
         model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate)
+                         substrate, full_board=not subregion)
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
@@ -184,6 +262,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
         model["settings"] = settings
+        model["run_output_dir"] = outdir
 
         os.makedirs(outdir, exist_ok=True)
         model_path = os.path.join(outdir, "model.json")

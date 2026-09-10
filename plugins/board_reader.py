@@ -40,17 +40,36 @@ _PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
-# The body ESL of a chip part with 2 terminals, in nH, against the code of
-# the imperial package. These values are for the BODY only. They are
-# smaller than the "mounted ESL" of a datasheet, because the FDTD model
-# already contains the loop of the pads and the tracks: that copper is in
-# the mesh. If you add the mounted value, you count the loop two times.
-_ESL_NH = {"0201": 0.20, "0402": 0.25, "0603": 0.35, "0805": 0.45,
-           "1206": 0.60, "1210": 0.70, "2010": 0.80, "2512": 0.90}
-_ESL_DEFAULT_NH = 0.40  # a part whose package the code cannot read
-# The series loss of the body: the ESR of a capacitor and the DCR of an
-# inductor. A resistor gives its own value, thus it has no entry.
-_ESR_OHM = {"C": 0.03, "L": 0.10}
+# The body ESL of a two-terminal chip, in nH, against its imperial size.
+# These are body-only estimates: the FDTD model already includes the pads,
+# tracks, and nearby via loop, so using a manufacturer *mounted* ESL here
+# would double-count board inductance. The trend is consistent with MLCC
+# impedance data from KEMET K-SIM (https://ksim.kemet.com/) and Murata
+# SimSurfing (https://ds.murata.co.jp/simsurfing/en-us/): a larger terminal
+# separation has higher inductance. Neither source supplies one universal
+# value per package; their impedance/S-parameter curves are specific to the
+# exact MPN, capacitance, dielectric, voltage rating, and test fixture.
+# These numbers are therefore trend-derived body-only fallbacks, not copied
+# KEMET or Murata specifications. Exact ESL remains a per-part override in
+# the dialog.
+_ESL_NH = {"0201": 0.15, "0402": 0.25, "0603": 0.35, "0805": 0.50,
+         "1206": 0.70, "1210": 0.80, "2010": 1.00, "2512": 1.20}
+_ESL_DEFAULT_NH = 0.50  # a part whose package the code cannot read
+
+# Nominal series loss in ohm by type and package. MLCC ESR depends on the
+# exact capacitance, dielectric, DC bias, frequency, and termination style;
+# inductor DCR also depends strongly on inductance and construction. These
+# values follow the package trends visible in KEMET K-SIM and Murata
+# SimSurfing, but are only stable fallback values for the dialog, not part
+# specifications. Enter manufacturer impedance/S-parameter-derived ESR and
+# ESL in the per-component controls when the exact MPN is known.
+_SERIES_LOSS_OHM = {
+    "C": {"0201": 0.050, "0402": 0.035, "0603": 0.025, "0805": 0.020,
+        "1206": 0.015, "1210": 0.012, "2010": 0.010, "2512": 0.010},
+    "L": {"0201": 0.150, "0402": 0.120, "0603": 0.100, "0805": 0.080,
+        "1206": 0.060, "1210": 0.050, "2010": 0.040, "2512": 0.030},
+}
+_SERIES_LOSS_DEFAULT_OHM = {"C": 0.030, "L": 0.100}
 # KiCad puts the imperial code first: "R_0402_1005Metric". Thus the first
 # match is the correct one. The tests for a digit on each side prevent a
 # match inside the metric code.
@@ -83,6 +102,7 @@ def _parse_value(text, kind):
     if not text:
         return None
     tok = text.strip().split()[0] if text.strip() else ""  # remove " 1%" etc.
+    tok = tok.split("/", 1)[0]  # remove attached voltage/rating suffixes
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -683,13 +703,14 @@ def package_presets():
 
 
 def esr_presets():
-    """Give the body ESR of each type of part, in ohm.
+    """Give the unknown-package series-loss fallback for each part type.
 
     The dialog needs it for a part whose type the USER selects: the ESR
-    comes from the type, in the same way as it does for a part that the
-    refdes describes. The table stays in this module only.
+    comes from the type because an unknown part has no package from which
+    to select a package-specific default. The table stays in this module
+    only.
     """
-    return dict(_ESR_OHM)
+    return dict(_SERIES_LOSS_DEFAULT_OHM)
 
 
 def _package(name):
@@ -731,7 +752,9 @@ def _parasitics(fp, kind):
         name = None
     pkg, warn = _package(name)
     esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
-    return pkg, esl, _ESR_OHM.get(kind, 0.0), warn
+    loss = _SERIES_LOSS_OHM.get(kind, {}).get(
+        pkg, _SERIES_LOSS_DEFAULT_OHM.get(kind, 0.0))
+    return pkg, esl, loss, warn
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):
@@ -907,15 +930,16 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm, substrate=None):
+def extract(board, pads, margin_mm, substrate=None, full_board=True):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
-    plus margin_mm. The coordinates are in mm, the y axis points up, and
-    z=0 is at the bottom of the board. If you give `substrate`, it
-    replaces the stackup of the board with a uniform stackup. Its keys
-    are "er", "tand", "h" (the total dielectric thickness in mm) and
-    "cu_t" (in mm).
+    plus margin_mm. Set `full_board` to True for an antenna/full-board
+    simulation, or False to retain only a rectangular port-focused
+    subregion. The coordinates are in mm, the y axis points up, and z=0
+    is at the bottom of the board. If you give `substrate`, it replaces
+    the stackup of the board with a uniform stackup. Its keys are "er",
+    "tand", "h" (the total dielectric thickness in mm) and "cu_t" (in mm).
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
@@ -924,12 +948,9 @@ def extract(board, pads, margin_mm, substrate=None):
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
     for p in pads[1:]:
         region.Merge(p.GetBoundingBox())
-    # Fit the domain to the full board (Edge.Cuts). Before, a domain that
-    # had the size of the pad bbox cut the antennas. ponytail: the domain
-    # is the full board. Use the bbox of the selection again if very large
-    # boards make this operation too slow.
+    port_box = pcbnew.BOX2I(region.GetPosition(), region.GetSize())
     brd = board.GetBoardEdgesBoundingBox()
-    if brd.GetWidth() > 0 and brd.GetHeight() > 0:
+    if full_board and brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
     # Use 2 times the margin: the inner band is clear air and the outer
     # band is the PML absorber. The code crops the copper at the outer
@@ -1077,6 +1098,12 @@ def extract(board, pads, margin_mm, substrate=None):
         "version": MODEL_VERSION,
         # "file", "default" or "dialog": refer to _stackup().
         "stackup_source": stack_src,
+        "subregion": {
+            "enabled": not full_board,
+            "margin_mm": float(margin_mm),
+            "port_bounds": rect_mm(port_box),
+            "export_bounds": rect_mm(region),
+        },
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
@@ -1096,6 +1123,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("1M", "R", 1e6), ("50", "R", 50.0), ("4.7 1%", "R", 4.7),
         ("1.2pF", "C", 1.2e-12), ("100nF", "C", 100e-9), ("3n3", "C", 3.3e-9),
         ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
+        ("10uF/", "C", 10e-6), ("10uF/16V", "C", 10e-6),
         ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
         ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
     ]
