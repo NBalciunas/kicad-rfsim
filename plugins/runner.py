@@ -771,11 +771,15 @@ def build(model, excite_idx, res, want_ff=False):
             if g["type"] == "msl":
                 ports.append(fdtd.AddMSLPort(*args, **kw))
             elif g["type"] == "cpw":
-                ports.append(fdtd.AddCPWPort(*args, g["gap"], **kw))
-                note = ", gap %.3f mm" % g["gap"]
+                # AddCPWPort not available in this openEMS version; use MSL as fallback
+                ports.append(fdtd.AddMSLPort(*args, **kw))
+                note = ", gap %.3f mm (CPW as MSL)" % g["gap"]
             else:
-                ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
-                note = ", %.3f mm to each plane" % g["height"]
+                # AddStripLinePort not available; use lumped port as fallback
+                ports.append(fdtd.AddLumpedPort(
+                    g["number"], s["z0"], g["start"], g["stop"], "z",
+                    excite=1.0 if excite else 0, priority=20))
+                note = ", %.3f mm to each plane (StripLine as lumped)" % g["height"]
             note = "dir " + g["prop_dir"] + note
         else:
             ports.append(fdtd.AddLumpedPort(
