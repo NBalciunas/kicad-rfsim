@@ -1735,6 +1735,14 @@ class ResultsFrame(wx.Frame):
         selection = self.choice.GetStringSelection()
         return selection[0] if selection.startswith(("E-Field", "H-Field")) else None
 
+    def _selected_field(self):
+        """Give the selected E/H field kind and excited port."""
+        selection = self.choice.GetStringSelection()
+        if not selection.startswith(("E-Field", "H-Field")):
+            return None, None
+        match = re.search(r" \(Port (\d+)\)$", selection)
+        return selection[0], int(match.group(1)) if match else None
+
     def _compare_results(self, evt):
         """Choose two or more Touchstone files and open shared S-parameter plots."""
         picker = wx.FileDialog(
@@ -1766,20 +1774,22 @@ class ResultsFrame(wx.Frame):
 
     def _save_field_animation(self, evt):
         """Save the current E/H field phase animation as a GIF."""
-        kind = self._selected_field_kind()
+        kind, port = self._selected_field()
         if kind is None:
             wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
                           wx.ICON_INFORMATION)
             return
         from rfsim_viewer import save_animation
+        port_tag = "_port%d" % port if port else ""
         picker = wx.FileDialog(self, "Save RFsim field animation",
                                wildcard="GIF animation (*.gif)|*.gif",
                                defaultDir=self.outdir,
-                               defaultFile="%s_field.gif" % kind,
+                               defaultFile="%s_field%s.gif" % (kind, port_tag),
                                style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
         if picker.ShowModal() == wx.ID_OK:
             try:
-                path = save_animation(self.outdir, kind, picker.GetPath())
+                path = save_animation(self.outdir, kind, picker.GetPath(),
+                                      port=port)
                 wx.MessageBox("Animation saved:\n%s" % path, "RFsim", wx.ICON_INFORMATION)
             except Exception as exc:
                 wx.MessageBox("Could not save animation: %s" % exc, "RFsim", wx.ICON_ERROR)
@@ -1787,20 +1797,22 @@ class ResultsFrame(wx.Frame):
 
     def _export_field_paraview(self, evt):
         """Write the current E/H field as XDMF/HDF5 and open it in ParaView."""
-        kind = self._selected_field_kind()
+        kind, port = self._selected_field()
         if kind is None:
             wx.MessageBox("Select an E-Field or H-Field view first.", "RFsim",
                           wx.ICON_INFORMATION)
             return
         from rfsim_viewer import export_paraview
         try:
-            xdmf_path = export_paraview(self.outdir, kind)
+            xdmf_path = export_paraview(self.outdir, kind, port=port)
+            h5_path = os.path.splitext(xdmf_path)[0] + ".h5"
             viewer = r"C:\Program Files\ParaView 6.1.1\bin\paraview.exe"
+            message = "ParaView export written:\n%s\n%s" % (xdmf_path, h5_path)
             if os.path.isfile(viewer):
                 subprocess.Popen([viewer, xdmf_path])
+                wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)
             else:
-                wx.MessageBox("ParaView export written:\n%s" % xdmf_path,
-                              "RFsim", wx.ICON_INFORMATION)
+                wx.MessageBox(message, "RFsim", wx.ICON_INFORMATION)
         except Exception as exc:
             wx.MessageBox("Could not export ParaView data: %s" % exc,
                           "RFsim", wx.ICON_ERROR)
