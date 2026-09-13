@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import shutil
+import stat
 import sys
 import warnings
 
@@ -37,6 +38,33 @@ def _show_warning(message, category, filename, lineno, file=None, line=None):
 
 warnings.showwarning = _show_warning
 
+
+def _remove_output_path(path):
+    """Remove a prior solver output path, including Windows reparse points."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    is_reparse = bool(getattr(info, "st_file_attributes", 0)
+                      & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    if os.path.isdir(path) and not os.path.islink(path) and not is_reparse:
+        shutil.rmtree(path, onerror=_clear_readonly)
+    else:
+        os.rmdir(path) if stat.S_ISDIR(info.st_mode) else os.unlink(path)
+
+
+def _clear_readonly(func, path, exc_info):
+    """Retry a Windows output removal after clearing its read-only bit."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        raise exc_info[1]
+
 import solverenv  # the directory of this file is sys.path[0] for a script
 
 # On Windows, the python extensions of openEMS and CSXCAD need the DLLs
@@ -49,6 +77,46 @@ if os.name == "nt":
             os.add_dll_directory(_d)
 
 import numpy as np
+
+# openEMS version checking
+def check_openems_version():
+    """Verify that openEMS supports CPW and StripLine port methods.
+    
+    Raises:
+        RuntimeError: If openEMS lacks AddCPWPort() and AddStripLinePort() methods.
+    """
+    try:
+        from openEMS import openEMS as openEMS_cls
+        fdtd_test = openEMS_cls()
+        has_cpw = hasattr(fdtd_test, 'AddCPWPort')
+        has_stripline = hasattr(fdtd_test, 'AddStripLinePort')
+        
+        if not (has_cpw and has_stripline):
+            raise RuntimeError(
+                "[rfsim] ERROR: This openEMS installation lacks AddCPWPort() "
+                "and AddStripLinePort().\n"
+                "\n"
+                "RFSim v1.2+ requires openEMS with native port methods for\n"
+                "CPW and StripLine traces. Current version only supports:\n"
+                f"  {[m for m in dir(fdtd_test) if 'Port' in m]}\n"
+                "\n"
+                "Install openEMS v0.37.0-rc2, the required Windows 64-bit\n"
+                "pre-release that includes Python 3.13 and 3.14 wheels:\n"
+                "  Release page: https://github.com/thliebig/openEMS-Project/releases/tag/v0.37.0-rc2\n"
+                "  Download asset: openEMS_x64_v0.37.0-rc2_msvc.zip\n"
+                "\n"
+                "Installation instructions:\n"
+                "  1. Extract to C:\\openEMS (or your OPENEMS_PATH)\n"
+                "  2. Run: py -3.14 -m venv C:\\openEMS\\venv\n"
+                "  3. Run: C:\\openEMS\\venv\\Scripts\\python.exe -m pip install\n"
+                "          --find-links C:\\openEMS\\python csxcad openems\n"
+                "  4. Restart KiCad\n"
+                "\n"
+                "See: https://docs.openems.de/python/install.html#windows\n"
+            )
+    except ImportError as e:
+        raise RuntimeError(f"[rfsim] ERROR: Cannot import openEMS: {e}")
+
 
 C0 = 299792458.0
 EPS0 = 8.8541878128e-12
@@ -605,6 +673,7 @@ def build(model, excite_idx, res, want_ff=False):
     try:
         from CSXCAD import ContinuousStructure
         from openEMS import openEMS
+        check_openems_version()  # Verify CPW and StripLine support
     except ImportError as e:
         if "Application Control policy" not in str(e):
             raise
@@ -953,6 +1022,20 @@ def main(model_path, outdir):
     if n < 1:
         raise SystemExit("expected at least 1 port, got %d" % n)
 
+    subregion = model.get("subregion", {})
+    scope = "port-focused subregion" if subregion.get("enabled") else "full board"
+    region = model["region"]
+    print("[rfsim] geometry scope: %s" % scope, flush=True)
+    print("[rfsim] export bounds: X %.3f..%.3f mm, Y %.3f..%.3f mm"
+          % (region["x0"], region["x1"], region["y0"], region["y1"]),
+          flush=True)
+    print("[rfsim] exported geometry: copper=%d polygons, vias=%d, RLC=%d"
+          % (sum(len(polys) for polys in model.get("polygons", {}).values()),
+             len(model.get("vias", [])), len(model.get("lumped_elements", []))),
+          flush=True)
+    refs = ", ".join(element["ref"] for element in model.get("lumped_elements", []))
+    print("[rfsim] exported RLC: %s" % (refs or "none"), flush=True)
+
     # A lumped inductor needs openEMS v0.37 or later, which has lumped
     # RLC. An older engine writes "Lumped Element R or C not specified!
     # skipping" and models an open circuit. Thus refuse to run, because
@@ -974,7 +1057,7 @@ def main(model_path, outdir):
     # looks current to the GUI. This occurs with a different set of
     # excited ports, or after a far field that failed.
     for d in glob.glob(os.path.join(outdir, "exc*")):
-        shutil.rmtree(d, ignore_errors=True)
+        _remove_output_path(d)
     for fpath in (glob.glob(os.path.join(outdir, "farfield*.json"))
                   + [os.path.join(outdir, "lines.json")]):
         try:
@@ -1076,7 +1159,17 @@ def main(model_path, outdir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: python runner.py model.json output_dir")
-    os.makedirs(sys.argv[2], exist_ok=True)
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == "--geometry":
+        with open(sys.argv[2], encoding="utf-8") as fh:
+            preview_model = json.load(fh)
+        eps_max = max(layer["epsilon"] for layer in preview_model["dielectric_layers"])
+        preview_resolution = C0 / preview_model["settings"]["f_stop"] \
+            / np.sqrt(eps_max) * 1e3 / RES_DIV[preview_model["settings"]["mesh"]]
+        fdtd, _, _ = build(preview_model, 0, preview_resolution, want_ff=False)
+        fdtd.GetCSX().Write2XML(sys.argv[3])
+        print("[rfsim] geometry preview written: %s" % sys.argv[3], flush=True)
+    elif len(sys.argv) == 3:
+        os.makedirs(sys.argv[2], exist_ok=True)
+        main(sys.argv[1], sys.argv[2])
+    else:
+        raise SystemExit("usage: python runner.py [--geometry model.json geometry.xml] | model.json output_dir")

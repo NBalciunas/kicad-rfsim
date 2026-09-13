@@ -40,17 +40,36 @@ _PREFIX = {"R": "rRkKMG", "C": "pnuµ", "L": "pnuµm"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
-# The body ESL of a chip part with 2 terminals, in nH, against the code of
-# the imperial package. These values are for the BODY only. They are
-# smaller than the "mounted ESL" of a datasheet, because the FDTD model
-# already contains the loop of the pads and the tracks: that copper is in
-# the mesh. If you add the mounted value, you count the loop two times.
-_ESL_NH = {"0201": 0.20, "0402": 0.25, "0603": 0.35, "0805": 0.45,
-           "1206": 0.60, "1210": 0.70, "2010": 0.80, "2512": 0.90}
-_ESL_DEFAULT_NH = 0.40  # a part whose package the code cannot read
-# The series loss of the body: the ESR of a capacitor and the DCR of an
-# inductor. A resistor gives its own value, thus it has no entry.
-_ESR_OHM = {"C": 0.03, "L": 0.10}
+# The body ESL of a two-terminal chip, in nH, against its imperial size.
+# These are body-only estimates: the FDTD model already includes the pads,
+# tracks, and nearby via loop, so using a manufacturer *mounted* ESL here
+# would double-count board inductance. The trend is consistent with MLCC
+# impedance data from KEMET K-SIM (https://ksim.kemet.com/) and Murata
+# SimSurfing (https://ds.murata.co.jp/simsurfing/en-us/): a larger terminal
+# separation has higher inductance. Neither source supplies one universal
+# value per package; their impedance/S-parameter curves are specific to the
+# exact MPN, capacitance, dielectric, voltage rating, and test fixture.
+# These numbers are therefore trend-derived body-only fallbacks, not copied
+# KEMET or Murata specifications. Exact ESL remains a per-part override in
+# the dialog.
+_ESL_NH = {"0201": 0.15, "0402": 0.25, "0603": 0.35, "0805": 0.50,
+         "1206": 0.70, "1210": 0.80, "2010": 1.00, "2512": 1.20}
+_ESL_DEFAULT_NH = 0.50  # a part whose package the code cannot read
+
+# Nominal series loss in ohm by type and package. MLCC ESR depends on the
+# exact capacitance, dielectric, DC bias, frequency, and termination style;
+# inductor DCR also depends strongly on inductance and construction. These
+# values follow the package trends visible in KEMET K-SIM and Murata
+# SimSurfing, but are only stable fallback values for the dialog, not part
+# specifications. Enter manufacturer impedance/S-parameter-derived ESR and
+# ESL in the per-component controls when the exact MPN is known.
+_SERIES_LOSS_OHM = {
+    "C": {"0201": 0.050, "0402": 0.035, "0603": 0.025, "0805": 0.020,
+        "1206": 0.015, "1210": 0.012, "2010": 0.010, "2512": 0.010},
+    "L": {"0201": 0.150, "0402": 0.120, "0603": 0.100, "0805": 0.080,
+        "1206": 0.060, "1210": 0.050, "2010": 0.040, "2512": 0.030},
+}
+_SERIES_LOSS_DEFAULT_OHM = {"C": 0.030, "L": 0.100}
 # KiCad puts the imperial code first: "R_0402_1005Metric". Thus the first
 # match is the correct one. The tests for a digit on each side prevent a
 # match inside the metric code.
@@ -83,6 +102,7 @@ def _parse_value(text, kind):
     if not text:
         return None
     tok = text.strip().split()[0] if text.strip() else ""  # remove " 1%" etc.
+    tok = tok.split("/", 1)[0]  # remove attached voltage/rating suffixes
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -518,34 +538,45 @@ def _coplanar_gap(polys, x, y, direction):
     line, and the second hit is the edge of the copper on the other side
     of the gap. The result is the median of the measurements, in mm.
 
-    The function gives None if the copper is not on the two sides, or if
-    it is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+    Gives (gap, asymmetry). asymmetry follows the same |a-b|/(a+b) rule
+    as a stripline's plane asymmetry, comparing the median gap of each
+    side. Both are None if the copper is not on the two sides, or if a
+    gap is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
     """
     if not direction or not polys:
-        return None
+        return None, None
     axis = 1 if direction[0] else 0  # the ray goes across the feed line
     dx, dy = direction
     # Take samples along the line and not at the pad. A pad is often wider
     # than the line. A sample that is not on copper (the line stops before
     # that point) gives an even number of hits, and the code ignores it.
-    gaps = []
+    sides = ([], [])  # index 0 = sign +1, index 1 = sign -1
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
         pair = []
-        for sign in (1, -1):
+        for sign, bucket in zip((1, -1), sides):
             hits = _ray_hits(px, py, axis, sign, polys)
             if len(hits) % 2 == 0:  # the start point is not on copper
                 break
             if len(hits) < 2 or hits[1] - hits[0] > MAX_CPW_GAP:
                 break  # no copper at the side of the line: not a CPW
-            pair.append(hits[1] - hits[0])
+            pair.append((bucket, hits[1] - hits[0]))
         if len(pair) == 2:
-            gaps += pair
+            for bucket, g in pair:
+                bucket.append(g)
+    gaps = sides[0] + sides[1]
     if len(gaps) < 4:  # 2 sides at 2 positions or more
-        return None
+        return None, None
     gaps.sort()
     n = len(gaps)
-    return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+    gap = round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+    asym = None
+    if len(sides[0]) >= 2 and len(sides[1]) >= 2:
+        g0 = sorted(sides[0])[len(sides[0]) // 2]
+        g1 = sorted(sides[1])[len(sides[1]) // 2]
+        if g0 + g1 > 0:
+            asym = round(abs(g0 - g1) / (g0 + g1), 4)
+    return gap, asym
 
 
 def copper_along(polys, x, y, direction):
@@ -683,13 +714,14 @@ def package_presets():
 
 
 def esr_presets():
-    """Give the body ESR of each type of part, in ohm.
+    """Give the unknown-package series-loss fallback for each part type.
 
     The dialog needs it for a part whose type the USER selects: the ESR
-    comes from the type, in the same way as it does for a part that the
-    refdes describes. The table stays in this module only.
+    comes from the type because an unknown part has no package from which
+    to select a package-specific default. The table stays in this module
+    only.
     """
-    return dict(_ESR_OHM)
+    return dict(_SERIES_LOSS_DEFAULT_OHM)
 
 
 def _package(name):
@@ -731,7 +763,9 @@ def _parasitics(fp, kind):
         name = None
     pkg, warn = _package(name)
     esl = _ESL_NH.get(pkg, _ESL_DEFAULT_NH) * 1e-9
-    return pkg, esl, _ESR_OHM.get(kind, 0.0), warn
+    loss = _SERIES_LOSS_OHM.get(kind, {}).get(
+        pkg, _SERIES_LOSS_DEFAULT_OHM.get(kind, 0.0))
+    return pkg, esl, loss, warn
 
 
 def _lumped_elements(board, region, copper_layers, skip_refs):
@@ -850,7 +884,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     return elements, warnings
 
 
-def _port(board, pad, number, copper_layers):
+def _port(board, pad, number, copper_layers, polygons):
     layer_name = _pad_layer(pad)
     names = [c["name"] for c in copper_layers]
     if layer_name not in names:
@@ -859,7 +893,16 @@ def _port(board, pad, number, copper_layers):
     idx = names.index(layer_name)
     if len(names) < 2:
         raise ValueError("Board needs at least 2 copper layers (signal + reference)")
-    ref = names[idx - 1] if idx == len(names) - 1 else names[idx + 1]
+    # Prefer the adjacent layer that has ground copper under the pad. The
+    # old rule always picked the layer toward B.Cu, which is wrong when
+    # THAT layer is an unrelated signal with no copper here and the real
+    # return plane is the layer toward F.Cu instead.
+    down = names[idx + 1] if idx < len(names) - 1 else None
+    up = names[idx - 1] if idx > 0 else None
+    box = _pad_box(pad)
+    down_ok = down is not None and _touches(polygons.get(down, []), box)
+    up_ok = up is not None and _touches(polygons.get(up, []), box)
+    ref = up if (up_ok and not down_ok) else (down if down is not None else up)
 
     # A stripline needs a plane above the strip and a plane below it. Thus
     # the port must be on an inner layer. openEMS puts the voltage probes
@@ -907,15 +950,16 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm, substrate=None):
+def extract(board, pads, margin_mm, substrate=None, full_board=True):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
-    plus margin_mm. The coordinates are in mm, the y axis points up, and
-    z=0 is at the bottom of the board. If you give `substrate`, it
-    replaces the stackup of the board with a uniform stackup. Its keys
-    are "er", "tand", "h" (the total dielectric thickness in mm) and
-    "cu_t" (in mm).
+    plus margin_mm. Set `full_board` to True for an antenna/full-board
+    simulation, or False to retain only a rectangular port-focused
+    subregion. The coordinates are in mm, the y axis points up, and z=0
+    is at the bottom of the board. If you give `substrate`, it replaces
+    the stackup of the board with a uniform stackup. Its keys are "er",
+    "tand", "h" (the total dielectric thickness in mm) and "cu_t" (in mm).
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
@@ -924,12 +968,9 @@ def extract(board, pads, margin_mm, substrate=None):
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
     for p in pads[1:]:
         region.Merge(p.GetBoundingBox())
-    # Fit the domain to the full board (Edge.Cuts). Before, a domain that
-    # had the size of the pad bbox cut the antennas. ponytail: the domain
-    # is the full board. Use the bbox of the selection again if very large
-    # boards make this operation too slow.
+    port_box = pcbnew.BOX2I(region.GetPosition(), region.GetSize())
     brd = board.GetBoardEdgesBoundingBox()
-    if brd.GetWidth() > 0 and brd.GetHeight() > 0:
+    if full_board and brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
     # Use 2 times the margin: the inner band is clear air and the outer
     # band is the PML absorber. The code crops the copper at the outer
@@ -992,13 +1033,15 @@ def extract(board, pads, margin_mm, substrate=None):
                 "z1": z_of.get(top, copper_layers[0]["z"]),
             })
 
-    ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    ports = [_port(board, p, i + 1, copper_layers, polygons)
+             for i, p in enumerate(pads)]
     # Measure the coplanar gap of each port. The copper of the layer must
     # exist first, thus this operation comes after the extraction of the
     # polygons. A port that has a gap can use a CPW port.
     for p, pad in zip(ports, pads):
         polys_l = polygons.get(p["layer"], [])
-        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        p["gap"], p["gap_asymmetry"] = _coplanar_gap(polys_l, p["x"], p["y"],
+                                                      p["direction"])
         # How far the copper runs from the pad along the feed. The
         # runner caps the length of a de-embedded port with it: refer to
         # `copper_run` and to problem 13. None means "further than the
@@ -1021,7 +1064,7 @@ def extract(board, pads, margin_mm, substrate=None):
             # The gap of each candidate direction, for the manual feed
             # of the dialog. A drawn CPW has no track, and the dialog
             # offers the CPW type only for a direction that has a gap.
-            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
+            p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)[0]
                          for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
         if p["height"] and p["asymmetry"] > 0.25:
@@ -1031,6 +1074,12 @@ def extract(board, pads, margin_mm, substrate=None):
                 "its reference plane is approximate."
                 % (p["number"], p["label"], p["ref_layer2"], p["ref_layer"],
                    100.0 * p["asymmetry"]))
+        if p["gap_asymmetry"] and p["gap_asymmetry"] > 0.25:
+            warnings.append(
+                "Port %d (%s): the coplanar gap is not symmetric (%.0f%% "
+                "off between the two sides). A Coplanar (CPW) port models "
+                "a centered gap, so its ground return is approximate."
+                % (p["number"], p["label"], 100.0 * p["gap_asymmetry"]))
     # A port needs a ground return: copper on the reference layer that
     # touches any part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
@@ -1077,6 +1126,12 @@ def extract(board, pads, margin_mm, substrate=None):
         "version": MODEL_VERSION,
         # "file", "default" or "dialog": refer to _stackup().
         "stackup_source": stack_src,
+        "subregion": {
+            "enabled": not full_board,
+            "margin_mm": float(margin_mm),
+            "port_bounds": rect_mm(port_box),
+            "export_bounds": rect_mm(region),
+        },
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
@@ -1096,6 +1151,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("1M", "R", 1e6), ("50", "R", 50.0), ("4.7 1%", "R", 4.7),
         ("1.2pF", "C", 1.2e-12), ("100nF", "C", 100e-9), ("3n3", "C", 3.3e-9),
         ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
+        ("10uF/", "C", 10e-6), ("10uF/16V", "C", 10e-6),
         ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
         ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
     ]
@@ -1127,10 +1183,15 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("no track", _CPW, None, None),
     ]
     for _name, _polys, _dir, _want in _GEO:
-        _got = _coplanar_gap(_polys, 0.0, 0.0, _dir)
+        _got, _ = _coplanar_gap(_polys, 0.0, 0.0, _dir)
         _ok = (_want is None and _got is None) or (
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
+    # An asymmetric CPW: 0.2 mm at +y, 0.5 mm at -y.
+    _gap, _asym = _coplanar_gap(
+        [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -1.0, 20.0, -3.0)],
+        0.0, 0.0, [1, 0])
+    assert _asym is not None and _asym > 0.25, "asymmetric CPW not flagged"
     # A ray that goes exactly through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
     # The copper test for a manual feed direction: the strip goes to +x
