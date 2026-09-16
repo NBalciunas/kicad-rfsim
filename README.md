@@ -14,7 +14,7 @@ CSXCAD.
 - Animate the E-field and the H-field on the mid-plane of the substrate.
 - Calculate the far field with NF2FF: three polar cuts, a 3D pattern, Dmax and the efficiency.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
-- Model the R, L and C parts as lumped elements, with the parasitics of the package.
+- Model the R, L and C parts as lumped elements with the parasitics of the package, and any 2-terminal part as a series RLC.
 - Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
 - Draw the board layout that the solver uses.
@@ -86,16 +86,26 @@ The coarse preset reads a little low: the microstrip of `validation/` gives 47.7
 
 "KiCad's Stackup" takes εr, tanδ and the thickness from Board Setup > Physical Stackup, layer by layer. The dialog starts there when the board has a stackup, and the four fields then show what the board gives and stay read-only.
 
-> Save the board first. The plugin reads the saved file.
+> When the stackup has changes that you did not save, RFsim asks which values to use: the new values or the saved values.
 
 The other presets make a uniform stackup from the values in the dialog. They fill εr and tanδ, and "Custom" leaves the two fields to you:
 
-| Preset         | εr   | tanδ   |
-|----------------|------|--------|
-| FR-4           | 4.5  | 0.02   |
-| Rogers RO4350B | 3.48 | 0.0037 |
-| Rogers RO4003C | 3.38 | 0.0027 |
-| PTFE           | 2.20 | 0.0009 |
+| Preset                      | εr   | tanδ   |
+|-----------------------------|------|--------|
+| FR-4                        | 4.5  | 0.02   |
+| Rogers RO4350B (stripline)  | 3.48 | 0.0037 |
+| Rogers RO4350B (microstrip) | 3.66 | 0.0037 |
+| Rogers RO4003C (stripline)  | 3.38 | 0.0027 |
+| Rogers RO4003C (microstrip) | 3.55 | 0.0027 |
+| PTFE                        | 2.20 | 0.0009 |
+
+Rogers gives two εr for each grade: one that it measures with a stripline, and a larger design value for a microstrip. Each grade therefore has two rows.
+
+**The loss of the substrate holds at ONE frequency.**
+The model takes tanδ and makes a fixed conductivity from it, at the center of the sweep.
+A real substrate keeps its tanδ over the whole band, thus the two agree at that center and nowhere else: the loss of the model is almost flat with the frequency, where a real one rises.
+Over a sweep of 1 to 6 GHz the model made 3.1 times the loss of a real substrate at 1 GHz, and 0.66 times it at 5.5 GHz.
+Put the center of your sweep at the frequency that matters, or keep the sweep narrow, when the loss is important.
 
 The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
 
@@ -137,6 +147,8 @@ Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "L
 The letter can also come after the number (`4.7k` = 4.7 kohm, `22p` = 22 pF). **The unit letter is optional**, thus `4p7F` and `10uH` read the same as `4p7` and `10u`, and the unit can be a word of its own (`10 kOhm`, `4.7 uF`, `10 nH`). A word that starts with a digit after a space has no effect (`100nF 10%`, `10u 25V`). "DNP" and the other words for a part that is not there give no value. The dialog shows the number that the plugin read, thus you see which value it took.
 
 **Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
+
+**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off. Its row holds three fields, R in ohm, L in nH and C in pF, and no parasitics. The solver puts the three in series in one element. Leave a field empty to leave that component out.
 
 ## Examples
 
@@ -181,10 +193,14 @@ The CPW port and the stripline port against closed-form theory, both the impedan
 A filled zone with a void of 8 x 6 mm below the line, against the same board with none. The void must make a large step in S11, which shows that the hole stays open.
 * **`run_feature.py [mesh] [stub width in mm]`**  
 The number of mesh cells across a copper feature that no port covers, against closed-form theory. An open stub is a quarter-wave resonator, thus the notch of |S21| gives its eps_eff, and two stub lengths remove the end effects. Run it with the python of the solver.
+* **`run_via.py [mesh]`**  
+The inductance of one via to the ground plane, against the closed form of Goldfarb and Pucel, for four drill sizes. A board with no via removes the line from the result. It does not pass at present: at some drill sizes the mesh keeps the via as one thin wire, and a via of 0.6 mm drill then reads 2.5 times its inductance. Run it with the python of the solver.
 * **`run_stability.py [fast|slow|all]`**  
 The timestep rule for a lumped inductor. `fast` compares the timestep of the plugin against the one at which the run diverges, on 6 geometries, in about 15 minutes. `slow` finds a different failure: a lumped inductor also carries a mode that grows. That stage does not pass at present: a body inductance below 1 nH keeps a margin of 7 times, and 10 nH keeps none.
 * **`test_ports.py`**  
-The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, and the cells near a CPW and a stripline. It needs no KiCad and no solver, thus it takes seconds. Run it with the python of the solver.
+The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, the cells near a CPW and a stripline, the copper of one layer at a time, and the one element of a Series RLC part. It needs no KiCad and no solver run, thus it takes seconds. Run it with the python of the solver.
+* **`mesh_diff.py [revision]`**  
+The mesh of every `model.json` in `validation/`, with the runner of this checkout against the runner of a git revision (HEAD by default). It lists each board whose mesh lines move, thus you know which results a change of the mesh can move before you run the solver. It takes about a second. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
 The full path from the board to the Touchstone file. A microstrip of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  

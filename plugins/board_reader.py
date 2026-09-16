@@ -25,7 +25,11 @@ import pcbnew
 #
 #   1  2026-08-05  the first number. Every model.json before it has no
 #      "version" key at all, and the runner reads that as version 1.
-MODEL_VERSION = 1
+#   2  2026-09-14  a lumped element of type "RLC" holds `r`, `l` and `c`
+#      and no `value`. A runner of version 1 reads such a part as a part
+#      with no value: it leaves the gap between its pads open, and the
+#      run gives a number for a board that has no part there.
+MODEL_VERSION = 2
 
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
@@ -203,16 +207,24 @@ def selected_pads(board):
 def _stackup_from_file(path):
     """Read the (stackup ...) block of a .kicad_pcb file.
 
-    No SWIG version of KiCad (8, 9 or 10) gives access to BOARD_STACKUP.
-    Thus the file is the only source of the dielectric properties that a
-    script can use. The function gives a list from the top layer to the
-    bottom layer, with the keys kind, name, thickness, epsilon and
-    loss_tangent. If the file has no stackup, the function gives None.
+    No SWIG version of KiCad (8, 9 or 10) has a BOARD_STACKUP type, thus
+    a run takes the dielectric properties from the SAVED file. The
+    function gives the list of `_stackup_from_text`, or None if the file
+    does not exist or has no stackup.
     """
     if not path or not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8") as fh:
-        text = fh.read()
+        return _stackup_from_text(fh.read())
+
+
+def _stackup_from_text(text):
+    """Read the (stackup ...) block of the text of a board file.
+
+    The function gives a list from the top layer to the bottom layer, with
+    the keys kind, name, thickness, epsilon and loss_tangent. If the text
+    has no stackup, the function gives None.
+    """
     i = text.find("(stackup")
     if i < 0:
         return None
@@ -269,6 +281,77 @@ def _stackup_from_file(path):
             })
     return items or None
 
+
+def _board_text(board):
+    """Give the text that a save of `board` writes, from the board in memory.
+
+    It is the call that a save makes (`PCB_IO_KICAD_SEXPR.SaveBoard` gives
+    its file to `FormatBoardToFormatter`), but into a string, thus it
+    writes no file. Like a save, it updates the embedded fonts of the
+    board in memory. Do NOT use `PCB_IO_KICAD_SEXPR.Format(board)` for
+    this: it does not prepare the writer, and on KiCad 10.0.5 the process
+    stops with a segmentation fault.
+    """
+    out = pcbnew.STRING_FORMATTER()
+    pcbnew.PCB_IO_KICAD_SEXPR().FormatBoardToFormatter(out, board)
+    return out.GetString()
+
+
+def unsaved_stackup(board):
+    """Give a question if the stackup has a change that is not saved.
+
+    The OK button of Board Setup > Physical Stackup changes the board in
+    memory at once, and the saved file keeps the old stackup. The function
+    compares the two. It gives None when they agree, and also when the
+    comparison fails: the question must not stop a run. Otherwise it gives
+    the text that asks the user which stackup the run uses, and `extract`
+    then reads that one (`live_stackup`).
+
+    `board.IsModified()` cannot see such a change. It reads a flag of the
+    BOARD item, and the PCB editor does not set that flag: the editor
+    sets a flag of its screen, which puts the "*" in the title. On KiCad
+    10.0.5 `IsModified()` stayed False after a change of er in Physical
+    Stackup that the user did not save.
+    """
+    try:
+        live = _stackup_from_text(_board_text(board))
+        saved = _stackup_from_file(board.GetFileName())
+        cu_names = [_lname(lid) for lid in board.GetEnabledLayers().CuStack()]
+    except Exception:
+        return None
+    if live == saved:
+        return None
+    if saved is None:
+        diffs = ["the saved file has no stackup" if board.GetFileName()
+                 else "the board has no saved file"]
+    elif live is None:
+        diffs = ["Board Setup has no stackup"]
+    elif [it["name"] for it in live] != [it["name"] for it in saved]:
+        diffs = ["layers: new %s; saved %s"
+                 % (", ".join(it["name"] for it in live),
+                    ", ".join(it["name"] for it in saved))]
+    else:
+        diffs = ["%s, %s: new %g%s, saved %g%s"
+                 % (new["name"], label, new[key], unit, old[key], unit)
+                 for new, old in zip(live, saved)
+                 for key, label, unit in (("thickness", "thickness", " mm"),
+                                          ("epsilon", "er", ""),
+                                          ("loss_tangent", "tan d", ""))
+                 if key in new and new[key] != old[key]]
+    text = ("Board Setup > Physical Stackup has changes that are not saved:"
+            "\n\n%s\n\nWhich values should RFsim use?"
+            % "\n".join("  - " + d for d in diffs))
+    # `_stackup` uses the FR4 default values for a stackup that does not
+    # exist or that has other copper layers than the board. Say so here,
+    # thus the FR-4 preset of the dialog is not a surprise.
+    for which, items in (("new", live), ("saved", saved)):
+        if items is None or cu_names != [it["name"] for it in items
+                                         if it["kind"] == "copper"]:
+            text += (" With the %s values, the dialog starts at the FR-4 "
+                     "preset." % which)
+    return text
+
+
 def _uniform_stackup(cu_names, diel_total, eps, tand, cu_t):
     """Make n copper sheets with dielectric layers of equal thickness.
 
@@ -296,34 +379,35 @@ def _default_stackup(board, cu_names):
                             DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T)
 
 
-def _stackup(board, substrate=None):
+def _stackup(board, substrate=None, live=False):
     """Give the physical stackup from the top to the bottom.
 
     The result is (copper_layers, dielectric_layers). Copper is a sheet
     with no thickness on a boundary of the dielectric, but the real
     thickness stays in the data for the loss model. z=0 is the plane of
-    the bottom copper. The properties of the stackup come from the board
-    file. Thus you must save the board after you change
-    Board Setup > Physical Stackup.
+    the bottom copper. The properties of the stackup come from the saved
+    board file, or from the board in memory when `live` is True. The user
+    selects between the two when they differ (`unsaved_stackup`).
     """
     cu_ids = list(board.GetEnabledLayers().CuStack())
     cu_names = [_lname(lid) for lid in cu_ids]
     id_of = dict(zip(cu_names, cu_ids))
 
     # `source` tells WHERE the values came from, and the dialog needs it:
-    # it fills its substrate fields from a stackup that the FILE gives,
+    # it fills its substrate fields from a stackup that the BOARD gives,
     # and it must not fill them from the FR4 default values, which would
     # look like the board and are only a fallback.
-    if substrate:  # the values from the user have priority over the file
+    if substrate:  # the values from the user have priority over the board
         source = "dialog"
         items = _uniform_stackup(cu_names, substrate["h"], substrate["er"],
                                  substrate["tand"], substrate["cu_t"])
     else:
-        source = "file"
-        items = _stackup_from_file(board.GetFileName())
+        source = "memory" if live else "file"
+        items = (_stackup_from_text(_board_text(board)) if live
+                 else _stackup_from_file(board.GetFileName()))
         if items:
-            file_cu = [it["name"] for it in items if it["kind"] == "copper"]
-            if file_cu != cu_names:  # the file does not agree: use defaults
+            stack_cu = [it["name"] for it in items if it["kind"] == "copper"]
+            if stack_cu != cu_names:  # not the layers of the board: defaults
                 items = None
         if not items:
             source = "default"
@@ -973,7 +1057,7 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm, substrate=None):
+def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
@@ -981,9 +1065,11 @@ def extract(board, pads, margin_mm, substrate=None):
     z=0 is at the bottom of the board. If you give `substrate`, it
     replaces the stackup of the board with a uniform stackup. Its keys
     are "er", "tand", "h" (the total dielectric thickness in mm) and
-    "cu_t" (in mm).
+    "cu_t" (in mm). With no `substrate`, the stackup comes from the saved
+    file, or from the board in memory if `live_stackup` is True.
     """
-    copper_layers, diel_layers, stack_src = _stackup(board, substrate)
+    copper_layers, diel_layers, stack_src = _stackup(board, substrate,
+                                                     live_stackup)
     max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
 
     first = pads[0].GetBoundingBox()
@@ -1026,29 +1112,6 @@ def extract(board, pads, margin_mm, substrate=None):
     # has ERROR_INSIDE, and ConvertBrdLayerToPolygonalContours includes
     # the text.
     warnings = []
-    # The stackup comes from the board FILE, thus a change in Board Setup
-    # that the user did not save is NOT in the run: the run finishes and
-    # it gives a number for the OLD substrate. **The silence is the
-    # harm**, and not the extra save. SWIG gives no access to
-    # BOARD_STACKUP (P12), thus the plugin cannot read the change; it can
-    # say that the change may be there.
-    #
-    # `substrate` means that the user typed the values in the dialog,
-    # thus the file is not the source and there is nothing to say.
-    if not substrate:
-        try:
-            unsaved = bool(board.IsModified())
-        except Exception:
-            # A board that comes from LoadBoard has the method. Keep the
-            # run alive for any binding that does not.
-            unsaved = False
-        if unsaved:
-            warnings.append(
-                "The board has unsaved changes. The substrate (er, tan d, "
-                "thickness) is read from the SAVED file, so a change in "
-                "Board Setup > Physical Stackup that you did not save is "
-                "NOT in this run and the result will be wrong for it. Save "
-                "the board and run again.")
     if clipped:
         warnings.append(
             "Copper on %s extends beyond the simulation domain and is cut "
@@ -1164,7 +1227,7 @@ def extract(board, pads, margin_mm, substrate=None):
         c.pop("id")
     return {
         "version": MODEL_VERSION,
-        # "file", "default" or "dialog": refer to _stackup().
+        # "file", "memory", "default" or "dialog": refer to _stackup().
         "stackup_source": stack_src,
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
@@ -1263,6 +1326,55 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     # code as if the board gave them.
     assert _none is None, _none
     print("stackup OK (a Rogers core, and a file with no stackup)")
+
+    # The warning of a stackup that is not saved. A board comes from a
+    # file, and then the FILE changes: the board in memory keeps the old
+    # stackup, in the same way as a change in Board Setup that the user
+    # did not save.
+    def _write(path, text):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    _EMPTY = _board_text(pcbnew.CreateEmptyBoard())
+    assert "(setup" in _EMPTY and "(stackup" not in _EMPTY, _EMPTY[:200]
+    _k = _EMPTY.find("(setup") + len("(setup")
+    _BRD = (_EMPTY[:_k]
+            + '(stackup (layer "F.Cu" (type "copper") (thickness 0.035))'
+            ' (layer "dielectric 1" (type "core") (thickness 1.51)'
+            ' (epsilon_r 4.5) (loss_tangent 0.02))'
+            ' (layer "B.Cu" (type "copper") (thickness 0.035)))'
+            + _EMPTY[_k:])
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _dir:
+        _path = os.path.join(_dir, "board.kicad_pcb")
+        _write(_path, _BRD)
+        _brd = pcbnew.LoadBoard(_path)
+        assert unsaved_stackup(_brd) is None, "the file and the memory agree"
+        _write(_path, _BRD.replace("(epsilon_r 4.5)", "(epsilon_r 3.33)"))
+        _msg = unsaved_stackup(_brd) or ""
+        assert "dielectric 1, er: new 4.5, saved 3.33" in _msg, _msg
+        assert "FR-4" not in _msg, _msg
+
+        # The two answers of the user: the saved file, or the memory.
+        def _er(live):
+            return _stackup(_brd, None, live)[1][0]["epsilon"]
+
+        _pair = (_er(False), _er(True))
+        assert _pair == (3.33, 4.5), _pair
+        assert _stackup(_brd, None, True)[2] == "memory"
+        _write(_path, _EMPTY)
+        _msg = unsaved_stackup(_brd) or ""
+        assert "the saved file has no stackup" in _msg, _msg
+        assert "With the saved values, the dialog starts at the FR-4 " \
+            "preset." in _msg, _msg
+        assert "With the new values" not in _msg, _msg
+        _path = os.path.join(_dir, "empty.kicad_pcb")
+        _write(_path, _EMPTY)
+        assert unsaved_stackup(pcbnew.LoadBoard(_path)) is None, "no stackup"
+    # A comparison that fails gives no question: it must not stop a run.
+    # Do not give None here: SWIG passes it as a NULL board, and the
+    # process stops.
+    assert unsaved_stackup("not a board") is None
+    print("unsaved stackup OK (10 checks)")
 
     # The gap of a CPW: a strip of 1.0 mm wide on the x axis, with a
     # ground at each side. The gap is 0.2 mm.

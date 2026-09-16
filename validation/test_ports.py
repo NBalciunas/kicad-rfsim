@@ -2,7 +2,8 @@
 
 `runner` imports CSXCAD and openEMS inside its functions only. Thus
 `_port_geometry` and `_mesh` need numpy alone, and this file runs in some
-seconds. Run it with the python of the solver:
+seconds. One test calls `build()`, which needs CSXCAD, but no engine
+runs. Run it with the python of the solver:
 
     C:\\openEMS\\venv\\Scripts\\python.exe test_ports.py
 
@@ -407,6 +408,98 @@ def test_lumped_element_does_not_wreck_the_mesh():
     print("lumped element mesh cost OK (%s -> %s lines)" % (n0, n1))
 
 
+def test_a_feature_stays_on_one_layer():
+    """Two edges on two DIFFERENT layers make no narrow feature.
+
+    `_feature_lines` puts a mesh line inside the space between two
+    straight copper edges that stand nearer than `res`, because that
+    space is a track, a gap between two pads, or a slot. An F.Cu edge
+    and a B.Cu edge hold no such space: the copper of two layers does not
+    meet in the plane. Until 2026-09-01 the rule took the edges of every
+    layer together, and it put a line at y = -20.3875 on the 2512 land of
+    `run_shunt.py`, between an F.Cu edge at -20.775 and a B.Cu edge at
+    -20.000. `mesh_diff.py` lists the two boards that the rule moved.
+
+    The same two edges on ONE layer are a gap of 0.775 mm, and that gap
+    must get its line. Thus the test cannot pass on a rule that simply
+    gives no line at all.
+    """
+    lo, hi = -20.775, -20.000
+
+    def rect(y0, y1):
+        return [[10.0, y0], [30.0, y0], [30.0, y1], [10.0, y1]]
+
+    for below, above, want in (("F.Cu", "B.Cu", False),
+                               ("F.Cu", "F.Cu", True)):
+        m = model("msl")
+        m["polygons"] = dict(m["polygons"])
+        m["polygons"].setdefault(below, []).append(rect(-25.0, lo))
+        m["polygons"].setdefault(above, []).append(rect(hi, -15.0))
+        _, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+        got = [y for y in ys if lo + 1e-9 < y < hi - 1e-9]
+        if want:
+            assert near(got, 0.5 * (lo + hi)), \
+                "a gap of %.3f mm on %s got no line: %s" % (hi - lo, below, got)
+        else:
+            assert not got, \
+                "an edge on %s and an edge on %s made a feature: lines %s" \
+                % (below, above, got)
+    print("a feature stays on one layer OK (F.Cu + B.Cu: no line; "
+          "F.Cu + F.Cu: the line at %.4f)" % (0.5 * (lo + hi)))
+
+
+def test_a_series_rlc_part_is_one_element():
+    """A series RLC part reaches openEMS as ONE element with LEtype=1.
+
+    The part must give the SAME element as a capacitor with its ESR and
+    its ESL, because `run_shunt.py` measures that element through the
+    solver, and a part with no C must give the element of an inductor
+    with its DCR. The test builds each model with `runner.build` and
+    compares the XML that CSXCAD writes. No engine runs, but `build`
+    needs CSXCAD: run this file with the python of the solver.
+
+    The timestep rule must count the L of such a part, because a large L
+    that the rule does not see diverges.
+    """
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    def element(**part):
+        m = model("msl")
+        e = lumped(0.5, 0.6)
+        e.update(ref="X1", package="Custom", esl=0.0, esr=0.0)
+        e.update(part)
+        m["lumped_elements"] = [e]
+        m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9,
+                             z0=50.0, mesh="coarse", max_timesteps=1000,
+                             end_criteria=1e-4, lumped=True, parasitics=True)
+        fdtd = runner.build(m, 0, RES)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "csx.xml")
+            fdtd.GetCSX().Write2XML(path)
+            found = [dict(p.attrib) for p in ET.parse(path).getroot().iter()
+                     if p.get("Name") == "le_X1"]
+        assert len(found) == 1, "want one element le_X1, got %d" % len(found)
+        found[0].pop("ID", None)
+        return found[0]
+
+    rlc = element(type="RLC", value=None, r=0.5, l=1e-9, c=1e-11)
+    cap = element(type="C", value=1e-11, esl=1e-9, esr=0.5)
+    assert rlc == cap, "the series RLC %s against the capacitor %s" % (rlc, cap)
+    assert float(rlc.get("LEtype", "nan")) == 1.0, rlc
+    rl = element(type="RLC", value=None, r=0.5, l=1e-9, c=None)
+    ind = element(type="L", value=1e-9, esr=0.5)
+    assert rl == ind, "the series RL %s against the inductor %s" % (rl, ind)
+    factor = runner._time_step_factor(
+        {"settings": {"lumped": True, "parasitics": True},
+         "lumped_elements": [{"type": "RLC", "value": None, "l": 100e-9}]})
+    assert factor is not None \
+        and abs(factor - runner.LE_STAB_MARGIN / 10.0) < 1e-9, factor
+    print("a series RLC part is one element OK (%s; 100 nH gives the "
+          "factor %.3g)" % (", ".join("%s=%s" % kv for kv in sorted(
+              rlc.items())), factor))
+
+
 if __name__ == "__main__":
     test_via_center_line()
     test_flat_and_vertical_ports()
@@ -419,4 +512,6 @@ if __name__ == "__main__":
     test_shunt_element_and_its_via()
     test_two_elements_near_each_other()
     test_lumped_element_does_not_wreck_the_mesh()
+    test_a_feature_stays_on_one_layer()
+    test_a_series_rlc_part_is_one_element()
     print("PASS")

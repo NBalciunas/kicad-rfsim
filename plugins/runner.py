@@ -82,12 +82,15 @@ CPW_STRIP_CELLS = 8
 #   8         49.3        49.3         80605
 #
 # 8 cells give the more exact impedance, and 4 are the value here. With
-# 8, the y mesh near a lumped element becomes so much finer than the x
-# mesh at the COARSE preset that `run_shunt.py coarse` reads a body ESL
-# 24% to 31% too large (the medium preset stays correct). 4 cells keep
-# that rig correct and they still remove the error that does not
-# converge, which is what a mesh rule must do. Raise this to 8 for a
-# more exact microstrip when no board holds a lumped element.
+# 8, `run_shunt.py` reads a body ESL that is wrong at BOTH presets:
+# measured on 2026-09-14, the body of 0.25 nH reads +23% at coarse and
+# the body of 1 nH reads -20% at medium, against -1.5% / +6.7% and
+# -2.9% / +0.6% with 4 cells. The error needs the x lines AND the y
+# lines of the 8-cell mesh together: each set alone keeps both bodies
+# within 11%, and the lines inside the element box change nothing. 4
+# cells keep that rig correct and they still remove the error that does
+# not converge, which is what a mesh rule must do. Raise this to 8 for a
+# more exact microstrip only on a board that holds no lumped element.
 MSL_STRIP_CELLS = 4
 # The tolerance that makes an edge of a polygon STRAIGHT. `board_reader`
 # rounds every coordinate to 1e-5 mm, thus the two ends of a straight
@@ -140,7 +143,7 @@ GROWTH_MIN_ROWS = 200
 # The newest version of model.json that this runner can read. It must
 # agree with `board_reader.MODEL_VERSION`, and the two files cannot
 # import each other: board_reader imports pcbnew, and this file must not.
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 
 def _strip_cells(port_type):
@@ -205,6 +208,11 @@ def _time_step_factor(model):
     for e in model.get("lumped_elements", []):
         if e["type"] == "L" and e["value"] > 0:
             ind.append(e["value"])
+        # A series RLC part holds its inductance in `l` and not in
+        # `value`. The rule must see it: a large L that the factor does
+        # not count diverges in the same way as a part of type L.
+        if e["type"] == "RLC" and (e.get("l") or 0) > 0:
+            ind.append(e["l"])
         if s.get("parasitics", True) and e.get("esl"):
             ind.append(e["esl"])
     if not ind:
@@ -861,13 +869,30 @@ def _mesh(model, ports, res):
         ys |= fy
         narrow += narrow_x + narrow_y
     if narrow:
+        # **Name the size of the error, and not only the fact of it.**
+        # "Use a finer mesh preset" does not tell a user whether the
+        # answer is 1% out or 10% out, thus it cannot help them decide.
+        # The numbers come from a 0.30 mm line at the coarse preset,
+        # which the step forces to 1 cell: against Hammerstad-Jensen
+        # with the dispersion of Kirschning-Jansen it reads +8.7% in
+        # eps_eff and 114.97 ohm against 128.15, thus -10.3% in Z0. Solve
+        # the same closed form for the width that gives that eps_eff and
+        # the line behaves as if it were 1.7 mm wide. A 0.40 mm feature
+        # at 1 cell gives 1.736 mm, which is nearly the same number for
+        # two different drawn widths: that is what "the line is as wide
+        # as its cell" means, and it is why the count and not the width
+        # decides the error.
         print("[rfsim] WARNING: %d copper feature(s) are narrower than "
-              "%.4f mm and keep ONE cell across them; the narrowest is "
-              "%.4f mm. A track that thin gives an incorrect impedance, and "
-              "its two edges can make the SMALLEST cell of the mesh, thus a "
-              "slower run. Remove the very thin copper, or use a finer mesh "
-              "preset."
-              % (len(narrow), POLY_FEATURE_CELLS * tol, min(narrow)),
+              "%.4f mm, thus the mesh keeps 1 cell across them and not the "
+              "%d that this rule wants; the narrowest is %.4f mm. At 1 cell "
+              "a 0.30 mm line measured +8.7%% in eps_eff and -10.3%% in Z0 "
+              "against the closed form, and it behaves as a line of about "
+              "1.7 mm: a feature at 1 cell is as wide as its cell, whatever "
+              "you drew. Its two edges can also make the SMALLEST cell of "
+              "the mesh, thus a slower run. Remove the very thin copper, or "
+              "use a finer mesh preset."
+              % (len(narrow), POLY_FEATURE_CELLS * tol, POLY_FEATURE_CELLS,
+                 min(narrow)),
               flush=True)
     return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
             _merge_close(zs, tol_z))
@@ -960,6 +985,32 @@ def build(model, excite_idx, res, want_ff=False):
             print("[rfsim] WARNING: this openEMS build has no LEtype; the "
                   "package parasitics are OFF (ideal elements)", flush=True)
         for e in model.get("lumped_elements", []):
+            # **A SERIES RLC part gives its three components itself**, and
+            # it has no `value`. It is ONE element with LEtype=1, which is
+            # the element that a capacitor with its ESR and its ESL makes
+            # already. It takes no package parasitics: its R and its L are
+            # the body. A component that the part does not give stays out
+            # of the element, and the engine then leaves it out of the
+            # series.
+            if e.get("type") == "RLC":
+                comp = {k: float(e[k.lower()]) for k in "RLC"
+                        if e.get(k.lower())}
+                if not comp:
+                    print("[rfsim] WARNING: lumped %s is a series RLC with "
+                          "no R, no L and no C; not modeled (the gap between "
+                          "its pads stays open)" % e.get("ref", "?"),
+                          flush=True)
+                    continue
+                csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
+                                     **dict(le_kw, **comp)).AddBox(
+                    e["start"], e["stop"], priority=15)
+                print("[rfsim] lumped %s: series RLC %s (%s-axis) at z=%.3f"
+                      % (e["ref"], ", ".join(
+                          "%s=%g %s" % (k, v, {"R": "ohm", "L": "H",
+                                               "C": "F"}[k])
+                          for k, v in sorted(comp.items())),
+                         e["ny"], e["start"][2]), flush=True)
+                continue
             # A part whose refdes does not give the type comes out of
             # the extraction with type None and value None, and the
             # dialog removes it when the user models nothing. A
@@ -1067,6 +1118,30 @@ def build(model, excite_idx, res, want_ff=False):
     return fdtd, ports, ff
 
 
+def _field_norm(sim_path, port, f_hz, z0):
+    """Write the factor that scales the field dumps, in the style of CST.
+
+    CST drives a port with a wave of 1 sqrt(W) peak, which is 0.5 W of
+    incident power, and it divides each monitor by the spectrum of the
+    excitation. Phase 0 is then the peak of the incident wave at the port.
+    The factor here is sqrt(0.5 / P_inc), and it removes the phase of the
+    incident voltage. The FD dumps and the port probes use the same DFT
+    (2 * dt * sum), thus the spectrum of the pulse divides out.
+
+    The incident power, and not the accepted power, sets the reference: it
+    does not change with the load, thus a port that reflects almost all of
+    the power does not make the fields very large. The factor goes into
+    field.json beside the dumps.
+    """
+    port.CalcPort(sim_path, np.array([f_hz]), ref_impedance=z0)
+    p_inc = float(port.P_inc[0])
+    u_inc = complex(port.uf_inc[0])
+    c = np.sqrt(0.5 / p_inc) * np.conj(u_inc) / abs(u_inc)
+    with open(os.path.join(sim_path, "field.json"), "w") as fh:
+        json.dump({"f_hz": float(f_hz), "P_inc_W": p_inc,
+                   "scale": [float(c.real), float(c.imag)]}, fh, indent=1)
+
+
 def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
     """Calculate the NF2FF far field at the recorded frequency.
 
@@ -1136,6 +1211,13 @@ def _line_data(port, sim_path, freq):
 
     A lumped port has no line, thus it has no beta. Then the result is
     None.
+
+    **Give this function a port that the run does NOT excite.** The three
+    voltage probes stand at three adjacent mesh lines, thus they measure
+    about 2 cells from the plane of the excitation, and that is inside
+    the near field of the source. eps_eff then reads 6% to 34% high,
+    against 1% to 6% for the same port at the far end of the same line.
+    The caller holds that rule.
     """
     port.ReadUIData(sim_path, freq)
     if not hasattr(port, "beta"):
@@ -1242,6 +1324,18 @@ def main(model_path, outdir):
                 "to DNP, or run the solver under a Python 3.13/3.14 "
                 "interpreter with openEMS >= v0.37 (see README, "
                 "\"Installation\")." % ", ".join(bad))
+        # A series RLC part needs the SERIES topology, and an engine with
+        # no LEtype has the parallel one alone: it would put R, L and C
+        # side by side, which is a different circuit and not a worse one.
+        series = [e["ref"] for e in model.get("lumped_elements", [])
+                  if e["type"] == "RLC"]
+        if series and not _has_lumped_rlc():
+            raise SystemExit(
+                "[rfsim] ERROR: %s: this openEMS build has no series lumped "
+                "element (LEtype), thus it cannot simulate a Series RLC part "
+                "- it would put R, L and C in parallel. Run the solver under "
+                "a Python 3.13/3.14 interpreter with openEMS >= v0.37 (see "
+                "README, \"Installation\")." % ", ".join(series))
 
     # Remove the results of a previous run from this output directory. An
     # excN folder, or a farfield.json that this run does not write again,
@@ -1270,6 +1364,10 @@ def main(model_path, outdir):
     want = set(s.get("excite") or nums)
     exc = [i for i, num in enumerate(nums) if num in want] or [0]
     lines = {}  # the port number -> the impedance data of its line
+    # The port number -> True when the reading in `lines` comes from the
+    # run that excited that port. Such a reading is the poor one, thus a
+    # later run replaces it.
+    line_exc = {}
     for step, k in enumerate(exc):
         sim_path = os.path.join(outdir, "exc%d" % (k + 1))
         print("[rfsim] === excitation %d/%d (port %d) ==="
@@ -1306,18 +1404,49 @@ def main(model_path, outdir):
                 "time_step_factor %.3g. The growth comes from a lumped "
                 "element: take that element out of the model, or give it a "
                 "smaller inductance." % (name, GROWTH_LIMIT, tsf))
-        # Read the impedance of the line of the excited port first. The
-        # wave of that port is the cleanest, and CalcPort replaces the
-        # value some lines below.
-        ld = _line_data(ports[k], sim_path, freq)
-        if ld:
-            lines[k + 1] = ld
-            f_at = s.get("f_field") or 0.5 * (s["f_start"] + s["f_stop"])
-            i_at = int(np.argmin(np.abs(freq - f_at)))
+        # **Read the line of EVERY de-embedded port, and keep the port
+        # that this run did NOT excite.** The three voltage probes of a
+        # port stand at three adjacent mesh lines, thus they measure the
+        # field about 2 cells from the plane of the excitation, which is
+        # inside the near field of the source. `beta` then reads high and
+        # eps_eff, which is its square, reads much higher. Measured on a
+        # straight line at 4 widths, against the phase of S21 over the
+        # distance between the two measurement planes:
+        #
+        #   width    the excited port   a port 30 mm away
+        #   0.30 mm  +13.9%             +4.7%
+        #   0.60 mm  +34.3%             +2.5%
+        #   1.00 mm  +29.2%             +2.1%
+        #   2.90 mm   +6.2%             +1.4%
+        #
+        # The same extraction, the same mesh and the same run: only the
+        # distance from the source moves. Thus the wave of the excited
+        # port is the WORST one for this quantity and not the cleanest.
+        # Z0 survives it much better, because the errors of the two
+        # derivatives divide out there and they multiply in beta.
+        #
+        # This costs nothing: CalcPort reads the same probe files for
+        # every port some lines below. `_line_data` must come first,
+        # because CalcPort writes the reference impedance over Z_ref.
+        f_at = s.get("f_field") or 0.5 * (s["f_start"] + s["f_stop"])
+        i_at = int(np.argmin(np.abs(freq - f_at)))
+        for j, p in enumerate(ports):
+            ld = _line_data(p, sim_path, freq)
+            if not ld:
+                continue
+            # A reading from a run that did not excite this port wins.
+            # A one-port run has no such reading, thus it keeps its own.
+            was_exc = (j == k)
+            if j + 1 in lines and (was_exc or not line_exc[j + 1]):
+                continue
+            lines[j + 1] = ld
+            line_exc[j + 1] = was_exc
             print("[rfsim] port %d line: Z0 = %.1f%+.1fj ohm, eps_eff = %.2f "
-                  "(at %.3f GHz)"
-                  % (k + 1, ld["Z0_real"][i_at], ld["Z0_imag"][i_at],
-                     ld["eps_eff"][i_at], freq[i_at] / 1e9), flush=True)
+                  "(at %.3f GHz)%s"
+                  % (j + 1, ld["Z0_real"][i_at], ld["Z0_imag"][i_at],
+                     ld["eps_eff"][i_at], freq[i_at] / 1e9,
+                     " [this run excites it, thus eps_eff reads high]"
+                     if was_exc else ""), flush=True)
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
         for j in range(n):
@@ -1329,6 +1458,13 @@ def main(model_path, outdir):
             except Exception as e:
                 print("[rfsim] WARNING: far-field (port %d) failed: %s"
                       % (k + 1, e), flush=True)
+            # This comes after the far field: CalcPort at one frequency
+            # writes over the port values that `_farfield` reads.
+            try:
+                _field_norm(sim_path, ports[k], ff.freq[0], s["z0"])
+            except Exception as e:
+                print("[rfsim] WARNING: the scale of the field views "
+                      "(port %d) failed: %s" % (k + 1, e), flush=True)
 
     if lines:
         with open(os.path.join(outdir, "lines.json"), "w") as fh:

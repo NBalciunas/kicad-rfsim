@@ -21,7 +21,13 @@ MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
 MAX_PART_ROWS = 6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
-KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor"}
+# "Series RLC" is a type of its own, for a part that no single R, L or C
+# describes: a PIN diode that is off is C_T in series with L_s and R_s.
+# Its row holds three fields in the place of one value, and no
+# parasitics: its R and its L ARE the body.
+RLC_KIND = "RLC"
+KIND_NAMES = {"R": "Resistor", "C": "Capacitor", "L": "Inductor",
+              RLC_KIND: "Series RLC"}
 # The name of the quantity, for the label in front of the value of a part.
 KIND_QUANTITY = {"R": "Resistance", "C": "Capacitance", "L": "Inductance"}
 # The first entry of the type choice, for a part whose refdes does not
@@ -33,15 +39,18 @@ KIND_ORDER = [None] + list(KIND_NAMES)   # the index in the type choice
 # model.json in SI units.
 ENTRY_UNITS = {"R": "ohm", "C": "pF", "L": "nH"}
 ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
+# The three fields of a series RLC row, and the key of each one in
+# model.json. Each field takes the unit of the single value of its type.
+RLC_FIELDS = (("R", "r"), ("L", "l"), ("C", "c"))
 
 
 def _board_substrate_text(model):
     """Give the text of the four substrate fields that the BOARD gives.
 
     `model` is the preview from `board_reader.extract` with NO substrate
-    argument, thus its stackup came from the board file. The function
-    gives (er, tan d, h, cu_t) as text, or None when the board gives no
-    stackup.
+    argument, thus its stackup came from the board: from the saved file,
+    or from the board in memory. The function gives (er, tan d, h, cu_t)
+    as text, or None when the board gives no stackup.
 
     **A source of "default" gives None**, and not the values. Those
     values are the FR4 fallback of `board_reader`, thus they would show
@@ -53,7 +62,7 @@ def _board_substrate_text(model):
     " / ": a field is READ-ONLY under this preset, and the run uses the
     stackup layer by layer and not the text.
     """
-    if not model or model.get("stackup_source") != "file":
+    if not model or model.get("stackup_source") not in ("file", "memory"):
         return None
     diel = model.get("dielectric_layers") or []
     if not diel:
@@ -95,19 +104,25 @@ def _entry_text(kind, value_si):
 # when the board file holds no stackup. The two were 4.2 here and 4.5
 # there until 2026-08-05, thus the SAME board gave one substrate
 # through the dialog and another through a run with no GUI.
-# The three laminates after FR-4 are the usual low-loss choices of a
+# The laminates after FR-4 are the usual low-loss choices of a
 # fabricator. Their values are the DATASHEET values at 10 GHz, and FR-4
 # is at 1 MHz: the er of FR-4 falls to about 4.3 at 5 GHz, thus a run in
 # the GHz band deserves a value that the laminate of your fabricator
 # gives.
 #
-# **Two Dk values exist for a Rogers laminate, and these are the
-# PROCESS values.** Rogers measures them with a clamped stripline at
-# 10 GHz, and it publishes a larger "design Dk" for a MICROSTRIP: about
-# 3.66 for RO4350B and 3.55 for RO4003C. A microstrip that this plugin
-# simulates with the process value reads about 5% high in impedance.
-# The design values are not here, because nobody has measured which one
-# agrees with this solver: refer to the todo list.
+# **Each Rogers grade has two rows, because Rogers gives two Dk
+# values.** The PROCESS Dk (3.48 for RO4350B, 3.38 for RO4003C) comes
+# from a clamped stripline at 10 GHz. The DESIGN Dk (3.66 and 3.55) is
+# larger, and Rogers gets it from microstrip lines. That value holds the
+# field of a microstrip inside a material constant, and a 3D solver
+# calculates that field itself, thus the design value can count the
+# same effect two times. The difference is not large: on a 50 ohm
+# microstrip, Hammerstad and Jensen give a Z0 2.3% higher and a delay
+# 2.2% shorter with the process value, at every thickness. No board of
+# `validation/` is a Rogers board, thus no measurement says which value
+# agrees with this solver, and the user selects. The two rows of a grade
+# keep ONE tan d, because Rogers gives one value at 10 GHz.
+#
 # **The first entry is the board itself, and it is not a laminate.** It
 # holds no er and no tan d here: the values come from the
 # `(stackup ...)` block of the board, LAYER BY LAYER, thus two numbers
@@ -117,8 +132,10 @@ def _entry_text(kind, value_si):
 BOARD_PRESET = "KiCad's Stackup"
 SUBSTRATE_PRESETS = [(BOARD_PRESET, None, None),
                      ("FR-4", 4.5, 0.02),
-                     ("Rogers RO4350B", 3.48, 0.0037),
-                     ("Rogers RO4003C", 3.38, 0.0027),
+                     ("Rogers RO4350B (stripline)", 3.48, 0.0037),
+                     ("Rogers RO4350B (microstrip)", 3.66, 0.0037),
+                     ("Rogers RO4003C (stripline)", 3.38, 0.0027),
+                     ("Rogers RO4003C (microstrip)", 3.55, 0.0027),
                      # The values are those of RT/duroid 5880, which is
                      # the usual PTFE laminate. Another PTFE differs: er
                      # goes from 2.1 to 2.6 with the glass in it.
@@ -482,8 +499,10 @@ class SettingsDialog(wx.Dialog):
             #
             #   Element "R1"  [Resistor v]  Resistance: [50 v] ohm
             #       ... Parasitics: [0402 Package v] ESR: [] ESL: [] [x] Model
+            #   Element "D1"  [Series RLC v]  R: [] ohm  L: [] nH  C: [] pF
+            #       ...                                              [x] Model
             #
-            # Column 5 is an empty column that GROWS, thus the part
+            # Column 3 is an empty column that GROWS, thus the part
             # stays at the left and the parasitics stay at the right end.
             #
             # The rows go into a SCROLLED window, and their parent is
@@ -499,8 +518,8 @@ class SettingsDialog(wx.Dialog):
             self.part_area = wx.ScrolledWindow(lbox.GetStaticBox(),
                                                style=wx.VSCROLL)
             self.part_area.SetScrollRate(0, 10)
-            lg = wx.FlexGridSizer(cols=15, vgap=6, hgap=8)
-            lg.AddGrowableCol(5, 1)
+            lg = wx.FlexGridSizer(cols=13, vgap=6, hgap=8)
+            lg.AddGrowableCol(3, 1)
             self.part_area.SetSizer(lg)
             lbox.Add(self.part_area, 0, wx.ALL | wx.EXPAND, 6)
             pane = self.part_area
@@ -552,23 +571,62 @@ class SettingsDialog(wx.Dialog):
                 value.Enable(kind is not None)
                 qty = wx.StaticText(pane, label=_qty_label(kind))
                 uni = wx.StaticText(pane, label=ENTRY_UNITS.get(kind, ""))
+                # **The value and its label share ONE cell with the three
+                # fields of a series RLC**, and the type shows one of the
+                # two sets. Columns of their own cannot do it: a column is
+                # as wide as its widest row, thus the R, L and C of one row
+                # would push the value field of every other row away from
+                # its label. The label gets the width of the longest
+                # quantity, thus the value fields still agree from row to
+                # row.
+                qty.SetMinSize((max(pane.GetTextExtent(_qty_label(k))[0]
+                                    for k in KIND_ORDER), -1))
+                single = wx.BoxSizer(wx.HORIZONTAL)
+                single.Add(qty, 0, mid)
+                single.Add(value, 0, mid | wx.LEFT, 8)
+                single.Add(uni, 0, mid | wx.LEFT, 8)
+                triple = wx.BoxSizer(wx.HORIZONTAL)
+                rlc = {}
+                for k, _ in RLC_FIELDS:
+                    field = wx.TextCtrl(pane, value="", size=(55, -1))
+                    field.SetToolTip("Leave the field empty to leave %s "
+                                     "out of the part." % k)
+                    if rlc:
+                        triple.AddSpacer(10)
+                    triple.Add(wx.StaticText(pane, label="%s:" % k), 0, mid)
+                    triple.Add(field, 0, mid | wx.LEFT, 4)
+                    triple.Add(wx.StaticText(pane, label=ENTRY_UNITS[k]), 0,
+                               mid | wx.LEFT, 4)
+                    rlc[k] = field
+                area = wx.BoxSizer(wx.HORIZONTAL)
+                area.Add(single, 0, mid)
+                area.Add(triple, 0, mid)
+                # The cell keeps ONE width for the two sets, thus a change
+                # of the type does not change the width of the rows.
+                area.SetMinSize((max(single.CalcMin()[0],
+                                     triple.CalcMin()[0]), -1))
+                area.Show(triple, False)
                 lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
                        0, mid)
                 lg.Add(kinds, 0, mid)
-                lg.Add(qty, 0, mid | wx.LEFT, 6)
-                lg.Add(value, 0, mid)
-                lg.Add(uni, 0, mid)
+                lg.Add(area, 0, mid | wx.LEFT, 6)
                 lg.Add((0, 0))   # the empty column that grows
-                lg.Add(wx.StaticText(pane, label="Parasitics:"), 0, mid)
+                para_lbl = wx.StaticText(pane, label="Parasitics:")
+                lg.Add(para_lbl, 0, mid)
                 lg.Add(ch, 0, mid)
+                # The controls that a series RLC row hides.
+                para_ctrls = [para_lbl, ch]
                 # R before L, in the sequence of "RLC". There is no third
                 # field: a series capacitance is not a parasitic of
                 # these parts.
                 for label, ctrl, unit in (("ESR:", esr, "ohm"),
                                           ("ESL:", esl, "nH")):
-                    lg.Add(wx.StaticText(pane, label=label), 0, mid | wx.LEFT, 6)
+                    p_lbl = wx.StaticText(pane, label=label)
+                    p_uni = wx.StaticText(pane, label=unit)
+                    lg.Add(p_lbl, 0, mid | wx.LEFT, 6)
                     lg.Add(ctrl, 0, mid)
-                    lg.Add(wx.StaticText(pane, label=unit), 0, mid)
+                    lg.Add(p_uni, 0, mid)
+                    para_ctrls += [p_lbl, ctrl, p_uni]
                 lg.Add(cb, 0, mid | wx.LEFT, 12)
                 # A preset writes the ESL with ChangeValue, which sends no
                 # EVT_TEXT. Thus the choice stays on the package. An edit
@@ -584,6 +642,12 @@ class SettingsDialog(wx.Dialog):
                 value.Bind(wx.EVT_TEXT,
                            lambda evt: (self._update_lumped_warning(),
                                         evt.Skip()))
+                # The L of a series RLC changes the timestep in the same
+                # way.
+                for field in rlc.values():
+                    field.Bind(wx.EVT_TEXT,
+                               lambda evt: (self._update_lumped_warning(),
+                                            evt.Skip()))
                 self.para_rows.append((e["ref"], cb, ch, esl, esr))
                 # The controls of the PART itself. They stay beside
                 # para_rows, thus the code that reads the parasitics does
@@ -593,7 +657,10 @@ class SettingsDialog(wx.Dialog):
                 self.part_rows.append({"ref": e["ref"], "kind": kinds,
                                        "value": value, "qty": qty,
                                        "unit": uni, "last_pkg": start_pkg,
-                                       "esl0": esl0, "esr0": esr0})
+                                       "esl0": esl0, "esr0": esr0,
+                                       "area": area, "single": single,
+                                       "triple": triple, "rlc": rlc,
+                                       "para_ctrls": para_ctrls})
             # A lumped inductor makes the FDTD unstable at the full
             # Courant step, thus the runner divides the step by
             # sqrt(L[nH]) and multiplies the number of steps by the same
@@ -613,8 +680,11 @@ class SettingsDialog(wx.Dialog):
         self.preset.SetToolTip(
             "%s takes er, the loss tangent and the thickness from the "
             "(stackup ...) block of the board, layer by layer.\n"
-            "It reads the SAVED file, thus save the board after a change "
-            "in Board Setup > Physical Stackup." % BOARD_PRESET)
+            "If the stackup has changes that are not saved, RFsim asks "
+            "first whether to use the new or the saved values.\n"
+            "Each Rogers grade has two rows: the Dk that Rogers measures "
+            "with a stripline, and its larger design Dk for a microstrip."
+            % BOARD_PRESET)
         # The default values are the FR-4 preset: refer to
         # SUBSTRATE_PRESETS. 1.6 mm and 35 um (1 oz) go with them.
         self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
@@ -896,6 +966,8 @@ class SettingsDialog(wx.Dialog):
             # needs a type: the unit comes from it.
             self.part_rows[i]["value"].Enable(
                 on and self._kind_of(i) is not None)
+            for field in self.part_rows[i]["rlc"].values():
+                field.Enable(on)
         self._update_lumped_warning()
         self._redraw_preview()
         if evt is not None:
@@ -963,6 +1035,15 @@ class SettingsDialog(wx.Dialog):
         ind = []
         for i, (_, cb, ch, esl, _) in enumerate(self.para_rows):
             if not cb.GetValue():
+                continue
+            if self._kind_of(i) == RLC_KIND:
+                # The L of a series RLC counts, and the part has no ESL:
+                # its fields ARE the body. A text that is not a number
+                # counts as nothing here, and `_on_ok` refuses it.
+                try:
+                    ind.append(self._rlc_values(i)["l"] or 0.0)
+                except ValueError:
+                    pass
                 continue
             if self._kind_of(i) == "L":
                 ind.append(self._part_value(i) or 0.0)
@@ -1066,8 +1147,11 @@ class SettingsDialog(wx.Dialog):
             else:
                 er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
                 h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
+            # A series RLC row hides its ESR and its ESL and the model
+            # takes neither, thus this test does not read them.
             para = [(float(esl.GetValue()), float(esr.GetValue()))
-                    for _, _, _, esl, esr in self.para_rows]
+                    for i, (_, _, _, esl, esr) in enumerate(self.para_rows)
+                    if self._kind_of(i) != RLC_KIND]
             if (not (0 < fa < fb) or not (fa <= fd <= fb) or z0 <= 0
                     or er < 1 or tand < 0 or h <= 0 or cu_t <= 0
                     or any(a < 0 or b < 0 for a, b in para)):
@@ -1088,10 +1172,28 @@ class SettingsDialog(wx.Dialog):
                 continue
             if self._kind_of(i) is None:
                 wx.MessageBox(
-                    'Element "%s" has no type. Select Resistor, Capacitor '
-                    "or Inductor, or clear its Model checkbox."
+                    'Element "%s" has no type. Select Resistor, Capacitor, '
+                    "Inductor or Series RLC, or clear its Model checkbox."
                     % r["ref"], "RFsim", wx.ICON_ERROR)
                 return
+            if self._kind_of(i) == RLC_KIND:
+                # Each field is empty or a positive number. An empty field
+                # leaves that component out of the part. A 0 is refused,
+                # because it reads two ways: a series C of 0 pF is an OPEN
+                # circuit, and an R or an L of 0 is no component at all.
+                try:
+                    vals = list(self._rlc_values(i).values())
+                except ValueError:
+                    vals = [-1.0]
+                if (all(v is None for v in vals)
+                        or any(v is not None and v <= 0 for v in vals)):
+                    wx.MessageBox(
+                        'Element "%s" is a Series RLC: give R in ohm, L in '
+                        "nH or C in pF as positive numbers. Leave a field "
+                        "empty to leave that component out." % r["ref"],
+                        "RFsim", wx.ICON_ERROR)
+                    return
+                continue
             v = self._part_value(i)
             if v is None or v <= 0:
                 wx.MessageBox(
@@ -1199,6 +1301,10 @@ class SettingsDialog(wx.Dialog):
         selects a type again. The NUMBER does not change with the type,
         thus 50 becomes 50 ohm, 50 nH or 50 pF. The unit beside it says
         which one.
+
+        "Series RLC" shows its three fields in the place of the value, and
+        it hides the parasitics. The texts stay in the hidden controls,
+        thus a return to another type gives the row back as it was.
         """
         r = self.part_rows[i]
         kind = self._kind_of(i)
@@ -1214,6 +1320,9 @@ class SettingsDialog(wx.Dialog):
         r["esr0"] = "%g" % self._esr.get(kind, 0.0)
         if self._pkg_of(self.para_rows[i][2]) != NO_PARASITICS:
             self.para_rows[i][4].ChangeValue(r["esr0"])
+        self._show_kind(i)
+        for field in r["rlc"].values():
+            field.Enable(self.para_rows[i][1].GetValue())
         self._update_lumped_warning()
         self.Layout()
 
@@ -1231,6 +1340,54 @@ class SettingsDialog(wx.Dialog):
                 * ENTRY_SCALE[kind]
         except (ValueError, KeyError):
             return None
+
+    def _rlc_values(self, i):
+        """Give {"r", "l", "c"} of a series RLC row in SI units.
+
+        An EMPTY field gives None: that component is not in the part. A
+        text that is not a number raises ValueError.
+        """
+        out = {}
+        for k, key in RLC_FIELDS:
+            text = self.part_rows[i]["rlc"][k].GetValue().strip()
+            out[key] = float(text) * ENTRY_SCALE[k] if text else None
+        return out
+
+    def _show_kind(self, i):
+        """Show the single value of a row, or the three fields of a series
+        RLC and no parasitics."""
+        r = self.part_rows[i]
+        rlc = self._kind_of(i) == RLC_KIND
+        r["area"].Show(r["single"], not rlc)
+        r["area"].Show(r["triple"], rlc)
+        for ctrl in r["para_ctrls"]:
+            ctrl.Show(not rlc)
+        self.part_area.GetSizer().Layout()
+        self.part_area.FitInside()
+
+    def _part_settings(self, i):
+        """Give the entry of one row for `lumped_parasitics`.
+
+        A series RLC row gives "r", "l" and "c", and no value, no package
+        and no parasitics: its three fields ARE the part. `_on_ok` does
+        not read a row whose Model is off, thus such a row can still hold
+        a text that is not a number, and it then gives None for all three.
+        """
+        _, cb, ch, esl, esr = self.para_rows[i]
+        kind = self._kind_of(i)
+        if kind == RLC_KIND:
+            try:
+                vals = self._rlc_values(i)
+            except ValueError:
+                vals = {key: None for _, key in RLC_FIELDS}
+            return dict(vals, model=cb.GetValue(), package=None, esl=0.0,
+                        esr=0.0, type=kind, value=None)
+        return {"model": cb.GetValue(),
+                "package": self._pkg_of(ch),
+                "esl": self._para_value(ch, esl, 1e-9),
+                "esr": self._para_value(ch, esr),
+                "type": kind,
+                "value": self._part_value(i)}
 
     def _on_para_edit(self, i, evt):
         """Move the choice of that row to Custom when the user types.
@@ -1281,7 +1438,9 @@ class SettingsDialog(wx.Dialog):
                              if cb.GetValue()),
             "lumped": self._any_modelled(),
             "parasitics": any(self._pkg_of(ch) != NO_PARASITICS
-                              for _, _, ch, _, _ in self.para_rows),
+                              for i, (_, _, ch, _, _)
+                              in enumerate(self.para_rows)
+                              if self._kind_of(i) != RLC_KIND),
             # One entry for each R/L/C part. rfsim.py puts them into the
             # elements, thus model.json keeps the values that the solver
             # uses.
@@ -1292,15 +1451,11 @@ class SettingsDialog(wx.Dialog):
             # the user did not touch: the dialog SHOWS what the parser
             # read, thus what the dialog shows is what model.json holds.
             # "type" is None for a row that stays at "Unknown", and
-            # rfsim.py then drops that part.
+            # rfsim.py then drops that part. A series RLC row gives its
+            # three components in the place of the value.
             "lumped_parasitics": {
-                ref: {"model": cb.GetValue(),
-                      "package": self._pkg_of(ch),
-                      "esl": self._para_value(ch, esl, 1e-9),
-                      "esr": self._para_value(ch, esr),
-                      "type": self._kind_of(i),
-                      "value": self._part_value(i)}
-                for i, (ref, cb, ch, esl, esr) in enumerate(self.para_rows)},
+                ref: self._part_settings(i)
+                for i, (ref, _, _, _, _) in enumerate(self.para_rows)},
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             "max_timesteps": int(float(self.max_steps.GetValue())),
@@ -1368,8 +1523,11 @@ class RunDialog(wx.Dialog):
 def _load_field(h5_path):
     """Read an FD dump of openEMS.
 
-    The result is (x_mm, y_mm, complex F[y, x, 3], f_hz). This function
-    does not need wx.
+    The result is (x_mm, y_mm, complex F[y, x, 3], f_hz). The runner
+    writes field.json beside the dump, and F gets its factor: the scale of
+    CST, with an incident wave of 1 sqrt(W) peak (0.5 W) at the excited
+    port and phase 0 at the peak of that wave. A run from before that file
+    keeps the raw values of openEMS. This function does not need wx.
     """
     import h5py
     import numpy as np
@@ -1394,6 +1552,11 @@ def _load_field(h5_path):
         F = np.moveaxis(F, 0, -1)
     if F.shape[:2] == (len(x), len(y)):
         F = np.swapaxes(F, 0, 1)
+    try:
+        with open(os.path.join(os.path.dirname(h5_path), "field.json")) as fh:
+            F = F * complex(*json.load(fh)["scale"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     return x, y, F, f_hz
 
 
@@ -1686,10 +1849,10 @@ class ResultsFrame(wx.Frame):
         animation reaches. A block of text at the left gives the
         frequency, the phase and that largest value.
 
-        The values are the values of openEMS for its excitation, which
-        has an amplitude of 1. Thus V/m and A/m are correct units, but
-        the size of the input signal, and not 1 W, sets the size of the
-        numbers.
+        The values have the scale of CST: the excited port gets an
+        incident wave of 1 sqrt(W) peak, which is 0.5 W, and phase 0 is
+        the peak of that wave. Thus you can compare the numbers of two
+        runs.
         """
         import numpy as np
         from matplotlib.animation import FuncAnimation

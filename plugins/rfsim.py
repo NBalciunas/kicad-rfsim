@@ -95,9 +95,26 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 "RFsim", wx.ICON_INFORMATION)
             return
 
+        # The stackup comes from the saved file or from the board in
+        # memory. When the two differ, the user selects one before the
+        # dialog opens: the dialog does not keep its settings, thus a user
+        # who stops here to save loses nothing.
+        live = False
+        stale = board_reader.unsaved_stackup(board)
+        if stale:
+            ask = wx.MessageDialog(None, stale, "RFsim",
+                                   wx.YES_NO | wx.CANCEL | wx.ICON_WARNING)
+            ask.SetYesNoCancelLabels("Use the new values",
+                                     "Use the saved values", "Cancel")
+            answer = ask.ShowModal()
+            ask.Destroy()
+            if answer == wx.ID_CANCEL:
+                return
+            live = answer == wx.ID_YES
+
         # Get the port data for the preview in the dialog. The margin has
         # no effect on this data.
-        preview = board_reader.extract(board, pads, 1.0)
+        preview = board_reader.extract(board, pads, 1.0, live_stackup=live)
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
@@ -125,8 +142,10 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
         # **None is the "KiCad's Stackup" preset of the dialog.** The
         # substrate goes to extract() as None, thus the (stackup ...)
-        # block of the board file gives every layer its own er, tan d
-        # and thickness, and model["stackup_source"] becomes "file".
+        # block of the board gives every layer its own er, tan d and
+        # thickness. It is the block of the saved file, or of the board
+        # in memory if the user selected the new values above, and
+        # model["stackup_source"] becomes "file" or "memory".
         if any(v is None for v in substrate.values()):
             substrate = None
         # The parasitics of each R/L/C part, from the rows of the dialog.
@@ -135,7 +154,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         para = settings.pop("lumped_parasitics", None) or {}
 
         model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate)
+                                     substrate, live_stackup=live)
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
@@ -149,6 +168,12 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                     e["type"] = v["type"]
                 if v.get("value") is not None:
                     e["value"] = v["value"]
+                # A series RLC part gives R, L and C and no single value.
+                # The three live in the model alone: the board file does
+                # not change, and `board_reader` reads nothing new.
+                if e["type"] == "RLC":
+                    e.update(value=None, r=v.get("r"), l=v.get("l"),
+                             c=v.get("c"))
         # A part whose Model checkbox is off does not go into the model at
         # all. Its pads stay in the copper, thus the gap between them stays
         # open. This is the same result as the old checkbox for all the
@@ -156,7 +181,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         model["lumped_elements"] = [
             e for e in model["lumped_elements"]
             if para.get(e["ref"], {}).get("model", True)
-            and e.get("type") and e.get("value") is not None]
+            and e.get("type")
+            and (e.get("value") is not None or e["type"] == "RLC")]
         for p, t, f in zip(model["ports"], port_types, port_feed):
             p["type"] = t
             if f and not p["direction"]:

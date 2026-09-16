@@ -144,10 +144,46 @@ def test_the_ports_are_on_the_field_views():
     f.Destroy()
 
 
+def test_the_field_views_have_the_scale_of_cst():
+    """The field of a matched line agrees with 0.5 W of incident power.
+
+    CST drives a port with a wave of 1 sqrt(W) peak, which is 0.5 W, and
+    the field views use the same reference. Into 50 ohm that is a voltage
+    of sqrt(2 * 50 * 0.5) = 7.07 V peak, and |Ez| * h under the strip
+    gives that voltage. The run of 2026-09-15 gave 7.04 V. An error of 2
+    or of sqrt(2) in the scale moves the voltage by 41% or more.
+    """
+    import json
+    import numpy as np
+    with open(os.path.join(OUT, "model.json")) as fh:
+        model = json.load(fh)
+    z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
+    p1, p2 = model["ports"][:2]
+    h = abs(z_of[p1["layer"]] - z_of[p1["ref_layer"]]) * 1e-3
+    x, y, E, _ = gui._load_field(os.path.join(OUT, "exc1", "Ef.h5"))
+    # The centre line of the strip, from 20% to 80% of the distance
+    # between the ports. The mean removes most of the ripple that the
+    # small mismatch makes.
+    ts = np.linspace(0.2, 0.8, 121)
+    ix = [int(np.argmin(np.abs(x - (p1["x"] + t * (p2["x"] - p1["x"])))))
+          for t in ts]
+    iy = [int(np.argmin(np.abs(y - (p1["y"] + t * (p2["y"] - p1["y"])))))
+          for t in ts]
+    v = float(np.mean([abs(E[j, i, 2]) for i, j in zip(ix, iy)])) * h
+    z0 = model["settings"]["z0"]
+    want = float(np.sqrt(2.0 * z0 * 0.5))
+    assert abs(v / want - 1.0) < 0.1, \
+        "the line carries %.2f V, and 0.5 W into %g ohm gives %.2f V" \
+        % (v, z0, want)
+    print("the field views have the scale of CST OK (%.2f V, and %.2f V "
+          "from 0.5 W)" % (v, want))
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_every_view_draws()
     test_the_field_views_say_what_they_show()
     test_the_far_field_views_say_directivity()
     test_the_ports_are_on_the_field_views()
+    test_the_field_views_have_the_scale_of_cst()
     print("PASS")

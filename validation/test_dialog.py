@@ -439,6 +439,31 @@ def test_the_substrate_starts_at_fr4():
           % len(gui.SUBSTRATE_PRESETS))
 
 
+def test_the_rogers_grades_have_two_rows():
+    """Each Rogers grade gives a stripline row and a microstrip row.
+
+    Rogers gives two Dk values for one laminate: the process Dk, which it
+    measures with a clamped stripline, and a larger design Dk for a
+    microstrip. The list holds both, and a row must write its OWN value:
+    two rows with one name and two numbers are easy to swap. The tan d
+    is the same in the two rows of a grade.
+    """
+    names = [p[0] for p in gui.SUBSTRATE_PRESETS]
+    d = dialog()
+    for grade, strip, micro, tand in (("RO4350B", 3.48, 3.66, 0.0037),
+                                      ("RO4003C", 3.38, 3.55, 0.0027)):
+        for kind, er in (("stripline", strip), ("microstrip", micro)):
+            name = "Rogers %s (%s)" % (grade, kind)
+            assert name in names, "no row %r in %s" % (name, names)
+            d.preset.SetSelection(names.index(name))
+            d._on_preset(None)
+            s = d.get_settings()
+            assert (s["er"], s["tand"]) == (er, tand), \
+                "%s gives er %s and tan d %s" % (name, s["er"], s["tand"])
+    d.Destroy()
+    print("the Rogers grades have two rows OK (stripline and microstrip)")
+
+
 def test_the_run_limits_reach_the_settings():
     """The two limits of the run and the timestep factor are controls now.
 
@@ -539,6 +564,13 @@ def test_the_kicad_stackup_preset_gives_the_board():
     assert d.cu_t.GetValue() == "0.018", d.cu_t.GetValue()  # one value only
     assert d.get_settings()["er"] is None
     d.Destroy()
+
+    # The stackup of the board in memory, which the user selects when it
+    # has a change that is not saved, fills the preset in the same way.
+    d = dialog(stackup=dict(ROGERS, stackup_source="memory"))
+    assert d.uses_board_stackup(), "a stackup from memory is a stackup"
+    assert d.er.GetValue() == "3.48" and not d.er.IsEnabled(), d.er.GetValue()
+    d.Destroy()
     print("the KiCad's Stackup preset OK (read-only, and None in the "
           "settings)")
 
@@ -584,6 +616,106 @@ def test_the_x_of_the_dialog_does_not_start_the_run():
     print("the X and Cancel give ID_CANCEL OK (Run still gives ID_OK)")
 
 
+def rlc_row(d, i=1):
+    """Give row i as a Series RLC part whose Model is on."""
+    r = d.part_rows[i]
+    cb = d.para_rows[i][1]
+    cb.SetValue(True)
+    fire(cb, wx.EVT_CHECKBOX)
+    r["kind"].SetSelection(gui.KIND_ORDER.index(gui.RLC_KIND))
+    fire(r["kind"], wx.EVT_CHOICE)
+    return r
+
+
+def test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics():
+    """"Series RLC" gives the row three fields and no parasitics at all.
+
+    A part that no single type describes takes this type: a PIN diode
+    that is off is C_T in series with L_s and R_s. Its row shows R, L and
+    C in the place of the one value, and it shows no package choice and
+    no ESR or ESL, because its R and its L ARE the body. The values live
+    in the model alone: `get_settings` gives them in SI, and an EMPTY
+    field gives None, which leaves that component out of the part.
+    """
+    d = dialog([unknown("D1")])
+    r = d.part_rows[1]
+    assert not any(c.IsShown() for c in r["rlc"].values()), \
+        "a row must start with the one value field"
+    rlc_row(d)
+    assert d._kind_of(1) == gui.RLC_KIND, d._kind_of(1)
+    assert r["kind"].GetStringSelection() == "Series RLC", \
+        r["kind"].GetStringSelection()
+    for k, c in r["rlc"].items():
+        assert c.IsShown() and c.IsEnabled(), "the %s field must be open" % k
+    assert not r["value"].IsShown() and not r["qty"].IsShown(), \
+        "a series RLC has no single value"
+    assert not any(c.IsShown() for c in r["para_ctrls"]), \
+        "a series RLC shows no package, no ESR and no ESL"
+    # The row of R1 keeps its value and its parasitics.
+    r0 = d.part_rows[0]
+    assert r0["value"].IsShown() and all(c.IsShown()
+                                         for c in r0["para_ctrls"])
+    r["rlc"]["R"].SetValue("1.5")
+    r["rlc"]["L"].SetValue("0.6")
+    s = d.get_settings()
+    got = s["lumped_parasitics"]["D1"]
+    assert got["type"] == gui.RLC_KIND and got["value"] is None, got
+    assert abs(got["r"] - 1.5) < 1e-12, got
+    assert abs(got["l"] - 0.6e-9) < 1e-21, got      # nH -> SI
+    assert got["c"] is None, "an empty C must leave C out: %r" % got
+    assert (got["package"], got["esl"], got["esr"]) == (None, 0.0, 0.0), got
+    assert got["model"] is True, got
+    # A return to a single type gives the row back as it was, and the
+    # three fields keep their text for the next time.
+    r["kind"].SetSelection(gui.KIND_ORDER.index("C"))
+    fire(r["kind"], wx.EVT_CHOICE)
+    assert r["value"].IsShown() and all(c.IsShown() for c in r["para_ctrls"])
+    assert not any(c.IsShown() for c in r["rlc"].values())
+    assert r["rlc"]["R"].GetValue() == "1.5", r["rlc"]["R"].GetValue()
+    assert "r" not in d.get_settings()["lumped_parasitics"]["D1"], \
+        "a capacitor row must not carry the fields of a series RLC"
+    d.Destroy()
+    print("a series RLC row OK (R, L and C in SI, no parasitics, and back)")
+
+
+def test_a_series_rlc_part_needs_a_positive_component():
+    """_on_ok refuses a series RLC with no component, a 0, or a text.
+
+    Each field is empty or a positive number. A 0 is refused because it
+    reads two ways: a series C of 0 pF is an OPEN circuit, and an R or an
+    L of 0 is no component at all. The L of the part changes the timestep
+    in the same way as an inductor, thus the warning follows it.
+    """
+    d = dialog([unknown("D1")])
+    r = rlc_row(d)
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        for fields, ok in (({}, False), ({"C": "0"}, False),
+                           ({"R": "-1"}, False), ({"L": "abc"}, False),
+                           ({"R": "1.5", "C": "0"}, False),
+                           ({"C": "0.3"}, True),
+                           ({"R": "1.5", "L": "0.6", "C": "0.3"}, True)):
+            for k, c in r["rlc"].items():
+                c.SetValue(fields.get(k, ""))
+            del stopped[:]
+            d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+            if ok:
+                assert not stopped, "%s was refused: %s" % (fields, stopped)
+            else:
+                assert stopped and "Series RLC" in stopped[-1], \
+                    "%s was accepted: %s" % (fields, stopped)
+    finally:
+        wx.MessageBox = old_box
+    assert d.lumped_warn.GetLabel() == "", \
+        "0.6 nH keeps the full timestep: %r" % d.lumped_warn.GetLabel()
+    r["rlc"]["L"].SetValue("100")
+    text = d.lumped_warn.GetLabel()
+    assert "10.0 times longer" in text, text
+    d.Destroy()
+    print("a series RLC part needs a positive component OK (and its L warns)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -597,7 +729,10 @@ if __name__ == "__main__":
     test_the_whole_dialog_scrolls_and_keeps_the_run_button()
     test_the_inductor_warning_follows_the_value()
     test_the_substrate_starts_at_fr4()
+    test_the_rogers_grades_have_two_rows()
     test_the_run_limits_reach_the_settings()
     test_the_kicad_stackup_preset_gives_the_board()
     test_the_x_of_the_dialog_does_not_start_the_run()
+    test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics()
+    test_a_series_rlc_part_needs_a_positive_component()
     print("PASS")
