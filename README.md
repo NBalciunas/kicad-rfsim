@@ -2,10 +2,8 @@
 
 # RFsim
 
-Simulate the S-parameters of an RF structure directly in the PCB editor
-of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver. The
-geometry goes from the native board objects of KiCad to the primitives of
-CSXCAD.
+Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver.
+The geometry goes from the native board objects of KiCad to the primitives of CSXCAD.
 
 ## Features
 
@@ -80,11 +78,13 @@ The dialog gives only the types that the geometry permits:
 
 The microstrip, the coplanar and the stripline ports measure their own line. The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds every value, the effective permittivity included. These values are for the real track on the real stackup, and not for the reference impedance of the dialog. A lumped port has no line, thus it gives no such value.
 
-The coarse preset reads a little low: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.9 ohm at fine, against 49.8 ohm from the theory. Use medium or fine when the number is important.
+The coarse preset reads a little low: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.6 ohm at fine, against 49.8 ohm from the theory. Use medium or fine when the number is important.
 
 ### The substrate and the domain
 
-"KiCad's Stackup" takes εr, tanδ and the thickness from Board Setup > Physical Stackup, layer by layer. The dialog starts there when the board has a stackup, and the four fields then show what the board gives and stay read-only.
+"KiCad's Stackup" takes εr, tanδ and the thickness from Board Setup > Physical Stackup, layer by layer, and each sub-layer of a dielectric is a layer of its own.
+The dialog starts there when the board has a stackup, and the four fields then show what the board gives and stay read-only.
+A field that holds more than one value shows them all, joined with " / ".
 
 > When the stackup has changes that you did not save, RFsim asks which values to use: the new values or the saved values.
 
@@ -107,7 +107,8 @@ A real substrate keeps its tanδ over the whole band, thus the two agree at that
 Over a sweep of 1 to 6 GHz the model made 3.1 times the loss of a real substrate at 1 GHz, and 0.66 times it at 5.5 GHz.
 Put the center of your sweep at the frequency that matters, or keep the sweep narrow, when the loss is important.
 
-The domain fits the full board and adds the margin as air around it. The plugin cuts the copper that crosses the outer edge.
+The domain fits the full board and adds the margin as air around it, and then the absorber outside that air. The absorber is 8 cells deep, thus it grows with the mesh preset and costs the same 8 cells at every preset.
+The plugin cuts the copper that crosses the outer edge, thus a track or a plane that leaves the domain ends inside the absorber and does not reflect.
 
 ### Accuracy
 
@@ -147,6 +148,8 @@ Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "L
 The letter can also come after the number (`4.7k` = 4.7 kohm, `22p` = 22 pF). **The unit letter is optional**, thus `4p7F` and `10uH` read the same as `4p7` and `10u`, and the unit can be a word of its own (`10 kOhm`, `4.7 uF`, `10 nH`). A word that starts with a digit after a space has no effect (`100nF 10%`, `10u 25V`). "DNP" and the other words for a part that is not there give no value. The dialog shows the number that the plugin read, thus you see which value it took.
 
 **Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
+
+**An inductance makes the run longer.** A lumped inductor needs a smaller timestep, thus the plugin divides the step and gives the run the same factor more steps. An inductance of 0.25 nH or less costs nothing, 1 nH takes about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well. The label under the rows of the parts says the number before you start the run.
 
 **"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off. Its row holds three fields, R in ohm, L in nH and C in pF, and no parasitics. The solver puts the three in series in one element. Leave a field empty to leave that component out.
 
@@ -189,14 +192,16 @@ A series resistor of 50 Ω in a 50 Ω line must give S11 ≈ −9.5 dB and S21 �
 The package parasitics. A capacitor in shunt to ground makes a notch in |S21| at its series resonance, and the frequency of that notch gives the body inductance back, also below 1 nH. `packages` repeats this for the 8 chip packages on their KiCad land patterns. `two` puts two parts in series to ground, thus they interact.
 * **`run_cpw.py [mesh] [cpw|stripline]`**  
 The CPW port and the stripline port against closed-form theory, both the impedance and eps_eff. The eps_eff of a stripline must be exactly εr, thus this is the most exact test here.
+* **`run_atten.py [mesh]`**  
+The attenuation of a line, from two lines of 20 mm and 100 mm that differ in length alone. The difference of |S21| gives the loss of the line with no end effect, and it must agree with the closed form of the copper loss and the substrate loss within 15%. The file prints the curve of a constant tanδ beside the curve of the model, thus you see the size of the difference. Run it with the python of the solver.
 * **`run_zone_holes.py [mesh]`**  
 A filled zone with a void of 8 x 6 mm below the line, against the same board with none. The void must make a large step in S11, which shows that the hole stays open.
 * **`run_feature.py [mesh] [stub width in mm]`**  
 The number of mesh cells across a copper feature that no port covers, against closed-form theory. An open stub is a quarter-wave resonator, thus the notch of |S21| gives its eps_eff, and two stub lengths remove the end effects. Run it with the python of the solver.
 * **`run_via.py [mesh]`**  
-The inductance of one via to the ground plane, against the closed form of Goldfarb and Pucel, for four drill sizes. A board with no via removes the line from the result. It does not pass at present: at some drill sizes the mesh keeps the via as one thin wire, and a via of 0.6 mm drill then reads 2.5 times its inductance. Run it with the python of the solver.
+The inductance of one via to the ground plane, against the closed form of Goldfarb and Pucel, for four drill sizes. A board with no via removes the line from the result. Every drill stands within 20% of the closed form at the medium preset. At the coarse preset the smallest drill (0.3 mm) does not pass: the mesh step there merges the three lines of that barrel into one, the via becomes a thin wire and it reads +54%. Use a finer preset for a board with such a via. Run it with the python of the solver.
 * **`run_stability.py [fast|slow|all]`**  
-The timestep rule for a lumped inductor. `fast` compares the timestep of the plugin against the one at which the run diverges, on 6 geometries, in about 15 minutes. `slow` finds a different failure: a lumped inductor also carries a mode that grows. That stage does not pass at present: a body inductance below 1 nH keeps a margin of 7 times, and 10 nH keeps none.
+The timestep rule for a lumped inductor. `fast` compares the timestep of the plugin against the one at which the run diverges, on 8 geometries, in about 40 minutes: the smallest margin is 1.8 times. `slow` finds a different failure: a board with a small feature in it, such as a gap, a narrow track or a part, also carries a mode that grows, and no timestep corrects it. A run that stops at its end criteria ends 3 times or more before that mode, thus a normal run does not reach it; a run that you make long on purpose can.
 * **`test_ports.py`**  
 The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, the cells near a CPW and a stripline, the copper of one layer at a time, and the one element of a Series RLC part. It needs no KiCad and no solver run, thus it takes seconds. Run it with the python of the solver.
 * **`mesh_diff.py [revision]`**  
@@ -211,6 +216,8 @@ The dialog with no display: the rows of the parts, the packages, the parasitics 
 Every view of the results window, with no display. It reads back the title, the labels and the color bar, and it needs `validation/out_coarse` from `run_headless.py coarse`.
 * **`test_touchstone.py`**  
 The Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
+* **`test_growth.py`**  
+The guard that refuses a run whose field grew instead of decaying. It makes four traces — a resonator with a high Q, two modes that beat, a resonator that ends over its own excitation, and a run that turns and grows — and the first three must pass and the last one must be refused. It needs no solver run.
 * **`make_test_board.py`**  
 Makes the microstrip board of `run_headless.py`, and the CPW board and the stripline board of `run_cpw.py`.
 

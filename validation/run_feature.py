@@ -29,9 +29,9 @@ and every constant end effect cancels. This is the method of
 carries no offset.
 
 The closed form is Hammerstad and Jensen for the static value, with the
-dispersion of Kirschning and Jansen at the frequency of the notch. P16
-says that a STATIC closed form cannot decide a narrow line, thus this
-file does not use one.
+dispersion of Kirschning and Jansen at the frequency of the notch. A
+STATIC closed form cannot decide a narrow line, because the eps_eff of a
+run stands over the static value, thus this file does not use one.
 
 Run it with the python of the solver, or with the python of KiCad (it
 needs no pcbnew, and it starts the solver itself):
@@ -50,9 +50,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # RFSIM_PLUGINS names the plugins directory to measure, thus this file
-# can run against a copy of the code that holds a different rule. This
-# is the A/B of NOTES.md: copy `plugins/` outside the repository, change
-# the one rule, and compare the two answers on the same board.
+# can run against a copy of the code that holds a different rule: copy
+# `plugins/` outside the repository, change the one rule, and compare
+# the two answers on the same board.
 PLUGINS = os.environ.get("RFSIM_PLUGINS") or os.path.join(
     os.path.dirname(HERE), "plugins")
 sys.path.insert(0, PLUGINS)
@@ -114,9 +114,9 @@ def z0_static(w, h, er):
 def eps_eff_f(w, h, er, f_hz):
     """Kirschning and Jansen: eps_eff at a frequency, not at DC.
 
-    P16 says that a static closed form cannot decide a narrow line,
-    because the eps_eff of a run stands over the static value. This
-    correction is the part of that gap which the THEORY explains.
+    A static closed form cannot decide a narrow line, because the
+    eps_eff of a run stands over the static value. This correction is
+    the part of that gap which the THEORY explains.
     """
     u = w / h
     fn = f_hz / 1e9 * h                      # GHz*mm
@@ -170,19 +170,24 @@ def board_model(l_stub, mesh, w_stub=W_STUB):
             [xc + 0.5 * w_stub, top], [xc - 0.5 * w_stub, top]]
     ground = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     margin = 4.0
+    # The region holds the clear air AND the PML band, in the same way
+    # as `board_reader.extract`: the band is 8 cells of the mesh step.
+    pml_mm = solverenv.pml_depth(solverenv.mesh_res(F_STOP, ER, mesh))
+    d_reg = margin + pml_mm + 0.05
     port = dict(layer="F.Cu", ref_layer="B.Cu", ref_layer2=None, height=None,
                 asymmetry=0.0, gap=None, width=W_LINE, length=W_LINE,
                 track_width=W_LINE, type="msl", copper_run=None, y=yc)
     return {
-        "version": 1,
+        "version": 3,
         "stackup_source": "default",
         "copper_layers": [{"name": "F.Cu", "z": H_SUB, "thickness": 0.035},
                           {"name": "B.Cu", "z": 0.0, "thickness": 0.035}],
         "dielectric_layers": [{"name": "dielectric 1", "z_top": H_SUB,
                                "z_bottom": 0.0, "epsilon": ER,
                                "loss_tangent": 0.02}],
-        "region": {"x0": x0 - margin - 0.05, "x1": x1 + margin + 0.05,
-                   "y0": y0 - margin - 0.05, "y1": y1 + margin + 0.05},
+        "region": {"x0": x0 - d_reg, "x1": x1 + d_reg,
+                   "y0": y0 - d_reg, "y1": y1 + d_reg},
+        "pml_mm": pml_mm,
         "board_rect": {"x0": x0, "x1": x1, "y0": y0, "y1": y1},
         "polygons": {"F.Cu": [line, stub], "B.Cu": [ground]},
         "vias": [],
@@ -203,8 +208,8 @@ def runner_with(cells, root):
 
     The value is a constant of the module, thus a run cannot change it
     from the model. This copies `plugins/` beside the work and rewrites
-    that ONE line, which is the method that NOTES.md gives for an A/B
-    against a different runner.
+    that ONE line, thus the rig measures a different rule on the same
+    board.
     """
     dst = os.path.join(root, "plugins_%d" % cells)
     # Copy every time. A copy that stays behind measures the code of
@@ -232,7 +237,7 @@ def realizable(cells, l_stub, mesh, w_stub, root):
 
     The rule and the merge tolerance argue with each other, thus the
     only reliable answer comes from `_mesh` itself. This costs no solver
-    run: it is the fast path of NOTES.md, "the mesh rules in seconds".
+    run: the mesh rules alone give the answer in seconds.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location(

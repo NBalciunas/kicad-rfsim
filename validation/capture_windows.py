@@ -1,7 +1,7 @@
 """Capture the windows of the GUI to PNG files, with no display needed.
 
-The capture of 2026-08-04 (3) found problem 15, which the eye did not:
-the sequence of the pictures showed the package choice fall back to "No
+A capture of 2026-08-04 found a defect that the eye did not: the
+sequence of the pictures showed the package choice fall back to "No
 parasitics" after an edit, and a person who clicks reads that as a thing
 that they did. That harness stayed in the scratchpad of a session, thus
 the next change to the dialog had nothing to compare against. This file
@@ -91,7 +91,7 @@ def capture_dialog(out):
         d = dialog(extra)
         shot(d, os.path.join(out, name + ".png"))
         d.Destroy()
-    # The state that the capture of 2026-08-04 (3) found problem 15 in:
+    # The state that the capture of 2026-08-04 found that defect in:
     # an edit of the ESL must move the row to "Custom".
     d = dialog()
     _, _, ch, esl, _ = d.para_rows[0]
@@ -105,7 +105,7 @@ def capture_dialog(out):
     ev.SetEventObject(esl)
     esl.GetEventHandler().ProcessEvent(ev)
     shot(d, os.path.join(out, "dialog-after-esl-edit.png"))
-    print("   the last two pictures are the sequence of problem 15: the "
+    print("   the last two pictures are the sequence to examine: the "
           "second\n   one must show \"Custom\", and not \"No parasitics\".")
     d.Destroy()
 

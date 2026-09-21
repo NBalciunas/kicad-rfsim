@@ -61,7 +61,9 @@ EPS0 = 8.8541878128e-12
 # timestep, thus about 16 times the work. It is for a structure whose
 # detail is much smaller than the wavelength, such as a divider or a
 # coupler, and not for a first look.
-RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0, "ultrafine": 80.0}
+# The rigs read `runner.RES_DIV`, and `solverenv` owns it: the dialog
+# and `board_reader` need the same step to size the domain.
+RES_DIV = solverenv.RES_DIV
 # The port types that openEMS de-embeds. Each one gives the impedance of
 # the line and the propagation constant. A lumped port does not.
 TL_PORTS = ("msl", "cpw", "stripline")
@@ -96,6 +98,32 @@ MSL_STRIP_CELLS = 4
 # rounds every coordinate to 1e-5 mm, thus the two ends of a straight
 # edge are EXACTLY equal and any value under that grid serves.
 FLAT_MM = 1e-7
+# The surface lines of a via go this fraction of the radius INSIDE the
+# barrel. openEMS makes a metal primitive PEC on the edges of the Yee
+# grid whose NODE lies in the primitive, and a node exactly on the
+# surface counts only when the doubles put it inside: 20.2 - 20.0 =
+# 0.1999999999999993 lies in r = 0.2, and 20.3 - 20.0 =
+# 0.3000000000000007 lies outside r = 0.3. Thus the barrel of a 0.6 mm
+# drill, which is the drill of every via board here, held ONE PEC edge
+# and read +155% at coarse and +158% at medium in inductance against
+# Goldfarb and Pucel, where a barrel of 5 edges reads +13% to +20%. With
+# the lines inside, r = 0.3 mm reads +19% and +20%.
+#
+# 1 ppm of the radius is 0.3 nm on a 0.6 mm drill, thus it cannot move
+# the geometry: it takes the node off the boundary and nothing else. It
+# must stay above the rounding of `build()`, which takes every mesh line
+# to 1e-9 mm: 1 ppm of a 0.1 mm radius is 0.1 nm, thus 100 times that
+# rounding.
+#
+# **`_merge_close` can still take a line of a via.** A via whose radius
+# is under `tol` keeps ONE edge, because the merge joins its own three
+# lines: at coarse `tol` is 0.18 mm, thus r = 0.15 mm stays at +54%. The
+# owner refused a smaller `tol`, because it makes the cells of the whole
+# board smaller. A copper edge within `tol` of a via line moves that
+# line as well, and 19 of the 102 axis cases of `validation/` stand so;
+# the other 83 hold all three nodes inside, against 2 of 102 before the
+# lines went in.
+VIA_SURFACE = 1.0 - 1e-6
 # The number of mesh cells across a copper feature that is narrower than
 # `res` and that no port covers: a track, a gap between two pads, or a
 # slot. 2 cells put ONE line inside the feature, and its two edge lines
@@ -108,42 +136,60 @@ FLAT_MM = 1e-7
 # microstrip of `validation/` gave 44.3 ohm at coarse and 47.2 at medium
 # against 49.8 ohm from Hammerstad and Jensen, and it did NOT converge.
 #
-# **Nobody has measured this number against the theory.** Every line of
-# every validation board carries a port, and `_feature_lines` skips a
-# feature that holds a line already, thus the rig cannot see this rule.
-# Raise it with a measurement, and grade the mesh outward from the
-# feature at the same time, as the port branches of `_mesh` do: a cell
-# of w/4 beside a cell of `res` is a step that reflects the wave.
+# **`validation/run_feature.py` measures this number** against a closed
+# form: the eps_eff of an open stub, from the notches of two lengths. A
+# 1.50 mm stub at the coarse preset reads +3.9% at 1 cell, +1.0% at 2
+# cells and +0.4% at 3; a 0.40 mm stub at coarse reads +8.1% at 1 cell
+# and +2.5% at 2. The answer converges at 2 to 3 cells, thus 2 is
+# enough. The mesh does not grade outward from a feature, and
+# `_feature_lines` gives the measurement for that.
 POLY_FEATURE_CELLS = 2
-# The safety margin of the timestep rule for a lumped inductor. The
-# largest stable factor follows 1/sqrt(L[nH]), and the measurement of
-# 2026-08-05 over 6 geometries gives a margin of 1.0 to 2.7 for the bare
-# law. 1.0 is no margin at all: on a board of 6.4 mm an inductor of 1 nH
-# sits exactly on the boundary. This coefficient takes the worst
-# geometry back to about 1.5. It costs 1/0.7 = 1.43 times more timesteps
-# on a board that holds a real inductor, and NOTHING on a usual board: a
-# body ESL is under 1 nH, thus the factor stays at 1.0.
-# `validation/run_stability.py` measures the margin again.
-LE_STAB_MARGIN = 0.7
+# The margin and the law of the timestep rule are in `solverenv`,
+# because the DIALOG shows what an inductor costs before a run and it
+# must not import this module: an import of the runner replaces
+# `warnings.showwarning` for the whole process. The name stays here for
+# the rigs that read it.
+LE_STAB_MARGIN = solverenv.LE_STAB_MARGIN
 # `_diverged` calls a run UNSTABLE when the largest |u| of the last tenth
-# of the port data passes this multiple of the largest |u| of the first
-# half. A passive structure cannot end above the level that its own
-# excitation made, thus the physical limit is 1 and everything above it
-# is margin. The margin covers a resonator that keeps energy from the
-# pulse and rings at the end of the run: such a trace holds a ratio near
-# 1, and it must NOT give a false alarm.
-# Measured on the 0603 ESL board of `run_shunt.py`: 8 runs that ended
-# well gave 0.0008 to 0.0023, and the run that grew gave 1.65e8. Thus 10
-# stands about 4300 times above every good run and 7 orders below the
-# bad one, and no value in that range separates them differently.
-GROWTH_LIMIT = 10.0
+# of the port data passes this multiple of the SMALLEST point of the
+# envelope of that trace.
+#
+# **The rule compared the end with the largest |u| of the FIRST HALF
+# before 2026-09-20, and a growth that starts late passed it** (B42). A
+# trace that decays by 5 orders and then grows by 3 still ends under its
+# own head, thus the old rule saw nothing: the board of
+# `validation/out_rlc_growth_late_2026-09-19/` grew with an e-fold of
+# 6.9 ns, ended at 0.0038 of its head and the runner ACCEPTED its
+# S-matrix. The minimum of the envelope is the turn of such a trace, and
+# everything after it is the growth.
+#
+# **The envelope, and not |u| itself.** |u| is zero at every null of the
+# trace, thus the smallest raw sample is zero. `GROWTH_SEGMENTS` splits
+# the trace into equal parts and takes the largest |u| of each one, and
+# the turn is the smallest of those between the excitation and the end.
+#
+# **The limit covers a null of a beat.** Two modes that beat give an
+# envelope with a deep null in the middle, and the trace then rises far
+# above it with no instability at all. Measured over the 132 port traces
+# of the boards of `validation/` that their rigs ACCEPTED: the largest
+# ratio is 93 (the 2512 land with no ESL, whose envelope turns at 62% of
+# the window), the next ones are 37, 36 and 25, and every other board
+# stands under 15. The trace that MUST give an alarm gives 1.4e5. Thus
+# 3000 stands 32 times over the worst run that must pass and 46 times
+# under the run that must not, which is the middle of that gap.
+GROWTH_LIMIT = 3000.0
+# The parts that make the envelope. 200 parts of a trace of 5000 rows
+# hold 25 samples each, thus one part covers some periods of the
+# excitation and its largest |u| is a point of the envelope and not a
+# sample of the carrier.
+GROWTH_SEGMENTS = 200
 # A trace this short holds the excitation alone, thus its end says
 # nothing about the decay and the test above does not run.
 GROWTH_MIN_ROWS = 200
 # The newest version of model.json that this runner can read. It must
 # agree with `board_reader.MODEL_VERSION`, and the two files cannot
 # import each other: board_reader imports pcbnew, and this file must not.
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 
 def _strip_cells(port_type):
@@ -174,12 +220,13 @@ def _time_step_factor(model):
     **The MARGIN of that law is not the same on every board**, and
     2026-08-05 measured it on 6 geometries: the mesh preset, the box of
     the element and the thickness of the board.
-    `validation/run_stability.py` holds the measurement, and the log of
-    that day holds the numbers. The margin runs from 2.7 down to **1.0**,
-    and the worst case is a THICK board: the cells at the element grow
-    with the substrate, and a board of 6.4 mm puts 1 nH exactly ON the
-    boundary. Thus `LE_STAB_MARGIN` divides the law, and the worst
-    geometry then keeps a margin of about 1.5.
+    `validation/run_stability.py` holds the measurement and gives the
+    numbers again. The margin runs from 2.7 down to **1.0**, and the
+    worst case is a THICK board: the cells at the element grow with the
+    substrate, and a board of 6.4 mm puts 1 nH exactly ON the boundary.
+    Thus `LE_STAB_MARGIN` divides the law, and the worst geometry then
+    keeps a margin of about 1.5. `solverenv.time_step_factor` holds the
+    law and the margin, and the dialog reads the same function.
 
     The mesh preset alone changes nothing, and that is not luck: the two
     faces of the element box are anchored mesh lines with nothing between
@@ -200,9 +247,10 @@ def _time_step_factor(model):
         return float(s["time_step_factor"])
     if not s.get("lumped", True):
         return None
-    # The package parasitics put an ESL in each element. A body ESL is
-    # less than 1 nH, thus it keeps the factor at 1.0 and it costs no
-    # extra steps. But the code must count it: the criterion is the
+    # The package parasitics put an ESL in each element. A body ESL of
+    # 0.25 nH or less keeps the factor at 1.0 and costs no extra steps,
+    # and a larger body (0603 to 2512) costs 1.2 to 1.9 times more
+    # steps. The code must count it either way: the criterion is the
     # largest inductance in the model, whatever its source.
     ind = []
     for e in model.get("lumped_elements", []):
@@ -217,7 +265,7 @@ def _time_step_factor(model):
             ind.append(e["esl"])
     if not ind:
         return None
-    return min(1.0, LE_STAB_MARGIN / (max(ind) * 1e9) ** 0.5)
+    return solverenv.time_step_factor(max(ind) * 1e9)
 
 
 def _max_timesteps(model):
@@ -344,7 +392,7 @@ def _report_end(sim_path, nrts, end_criteria):
     holds the energy that was still in the structure, which reads as a
     resonance that is too shallow or as a ripple, and openEMS gives no
     message that the user sees in the log of the plugin. A structure
-    with a high Q is the usual cause (P7).
+    with a high Q is the usual cause.
     """
     end = _run_length(sim_path)
     if not end:
@@ -376,12 +424,13 @@ def _diverged(sim_path):
     test comes first, and it reads the file as text.
 
     **Growth** is a run that is not stable and that never reaches NaN.
-    The field of a passive structure decays after the excitation, thus
-    a trace that ENDS above its own early level did not decay. Such a
-    run still writes a well-formed Touchstone file, and its S-matrix
-    comes out flat near 1 over the whole sweep, thus nothing else in
-    this code refuses it. A shorter timestep does NOT correct it: the
-    rate of that growth does not follow the timestep.
+    The field of a passive structure decays after the excitation and it
+    never turns back up, thus a trace that ends far above the TURN of
+    its own envelope did not decay. Such a run still writes a
+    well-formed Touchstone file, and its S-matrix comes out flat near 1
+    over the whole sweep, thus nothing else in this code refuses it. A
+    shorter timestep does NOT correct it: the rate of that growth does
+    not follow the timestep.
     """
     names = sorted(glob.glob(os.path.join(sim_path, "port_ut_*")))
     for fn in names:
@@ -399,9 +448,31 @@ def _diverged(sim_path):
         if a.ndim != 2 or len(a) < GROWTH_MIN_ROWS:
             continue
         u = np.abs(a[:, 1])
-        head = u[:len(u) // 2].max()
+        # The envelope: the largest |u| of each equal part of the trace.
+        # The TURN is its lowest point between the excitation and the
+        # end, and the end is the largest |u| of the last tenth.
+        #
+        # **The search starts at the peak of the FIRST HALF**, which is
+        # the excitation. A trace begins at zero and rises with the
+        # pulse, thus the minimum of the whole envelope would be that
+        # rise and every board would give an alarm. **It stops before
+        # the last tenth**, thus the end never compares with itself: a
+        # trace that decays to the last row has its lowest point there,
+        # and it would give a ratio of 1 whatever it did before.
+        #
+        # The peak of the WHOLE envelope cannot be the anchor: a trace
+        # that grows PAST its own excitation has its largest point at
+        # the end, and the search would then hold that one point alone.
+        nseg = min(GROWTH_SEGMENTS, len(u) // 10)
+        env = np.array([c.max() for c in np.array_split(u, nseg) if len(c)])
+        env = env[env > 0]
+        if len(env) < 3:
+            continue
+        start = int(np.argmax(env[:max(1, len(env) // 2)]))
+        stop = max(start + 1, len(env) - max(1, len(env) // 10))
+        turn = env[start:stop].min()
         tail = u[-(len(u) // 10):].max()
-        if head > 0 and tail > GROWTH_LIMIT * head:
+        if tail > GROWTH_LIMIT * turn:
             return os.path.basename(fn), "growth"
     return None
 
@@ -439,7 +510,8 @@ def _merge_close(vals, tol, anchors=()):
     return out
 
 
-def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS):
+def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS,
+                   one_cell=()):
     """Give the lines that divide each narrow feature of the copper.
 
     `edges` holds the coordinates of the straight edges of the copper on
@@ -455,6 +527,18 @@ def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS):
     faces of a lumped element all sit inside a feature, and a second line
     beside them makes the mesh finer for nothing. This also keeps every
     board of `validation/` at the mesh that measured its number.
+
+    **`one_cell` holds the intervals that must keep ONE cell**: the gap
+    of a lumped element, along the current of that element. The gap between
+    the two pads of a part is a narrow feature, thus this rule put a line
+    at the middle of it and the element covered 2 cells in series. 2 is
+    the ONE bad count for the stability of a lumped inductor: the
+    reference board at 10 nH turns at 2.09 ns with 2 cells and the
+    runner refuses the run, while 1, 3, 4 and 6 cells are accepted, and
+    1 cell is accepted at er 2.2, 4.5 and 10.2. The count in the box does
+    not change the value that the engine models (0.3105 nH against
+    0.3104 nH on the shunt board), thus the cell costs nothing to give
+    up.
 
     A feature whose cells would come out smaller than `tol` gets NO
     line: `_merge_close` removes such a line again, and a cell that
@@ -484,6 +568,9 @@ def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS):
     for a, b in zip(edges, edges[1:]):
         if b - a > res:
             continue                     # SmoothMeshLines divides it
+        if any(lo - FLAT_MM <= a and b <= hi + FLAT_MM
+               for lo, hi in one_cell):
+            continue                     # the box of an element: 1 cell
         i = bisect.bisect_right(lines, a)
         if i < len(lines) and lines[i] < b:
             continue                     # a line is inside it already
@@ -533,7 +620,7 @@ def _port_geometry(model, res):
             # values of a line have no meaning; and the metal strip that
             # every de-embedded port adds over its box would go out past
             # the end of the copper, thus the model would hold a line
-            # that the board does not have. Problem 13.
+            # that the board does not have.
             #
             # The cap keeps a little of the run free, because the port
             # must not reach the exact end of the copper. `copper_run`
@@ -577,29 +664,39 @@ def _port_geometry(model, res):
     return ports
 
 
-def _pml_band(lo, hi, margin):
-    """Give the fixed lines of the outer PML band of 8 cells.
+def _pml_band(lo, hi, depth):
+    """Give the fixed lines of the outer PML band of one axis.
 
-    The function gives the lines for the two ends of one axis.
+    `lo` and `hi` are the two ends of the domain and `depth` is how far
+    the band reaches inward from each of them. The band keeps
+    `solverenv.PML_CELLS` equidistant cells, thus its cell is
+    `depth`/8: the absorber costs 8 cells whatever its depth.
     """
-    step = margin / 8.0
-    return ([lo + i * step for i in range(9)]
-            + [hi - i * step for i in range(9)])
+    n = solverenv.PML_CELLS
+    step = float(depth) / n
+    return ([lo + i * step for i in range(n + 1)]
+            + [hi - i * step for i in range(n + 1)])
 
 
 def _mesh(model, ports, res):
     """Give the lists of mesh lines (x, y, z) from the geometry and `res`.
 
-    The domain is the region from the extraction. The outer `margin` on
+    The domain is the region from the extraction. The outer `pml` of
     each of the 6 faces has exactly 8 cells and becomes the PML_8
-    absorber. A band of clear air with the same thickness stays between
-    the structure and the absorber.
+    absorber, and a band of `margin` mm of clear air stays between the
+    structure and it. `extract` made room for both.
+
+    **The depth comes from the model**, because the region must hold it:
+    a model from before 2026-09-20 has no "pml_mm" and its region holds
+    one margin of absorber, thus the fallback gives such a model the
+    mesh that it was made for.
     """
     s = model["settings"]
     margin = s["margin_mm"]
+    pml = model.get("pml_mm") or margin
     r = model["region"]
-    xs = set(_pml_band(r["x0"], r["x1"], margin))
-    ys = set(_pml_band(r["y0"], r["y1"], margin))
+    xs = set(_pml_band(r["x0"], r["x1"], pml))
+    ys = set(_pml_band(r["y0"], r["y1"], pml))
     # A mesh line ON every straight edge of the copper.
     #
     # Before, this loop gave the BOX of each polygon and nothing else,
@@ -610,7 +707,6 @@ def _mesh(model, ports, res):
     # and S21 read -94.4 dB. **openEMS gives NO message for it**: it
     # writes "Unused primitive" only when the WHOLE primitive gets no
     # edge, and one large polygon that loses its middle stays "used".
-    # The log of 2026-08-18 (1).
     #
     # A DIAGONAL edge and the segments of an arc give NO line: such an
     # edge holds no single coordinate, and one line for each vertex of a
@@ -650,13 +746,18 @@ def _mesh(model, ports, res):
     for v in model["vias"]:
         # The CENTER line is necessary, and not only the two edges.
         # openEMS makes a metal primitive into PEC on the edges of the
-        # Yee grid, thus a mesh NODE must lie inside the barrel. The two
-        # edge lines put the nodes exactly on the surface of the cylinder
-        # and leave the inside empty. openEMS then writes "Unused
-        # primitive (type: Cylinder)" and the via conducts nothing: the
-        # planes stay separate and the model is incorrect with no error.
-        xs.update((v["x"] - v["r"], v["x"], v["x"] + v["r"]))
-        ys.update((v["y"] - v["r"], v["y"], v["y"] + v["r"]))
+        # Yee grid, thus a mesh NODE must lie inside the barrel. With no
+        # centre line the nodes sit on the surface of the cylinder and
+        # leave the inside empty. openEMS then writes "Unused primitive
+        # (type: Cylinder)" and the via conducts nothing: the planes stay
+        # separate and the model is incorrect with no error.
+        #
+        # **The two surface lines go 1 ppm INSIDE the barrel**
+        # (`VIA_SURFACE`), because a node exactly on the surface counts
+        # only when the doubles put it inside.
+        r = v["r"] * VIA_SURFACE
+        xs.update((v["x"] - r, v["x"], v["x"] + r))
+        ys.update((v["y"] - r, v["y"], v["y"] + r))
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
@@ -730,7 +831,7 @@ def _mesh(model, ports, res):
         ys.update((e["start"][1], e["stop"][1]))
 
     board_top = model["copper_layers"][0]["z"]
-    zs = set(_pml_band(-2.0 * margin, board_top + 2.0 * margin, margin))
+    zs = set(_pml_band(-(margin + pml), board_top + margin + pml, pml))
     for c in model["copper_layers"]:
         zs.add(c["z"])
     for d in model["dielectric_layers"]:
@@ -758,8 +859,9 @@ def _mesh(model, ports, res):
             # 1.53 mm) moves Z0 by 0.05 ohm, which is 0.1%, and it costs
             # 8.6% more cells. The plane below the strip holds the field,
             # thus the dielectric rule of 4 cells already covers it. A
-            # NARROW line is a different case and it is not settled:
-            # refer to Problems, problem 16.
+            # NARROW line takes its cells ACROSS the strip from
+            # `_feature_lines`, and the run warns when `tol` stops that
+            # rule.
             continue
         # A CPW port also needs its own cells ABOVE and BELOW the plane of
         # the line, and their step must come from the GAP. The line of a
@@ -861,10 +963,22 @@ def _mesh(model, ports, res):
     # One layer at a time, and `xs` / `ys` stay the POOLED lines: a
     # feature that any rule divides already keeps that line, whichever
     # layer put it there.
+    # The gap of each element, along the current of that element and ON
+    # ITS OWN LAYER. The rule below must not divide it: refer to
+    # `_feature_lines`. The layer is a part of the key, because the
+    # copper of another layer can hold a real feature inside the same
+    # interval, and that feature keeps its line.
+    le_gap = {}
+    for e in model.get("lumped_elements", []):
+        k = 0 if e["ny"] == "x" else 1
+        le_gap.setdefault((e["layer"], k), []).append(
+            sorted((e["start"][k], e["stop"][k])))
     narrow = []
     for name in sorted(layer_x):
-        fx, narrow_x = _feature_lines(layer_x[name], xs, res, tol)
-        fy, narrow_y = _feature_lines(layer_y[name], ys, res, tol)
+        fx, narrow_x = _feature_lines(layer_x[name], xs, res, tol,
+                                      one_cell=le_gap.get((name, 0), ()))
+        fy, narrow_y = _feature_lines(layer_y[name], ys, res, tol,
+                                      one_cell=le_gap.get((name, 1), ()))
         xs |= fx
         ys |= fy
         narrow += narrow_x + narrow_y
@@ -1092,25 +1206,37 @@ def build(model, excite_idx, res, want_ff=False):
         g0 = ports_geo[excite_idx]
         z_cut = 0.5 * (g0["z_top"] + g0["z_ref"])
         r = model["region"]
+        # **Both boxes below stand against the FACE of the PML and not
+        # against the edge of the region**, because the band is as deep
+        # as 8 cells of `res` now and the region grew with it. With a
+        # band as deep as the margin, which is every model from before
+        # 2026-09-20, the two give exactly what they gave then.
+        pml = model.get("pml_mm") or s["margin_mm"]
         for name, dt in (("Ef", 10), ("Hf", 11)):
             # dump_mode=1 interpolates to the mesh nodes. The default
             # value (0) dumps the raw Yee values, which draw H one half
             # of a cell away from the copper.
             dump = csx.AddDump(name, dump_type=dt, dump_mode=1, file_type=1,
                                frequency=[f_dump])
-            dump.AddBox([r["x0"], r["y0"], z_cut], [r["x1"], r["y1"], z_cut])
+            # The view holds the structure, the clear air and one
+            # margin of the absorber, as it did before the band became
+            # deeper. A view of the whole band would be mostly absorber.
+            edge = pml - s["margin_mm"]
+            dump.AddBox([r["x0"] + edge, r["y0"] + edge, z_cut],
+                        [r["x1"] - edge, r["y1"] - edge, z_cut])
 
-        # The NF2FF box is in the band of clear air between the structure
-        # and the PML: the edge of the domain plus 1.5 times the margin.
-        # The recording frequency is the same.
+        # The NF2FF box stands in the middle of the band of clear air
+        # between the structure and the PML: the face of the absorber,
+        # and then half of the margin inward. The recording frequency is
+        # the same.
         from openEMS.nf2ff import nf2ff
         margin = s["margin_mm"]
         board_top = model["copper_layers"][0]["z"]
-        inset = 1.5 * margin
+        inset = pml + 0.5 * margin
         ff = nf2ff(csx, "nf2ff",
-                   [r["x0"] + inset, r["y0"] + inset, -2.0 * margin + inset],
+                   [r["x0"] + inset, r["y0"] + inset, -0.5 * margin],
                    [r["x1"] - inset, r["y1"] - inset,
-                    board_top + 2.0 * margin - inset],
+                    board_top + 0.5 * margin],
                    frequency=[f_dump])
 
     print("[rfsim] mesh: %d x %d x %d lines" % tuple(
@@ -1251,7 +1377,7 @@ def _line_data(port, sim_path, freq):
     # amplitude, thus the imaginary part is the difference of two nearly
     # equal numbers. To measure the loss of a line needs a different
     # method: two lines of different lengths, or |S21| of a matched line
-    # over a long span. Refer to the log of 2026-08-05 (5).
+    # over a long span. `validation/run_atten.py` measures it that way.
     return {"Z0_real": np.real(z).tolist(),
             "Z0_imag": np.imag(z).tolist(),
             "eps_eff": np.where(np.isfinite(eps), eps, 0.0).tolist()}
@@ -1351,8 +1477,7 @@ def main(model_path, outdir):
             pass
 
     eps_max = max(d["epsilon"] for d in model["dielectric_layers"])
-    lam_min = C0 / s["f_stop"] / np.sqrt(eps_max) * 1e3  # mm
-    res = lam_min / RES_DIV[s["mesh"]]
+    res = solverenv.mesh_res(s["f_stop"], eps_max, s["mesh"])
     print("[rfsim] mesh resolution: %.3f mm (%s)" % (res, s["mesh"]), flush=True)
 
     freq = np.linspace(s["f_start"], s["f_stop"], s.get("n_freq", 401))
@@ -1395,15 +1520,17 @@ def main(model_path, outdir):
                     "settings (e.g. %.3g) and re-run." % (name, tsf, tsf / 2.0))
             raise SystemExit(
                 "[rfsim] ERROR: the FDTD run is not stable — the port data of "
-                "%s ends more than %g times above its own earlier level, thus "
-                "the field grew and did not decay.\n"
+                "%s ends more than %g times above the lowest point that it "
+                "reached, thus the field turned and grew again.\n"
                 "The run would still write an S-matrix, and that S-matrix is "
                 "NOT valid: |S11| and |S21| come out flat near 1 over the "
                 "whole sweep, with no NaN in the file.\n"
                 "A shorter timestep does NOT correct this, and this run used "
-                "time_step_factor %.3g. The growth comes from a lumped "
-                "element: take that element out of the model, or give it a "
-                "smaller inductance." % (name, GROWTH_LIMIT, tsf))
+                "time_step_factor %.3g. Give the domain more room: a larger "
+                "\"margin_mm\" moves the absorber away from the copper. A "
+                "lumped inductor makes such a mode faster, thus a smaller "
+                "inductance also buys time."
+                % (name, GROWTH_LIMIT, tsf))
         # **Read the line of EVERY de-embedded port, and keep the port
         # that this run did NOT excite.** The three voltage probes of a
         # port stand at three adjacent mesh lines, thus they measure the

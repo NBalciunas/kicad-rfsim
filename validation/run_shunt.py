@@ -66,8 +66,9 @@ FIT_HALF_WIDTH = 8      # the bins at each side of the minimum, for the fit
 NOTCH_MIN_DB = -10.0    # a notch that is not deeper than this is not a notch
 # The depth window that makes two dips a TIE. The deepest bin does NOT
 # always give the series resonance: the 2512 land with its ESL has a dip
-# at 0.8525 GHz and a second at 1.3325 GHz, and the mesh of P18 put them
-# 0.016 dB apart. The pick flipped to the higher one, thus L_total came
+# at 0.8525 GHz and a second at 1.3325 GHz, and the mesh that puts a
+# line on every straight edge of the copper put them 0.016 dB apart.
+# The pick flipped to the higher one, thus L_total came
 # out SMALLER than the board alone and the run gave an ESL of -1.1646 nH.
 # `notch` takes the LOWEST dip that comes within this margin of the
 # deepest one: the series resonance of C with L_total is the FIRST
@@ -96,7 +97,7 @@ ESL_TOL = 0.15          # of the nominal value
 ESL_FLOOR_H = 0.03e-9   # ...but never a tolerance smaller than this
 # The two-part board of `two()`: a lumped inductor that is an element of
 # its own reads about 5% high, thus its tolerance is not the tolerance of
-# an ESL. Refer to the log of 2026-08-04 (10).
+# an ESL. `two()` below measures that excess.
 L_PART_TOL = 0.15
 # |S11|^2 + |S21|^2 at the notch. The branch has no resistance in these
 # runs, thus the power that does not go through must come back, and only
@@ -128,11 +129,10 @@ def _in_poly(polys, x, y):
 def _check_gaps_open(model, centers):
     """Test that no copper bridges any gap of `centers`.
 
-    The lesson of the log of 2026-08-04 (5): a round track end went past a
-    pad and into the gap, and the board then measured the copper and not
-    the part. Test the board BEFORE you read a number from it. The ring
-    of a via can do the same on a small land: refer to
-    `run_lumped.make_shunt`.
+    A round track end once went past a pad and into the gap, and the
+    board then measured the copper and not the part. Test the board
+    BEFORE you read a number from it. The ring of a via can do the same
+    on a small land: refer to `run_lumped.make_shunt`.
     """
     polys = model["polygons"].get("F.Cu", [])
     assert polys, "the model holds no copper on F.Cu"
@@ -197,7 +197,8 @@ def simulate(tag, cval, esl, mesh, pkg=None):
         os.path.join(outdir, "shunt_c.kicad_pcb"), pkg=pkg)
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=F_STOP, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     les = model["lumped_elements"]
@@ -244,7 +245,7 @@ def _solve(outdir, model, tag):
         print(log.stdout[-3000:])
         print(log.stderr[-2000:])
         raise SystemExit("solver failed for %s" % tag)
-    # "timesteps" keeps the line that says HOW the run ended (B29). The
+    # "timesteps" keeps the line that says HOW the run ended. The
     # log gave the numbers of a run and no way to see whether it met its
     # end criteria or stopped at the limit, and a run that stops at the
     # limit measures a notch that is not yet at its full depth.
@@ -269,10 +270,10 @@ def two(mesh="coarse"):
     `1/(2*pi*sqrt((L + L_board)*C))`, thus the two parts together give a
     FREQUENCY. This is on purpose. A matching network is the circuit that
     the roadmap names, but its observable is a return loss - an
-    AMPLITUDE - and the log of 2026-08-04 (6) measured what an amplitude
-    is worth on this path: 10 to 20 ohm of systematic error. A resonance
-    of the pair tests the same interaction with the observable that the
-    log of (8) showed to be reliable.
+    AMPLITUDE - and an amplitude is worth little on this path: the
+    systematic error of the series extraction is 10 to 20 ohm. A
+    resonance of the pair tests the same interaction with a FREQUENCY,
+    which carries no such error.
 
     The control is the same difference as everywhere here: the second run
     makes the inductor a 0 ohm RESISTOR, which `runner.build` puts into
@@ -283,8 +284,8 @@ def two(mesh="coarse"):
     """
     cval = 4.7e-12
     # TWO values of the inductor, and not one. A lumped inductor of its
-    # own reads about 8% HIGH on this mesh (the log of 2026-08-04 (10)),
-    # and one value alone cannot say whether an error is proportional to
+    # own reads about 8% HIGH on this mesh, and one value alone cannot
+    # say whether an error is proportional to
     # the inductor or a constant of the geometry. Two values can.
     # 2 nH and 1 nH. An inductor of 5 nH is OUT of the regime where this
     # board measures: refer to POWER_MIN.
@@ -300,7 +301,8 @@ def two(mesh="coarse"):
         board, pads = run_lumped.make_shunt2(
             os.path.join(outdir, "shunt2.kicad_pcb"))
         margin = 4.0
-        model = board_reader.extract(board, pads, margin_mm=margin)
+        model = board_reader.extract(board, pads, margin_mm=margin,
+                                     f_stop=F_STOP, mesh=mesh)
         for p in model["ports"]:
             p["type"] = "msl"
         les = {e["ref"]: e for e in model["lumped_elements"]}
@@ -363,12 +365,12 @@ def two(mesh="coarse"):
     # +0.041 nH/nH and an intercept of +0.005 nH, and the intercept is
     # under the scatter of this rig (0.01 nH). An additive term of the
     # geometry would give the opposite: an intercept and no slope. Two
-    # probes of 2026-08-04 (10) had already excluded the timestep and a
-    # branch inductance that follows the frequency. Thus the excess
-    # belongs to the lumped inductor itself. The numbers that the log of
-    # (10) used for this conclusion came from a 5 nH run OUTSIDE the
-    # guard; these come from inside it. The test holds the SIGN, because
-    # a value that reads LOW would be a different defect.
+    # earlier probes had already excluded the timestep and a branch
+    # inductance that follows the frequency. Thus the excess belongs to
+    # the lumped inductor itself. The first numbers for this conclusion
+    # came from a 5 nH run OUTSIDE the power guard; these come from
+    # inside it. The test holds the SIGN, because a value that reads LOW
+    # would be a different defect.
     print("\n   the excess is %+.4f nH and %+.4f nH: a lumped inductor of "
           "its own reads high" % (excess[0] * 1e9, excess[1] * 1e9))
     if min(excess) < -ESL_FLOOR_H:

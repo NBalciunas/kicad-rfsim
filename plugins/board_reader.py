@@ -13,6 +13,16 @@ import re
 
 import pcbnew
 
+# The depth of the PML band: `extract` sizes the domain with it and
+# `runner._mesh` lays the cells of the band in it, thus the two must
+# read the same rule. `solverenv` imports nothing but `math` and `os`.
+# The plugin loads this file as a module of a package, and the self-test
+# below runs it as a script, thus the import needs the two forms.
+try:
+    from . import solverenv
+except ImportError:                      # run as a top-level module
+    import solverenv
+
 # The version of the model dict, which `extract()` writes into
 # model.json. The runner refuses a model that is NEWER than the version
 # it knows, because a key that it does not read gives a silent and
@@ -29,7 +39,12 @@ import pcbnew
 #      and no `value`. A runner of version 1 reads such a part as a part
 #      with no value: it leaves the gap between its pads open, and the
 #      run gives a number for a board that has no part there.
-MODEL_VERSION = 2
+#   3  2026-09-20  the region holds the clear air PLUS the depth of the
+#      PML band, which "pml_mm" carries, and not two margins. A runner
+#      of version 2 puts a band of margin/8 at the edge of such a
+#      region: the absorber lands in the wrong place and the mesh is
+#      not the mesh that the numbers of the rigs come from.
+MODEL_VERSION = 3
 
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
@@ -40,7 +55,7 @@ DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
        "r": 1.0, "R": 1.0, "f": 1.0, "F": 1.0, "h": 1.0, "H": 1.0,
        "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
-# **The prefixes are the SAME for R, L and C** (B23). Each type had its
+# **The prefixes are the SAME for R, L and C.** Each type had its
 # own set until 2026-08-06, thus a resistor of 5 milliohm, a capacitor
 # of 1 mF and an inductor of 2.2 mH were all "not understood", and a
 # user had to know which letter each type permits. 'K' is an alias of
@@ -50,7 +65,7 @@ _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
 _PREFIX = "pnuµmkKMGT"
 # The mark of the UNIT. It shows the position of the decimal point and
 # multiplies by 1, thus "4R7" is 4.7 ohm, "4F7" is 4.7 F and "4H7" is
-# 4.7 H (F12). **Each type takes its OWN mark and no other one**,
+# 4.7 H. **Each type takes its OWN mark and no other one**,
 # because the mark names the quantity: "4F7" on a resistor and "4H7" on
 # a capacitor give no value.
 #
@@ -218,6 +233,60 @@ def _stackup_from_file(path):
         return _stackup_from_text(fh.read())
 
 
+def _sublayers(node):
+    """Give one dielectric layer for each sub-layer of a `(layer ...)` node.
+
+    KiCad holds the sub-layers of a dielectric in ONE node, and a bare
+    `addsublayer` token stands in front of each one after the first:
+
+        (layer "dielectric 1" (type "prepreg")(thickness 0.2)(material "A")
+          (epsilon_r 3)(loss_tangent 0.01)
+          addsublayer(thickness 0.8)(material "B")(epsilon_r 5)
+          (loss_tangent 0.03))
+
+    **Each sub-layer keeps its own er and its own tan d.** The parser
+    added the thicknesses and kept the LAST pair before this, thus
+    0.2 mm at er 3.0 on 0.8 mm at er 5.0 ran as 1.0 mm at er 5.0. One
+    number cannot correct that: the same stack is er 4.6 for a field
+    along the layers and 4.41 for a field across them, and the solver
+    calculates the field itself when each sub-layer is a layer.
+
+    A sub-layer that gives no `epsilon_r` or no `loss_tangent` takes the
+    value of the sub-layer above it, which is the value that Board Setup
+    shows for it. The name of each sub-layer after the first carries its
+    number, thus no two layers of one board have the same name.
+
+    The sequence of the node is the sequence of the board, from the top
+    down, in the same way as the layers themselves. The thicknesses add
+    up to the value that the node gave before, thus no copper layer
+    moves in z.
+    """
+    keys = ("thickness", "epsilon_r", "loss_tangent")
+    groups = [{}]
+    for child in node[2:]:
+        if child == "addsublayer":
+            groups.append({})
+        elif isinstance(child, list) and len(child) > 1 and child[0] in keys:
+            groups[-1][child[0]] = float(child[1])
+    # A sub-layer with no thickness is no layer, and a zero thickness
+    # would also give the mesh a step of zero. A node with no thickness
+    # at all keeps its first group, thus it reads as it did before: one
+    # layer of 0 mm.
+    subs = [g for g in groups if g.get("thickness")] or groups[:1]
+    out, eps, tand = [], DEF_EPSILON, DEF_LOSS_TAN
+    for k, sub in enumerate(subs):
+        eps = sub.get("epsilon_r", eps)
+        tand = sub.get("loss_tangent", tand)
+        out.append({
+            "kind": "dielectric",
+            "name": node[1] if k == 0 else "%s sub %d" % (node[1], k + 1),
+            "thickness": sub.get("thickness", 0.0),
+            "epsilon": eps,
+            "loss_tangent": tand,
+        })
+    return out
+
+
 def _stackup_from_text(text):
     """Read the (stackup ...) block of the text of a board file.
 
@@ -264,21 +333,14 @@ def _stackup_from_text(text):
             continue
         props = {c[0]: c[1:] for c in node[2:] if isinstance(c, list) and c}
         typ = props.get("type", [""])[0].lower()
-        # a dielectric can have sublayers: add all the thickness values
-        # in the node
-        thick = sum(float(c[1]) for c in node[2:]
-                    if isinstance(c, list) and c and c[0] == "thickness")
         if typ == "copper":
+            # A copper sheet has ONE thickness and no sub-layer.
+            thick = sum(float(c[1]) for c in node[2:]
+                        if isinstance(c, list) and c and c[0] == "thickness")
             items.append({"kind": "copper", "name": node[1],
                           "thickness": thick or DEF_CU_T})
         elif typ in ("core", "prepreg"):
-            items.append({
-                "kind": "dielectric", "name": node[1],
-                "thickness": thick,
-                "epsilon": float(props.get("epsilon_r", [DEF_EPSILON])[0]),
-                "loss_tangent": float(props.get("loss_tangent",
-                                                [DEF_LOSS_TAN])[0]),
-            })
+            items.extend(_sublayers(node))
     return items or None
 
 
@@ -717,9 +779,8 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
     or more at the coarse preset. A SHORT feed line is shorter than
     that: the measurement plane of the port then lies inside the patch
     that the line feeds, where the values of a line have no meaning, and
-    the strip that the port adds goes out past the end of the copper
-    (problem 13). The runner caps the length of the port with this
-    value.
+    the strip that the port adds goes out past the end of the copper.
+    The runner caps the length of the port with this value.
 
     The function walks along the direction and gives the distance to the
     LAST point that is still on copper. An odd number of ray hits shows
@@ -1057,7 +1118,8 @@ def _port(board, pad, number, copper_layers):
     }
 
 
-def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
+def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
+            f_stop=None, mesh=None):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
@@ -1067,6 +1129,13 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
     are "er", "tand", "h" (the total dielectric thickness in mm) and
     "cu_t" (in mm). With no `substrate`, the stackup comes from the saved
     file, or from the board in memory if `live_stackup` is True.
+
+    `f_stop` (Hz) and `mesh` (a key of `solverenv.RES_DIV`) give the
+    depth of the PML band, which the domain must hold beside the clear
+    air of `margin_mm`. The model carries that depth in "pml_mm", thus
+    the runner puts the band exactly where this function left room for
+    it. With either one missing, the depth is `margin_mm`, which is what
+    the plugin made before 2026-09-20.
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate,
                                                      live_stackup)
@@ -1083,11 +1152,23 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
     brd = board.GetBoardEdgesBoundingBox()
     if brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
-    # Use 2 times the margin: the inner band is clear air and the outer
-    # band is the PML absorber. The code crops the copper at the outer
-    # edge. Thus the cut planes and tracks go through the PML and
-    # terminate almost matched. They do not reflect from an open end.
-    region.Inflate(pcbnew.FromMM(2.0 * margin_mm))
+    # **The margin of clear air PLUS the depth of the PML band.** The
+    # inner band is clear air and the outer band is the absorber. The
+    # code crops the copper at the outer edge. Thus the cut planes and
+    # tracks go through the WHOLE band and terminate almost matched, and
+    # they do not reflect from an open end: a track that stops part of
+    # the way into the band ends where the conductivity of the band is
+    # still small, and such an end reflects.
+    #
+    # The band was as deep as the margin before 2026-09-20 (8 cells of
+    # margin/8), thus this was 2 times the margin. It is 8 cells of the
+    # mesh step now: refer to `solverenv.pml_depth`.
+    pml_mm = float(margin_mm)
+    if f_stop and mesh:
+        eps_max = max(d["epsilon"] for d in diel_layers)
+        pml_mm = solverenv.pml_depth(
+            solverenv.mesh_res(f_stop, eps_max, mesh))
+    region.Inflate(pcbnew.FromMM(margin_mm + pml_mm))
 
     brd_box = board.GetBoardEdgesBoundingBox()
     diel_box = region.Intersect(brd_box)
@@ -1152,9 +1233,9 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
         polys_l = polygons.get(p["layer"], [])
         p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
         # How far the copper runs from the pad along the feed. The
-        # runner caps the length of a de-embedded port with it: refer to
-        # `copper_run` and to problem 13. None means "further than the
-        # limit", and the runner then uses its own length.
+        # runner caps the length of a de-embedded port with it: refer
+        # to `copper_run`. None means "further than the limit", and the
+        # runner then uses its own length.
         p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
         # A stripline needs copper on the two planes. _port reads the
         # stackup only, thus it gives a height for each strip on an inner
@@ -1232,6 +1313,9 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False):
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
+        # The depth of one PML band, inside the region on each face. The
+        # clear air between the structure and the band is margin_mm.
+        "pml_mm": pml_mm,
         "board_rect": rect_mm(diel_box),
         "polygons": polygons,
         "vias": vias,
@@ -1250,7 +1334,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("0.1uF", "C", 0.1e-6), ("4p7", "C", 4.7e-12), ("22p", "C", 22e-12),
         ("3.3nH", "L", 3.3e-9), ("4n7", "L", 4.7e-9), ("1uH", "L", 1e-6),
         ("DNP", "R", None), ("", "C", None), ("xyz", "L", None),
-        # B23: the prefixes are the same for the three types. The first
+        # The prefixes are the same for the three types. The first
         # column of each line is what the parser refused before it.
         ("5m", "R", 5e-3), ("0m5", "R", 5e-4), ("2G2", "R", 2.2e9),
         ("1T", "R", 1e12), ("1K5", "R", 1500.0), ("4p7", "R", 4.7e-12),
@@ -1262,7 +1346,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # The ohm mark stays on the resistor. An inductor marked "4R7"
         # is 4.7 µH on its package, thus the parser must NOT give 4.7 H.
         ("4R7", "L", None), ("4R7", "C", None), ("0R", "R", 0.0),
-        # F12: the mark of the unit is not for the resistor alone. A
+        # The mark of the unit is not for the resistor alone. A
         # medial 'F' or 'H' gave None before 2026-08-20.
         ("4F7", "C", 4.7), ("1F5", "C", 1.5), ("4f7", "C", 4.7),
         ("4H7", "L", 4.7), ("2H2", "L", 2.2), ("4h7", "L", 4.7),
@@ -1272,7 +1356,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # A mark with no number is not a value. The trailing unit goes
         # away first, thus the token is empty and not "0" (compare 0R).
         ("F", "C", None), ("H", "L", None),
-        # B24: the resistor took no such path, thus "R" alone gave 0.0
+        # The resistor took no such path, thus "R" alone gave 0.0
         # and `build()` put a metal SHORT across the two pads. A zero
         # ohm link still writes "0R", and it must keep its 0.0 above.
         ("R", "R", None), ("r", "R", None), ("R 0402", "R", None),
@@ -1296,7 +1380,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     print("parser OK (%d cases)" % len(_CASES))
 
     # The (stackup ...) block of a board file. It is the source of the
-    # "KiCad's Stackup" preset of the dialog (P8/F7/B7), thus a change
+    # "KiCad's Stackup" preset of the dialog, thus a change
     # of this parser changes what a Rogers board simulates as.
     import tempfile
     _PCB = """(kicad_pcb (version 20241229)
@@ -1326,6 +1410,40 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     # code as if the board gave them.
     assert _none is None, _none
     print("stackup OK (a Rogers core, and a file with no stackup)")
+
+    # **A dielectric with SUB-LAYERS gives one layer for each one.** This
+    # is a node that `LoadBoard` read, as KiCad wrote it back. The parser
+    # added the thicknesses and kept the LAST er before 2026-09-16, thus
+    # this stack ran as 1.0 mm at er 5.0.
+    _SUB = """(kicad_pcb (version 20241229)
+      (setup
+        (stackup
+          (layer "F.Cu" (type "copper") (thickness 0.035))
+          (layer "dielectric 1" (type "prepreg")(thickness 0.2)(material "A")(epsilon_r 3)(loss_tangent 0.01)
+            addsublayer(thickness 0.8)(material "B")(epsilon_r 5)(loss_tangent 0.03))
+          (layer "B.Cu" (type "copper") (thickness 0.035))
+        )
+      )
+    )"""
+    _sub = _stackup_from_text(_SUB)
+    assert [it["kind"] for it in _sub] == ["copper", "dielectric",
+                                          "dielectric", "copper"], _sub
+    assert [it["thickness"] for it in _sub[1:3]] == [0.2, 0.8], _sub
+    assert [it["epsilon"] for it in _sub[1:3]] == [3.0, 5.0], _sub
+    assert [it["loss_tangent"] for it in _sub[1:3]] == [0.01, 0.03], _sub
+    # Each layer needs a name of its own: `unsaved_stackup` names the
+    # layer of each line of its question.
+    assert [it["name"] for it in _sub[1:3]] == ["dielectric 1",
+                                                "dielectric 1 sub 2"], _sub
+    # A sub-layer with no er of its own takes the value above it, and the
+    # thickness of the node adds up to the same 1.0 mm.
+    _sub2 = _stackup_from_text(
+        _SUB.replace("(epsilon_r 5)(loss_tangent 0.03)", ""))
+    assert [it["epsilon"] for it in _sub2[1:3]] == [3.0, 3.0], _sub2
+    assert [it["loss_tangent"] for it in _sub2[1:3]] == [0.01, 0.01], _sub2
+    assert sum(it["thickness"] for it in _sub2
+               if it["kind"] == "dielectric") == 1.0, _sub2
+    print("sub-layers OK (a layer for each one, and the er of the one above)")
 
     # The warning of a stackup that is not saved. A board comes from a
     # file, and then the FILE changes: the board in memory keeps the old

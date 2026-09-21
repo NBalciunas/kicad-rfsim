@@ -1,9 +1,9 @@
-"""Measure the attenuation of a line from TWO lengths (B19).
+"""Measure the attenuation of a line from TWO lengths.
 
 `_line_data` gives the attenuation from ONE line, and that number is
 noise: Im(beta) goes negative under 2.2 GHz and it peaks at 79.8 dB/m at
-5.5 GHz (the log of 2026-08-05 (5)). The cause is the conditioning of
-that extraction, and no change inside `_line_data` corrects it.
+5.5 GHz. The cause is the conditioning of that extraction, and no
+change inside `_line_data` corrects it.
 
 **Two lines that differ in LENGTH alone give the attenuation with no
 such problem.** This is the method of `run_shunt.py` and of
@@ -144,19 +144,27 @@ def line_model(d_ports, mesh):
             [x_p2 + hw, yc + hw], [x_p1 - hw, yc + hw]]
     ground = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     margin = 4.0
+    # The region holds the clear air AND the PML band, in the same way
+    # as `board_reader.extract`. The band is 8 cells of the mesh step,
+    # thus a model that is made by hand must leave room for it: with one
+    # margin alone the absorber stood at the edge of the board and the
+    # boards of this file had no clear air at all.
+    pml_mm = solverenv.pml_depth(solverenv.mesh_res(F_STOP, ER, mesh))
+    d_reg = margin + pml_mm + 0.05
     port = dict(layer="F.Cu", ref_layer="B.Cu", ref_layer2=None, height=None,
                 asymmetry=0.0, gap=None, width=W_LINE, length=W_LINE,
                 track_width=W_LINE, type="msl", copper_run=None, y=yc)
     return {
-        "version": 1,
+        "version": 3,
         "stackup_source": "default",
         "copper_layers": [{"name": "F.Cu", "z": H_SUB, "thickness": CU_T},
                           {"name": "B.Cu", "z": 0.0, "thickness": CU_T}],
         "dielectric_layers": [{"name": "dielectric 1", "z_top": H_SUB,
                                "z_bottom": 0.0, "epsilon": ER,
                                "loss_tangent": TAND}],
-        "region": {"x0": x0 - margin - 0.05, "x1": x1 + margin + 0.05,
-                   "y0": y0 - margin - 0.05, "y1": y1 + margin + 0.05},
+        "region": {"x0": x0 - d_reg, "x1": x1 + d_reg,
+                   "y0": y0 - d_reg, "y1": y1 + d_reg},
+        "pml_mm": pml_mm,
         "board_rect": {"x0": x0, "x1": x1, "y0": y0, "y1": y1},
         "polygons": {"F.Cu": [line], "B.Cu": [ground]},
         "vias": [],

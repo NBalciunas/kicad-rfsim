@@ -12,6 +12,17 @@ import types
 
 import wx
 
+# The timestep rule of a lumped inductor, which the dialog shows as a
+# cost in run time. **This module must NOT import `runner`**: an import
+# of the runner replaces `warnings.showwarning` for the whole process,
+# and `solverenv` imports nothing but `os`. The plugin loads this file
+# as a module of a package, and `test_dialog.py` loads it with the
+# `plugins` directory on sys.path, thus the import needs the two forms.
+try:
+    from . import solverenv
+except ImportError:                      # loaded as a top-level module
+    import solverenv
+
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
@@ -128,7 +139,7 @@ def _entry_text(kind, value_si):
 # `(stackup ...)` block of the board, LAYER BY LAYER, thus two numbers
 # cannot hold them. `_board_substrate_text` makes the text of the four
 # fields, and `get_settings` gives None for the four, which tells
-# `extract()` to read the stackup itself (P8/F7/B7).
+# `extract()` to read the stackup itself.
 BOARD_PRESET = "KiCad's Stackup"
 SUBSTRATE_PRESETS = [(BOARD_PRESET, None, None),
                      ("FR-4", 4.5, 0.02),
@@ -192,7 +203,8 @@ def _use_wxagg():
         sys.modules["wx.svg"] = types.ModuleType("wx.svg")
 
 
-def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
+def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
+                pml_mm=None):
     """Draw the top view of the model.
 
     B.Cu is blue, F.Cu is red, the ports are green and the R/L/C parts
@@ -201,10 +213,13 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
 
     compact       Make a thumbnail for the dialog: no axes, no title and
                   no legend. Thus the board fills the full canvas.
-    margin_mm     Draw the domain from board_rect plus 2 times the
-                  margin, and not from model["region"]. The dialog shows
-                  the margin that the user selects now, not the margin of
-                  the model.
+    margin_mm     Draw the domain from board_rect plus the margin and
+                  the depth of the PML band, and not from
+                  model["region"]. The dialog shows the margin that the
+                  user selects now, not the margin of the model.
+    pml_mm        The depth of the band, beside `margin_mm`. With None
+                  the depth is the margin, which is what the plugin made
+                  before 2026-09-20.
     show_lumped   Draw the R/L/C parts or do not draw them. The dialog
                   gives False when no part has its "Model" checkbox.
     """
@@ -227,8 +242,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True):
     br = m["board_rect"]
     if margin_mm is None:
         rg = m["region"]
-    else:  # extract() increases the board bbox by 2 times the margin
-        d = 2.0 * float(margin_mm)
+    else:  # extract() adds the clear air AND the band to the board bbox
+        d = float(margin_mm) + float(margin_mm if pml_mm is None else pml_mm)
         rg = {"x0": br["x0"] - d, "x1": br["x1"] + d,
               "y0": br["y0"] - d, "y1": br["y1"] + d}
     ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
@@ -662,11 +677,12 @@ class SettingsDialog(wx.Dialog):
                                        "triple": triple, "rlc": rlc,
                                        "para_ctrls": para_ctrls})
             # A lumped inductor makes the FDTD unstable at the full
-            # Courant step, thus the runner divides the step by
-            # sqrt(L[nH]) and multiplies the number of steps by the same
-            # value. The run time goes up with it, and nothing said so
-            # before this label: a user who typed 100 nH got a run that
-            # was 10 times longer with no message.
+            # Courant step, thus the runner takes the timestep to
+            # `solverenv.time_step_factor` of it and divides the step
+            # limit by the same value for the same simulated time. The
+            # run time goes up with it, and nothing said so before this
+            # label: a user who typed 100 nH got a run that was 20
+            # times longer with no message.
             # The parent is the static box, in the same way as the window
             # of the rows: one sizer cannot hold two different parents.
             self.lumped_warn = wx.StaticText(lbox.GetStaticBox(), label="")
@@ -694,11 +710,11 @@ class SettingsDialog(wx.Dialog):
         self.cu_t = row(sg, "Copper thickness:",
                         wx.TextCtrl(self, value="0.035"), "mm")
         self._sub_fields = (self.er, self.tand, self.h, self.cu_t)
-        # **The board decides the start** (P8/F7/B7). A board whose file
-        # holds a `(stackup ...)` block starts at `BOARD_PRESET`, thus a
-        # Rogers board no longer simulates as FR4 with no message. A
-        # board with no stackup starts at FR-4, as before: the fallback
-        # values of `board_reader` must NOT look like the board.
+        # **The board decides the start.** A board whose file holds a
+        # `(stackup ...)` block starts at `BOARD_PRESET`, thus a Rogers
+        # board no longer simulates as FR4 with no message. A board with
+        # no stackup starts at FR-4, as before: the fallback values of
+        # `board_reader` must NOT look like the board.
         #
         # The dialog does not READ the file: `preview` is the model of
         # `board_reader.extract` with no substrate, thus its stackup is
@@ -739,8 +755,9 @@ class SettingsDialog(wx.Dialog):
         #
         # The three fields go on ONE row, in the same way as the two
         # frequencies. Three rows of the grid would make the dialog
-        # 84 px taller, and it is already 1053 px with one part: refer
-        # to MAX_PART_ROWS and to problem 10 of NOTES.
+        # 84 px taller, and it is already 1053 px with one part against
+        # about 1040 px of client area on a screen of 1920x1080: refer
+        # to MAX_PART_ROWS.
         self.max_steps = wx.TextCtrl(self, value="300000", size=(70, -1))
         self.max_steps.SetToolTip(
             "The run stops at this number of timesteps.")
@@ -786,7 +803,7 @@ class SettingsDialog(wx.Dialog):
         # without a limit; it did not make it fit. The dialog is 1084 px
         # tall with ONE part, and a screen of 1920x1080 gives about
         # 1040 px of client area, thus the Run button was under the edge
-        # of the screen on a usual machine (problem 10).
+        # of the screen on a usual machine.
         #
         # Every control above is a child of the dialog, thus this moves
         # them into a scrolled body afterwards, in the place of a change
@@ -826,6 +843,12 @@ class SettingsDialog(wx.Dialog):
         if self._prev_fig is not None:
             for evt in (wx.EVT_SPINCTRLDOUBLE, wx.EVT_TEXT):
                 self.margin.Bind(evt, self._on_preview_change)
+            # The depth of the PML band is 8 cells of the mesh step,
+            # thus the domain of the preview follows these three as
+            # well. `_pml_mm` reads them.
+            for c in (self.f_stop, self.er):
+                c.Bind(wx.EVT_TEXT, self._on_preview_change)
+            self.mesh.Bind(wx.EVT_CHOICE, self._on_preview_change)
             self._redraw_preview()
         if self.para_rows:
             for _, cb, _, _, _ in self.para_rows:
@@ -1024,16 +1047,26 @@ class SettingsDialog(wx.Dialog):
     def _update_lumped_warning(self):
         """Show what a lumped inductor costs in run time.
 
-        `runner._time_step_factor` divides the timestep by sqrt(L[nH])
-        and multiplies the number of timesteps by the same value. Thus
-        the run time goes up with the square root of the inductance, and
-        the user must see it BEFORE the run and not after it.
+        `solverenv.time_step_factor` gives the portion of the Courant
+        timestep that keeps the run stable, and the runner divides the
+        step limit by that portion for the same simulated time. Thus
+        1/factor is the run time that the inductor costs, and the user
+        must see it BEFORE the run and not after it. The dialog and
+        `runner._time_step_factor` read the ONE function, or the number
+        here and the run disagree.
         """
         label = getattr(self, "lumped_warn", None)
         if label is None:
             return
+        # **Each candidate carries the SOURCE of its value** (B49). The
+        # label named "an inductor" before 2026-09-21, and the largest
+        # value on a usual board is the BODY of a package that the user
+        # never typed: with `LE_STAB_MARGIN` = 0.5 the label starts at
+        # 0.28 nH, thus an unknown package (0.40 nH) and every land from
+        # 0603 up reach it. A text that names a part which the board
+        # does not hold is worse than no text.
         ind = []
-        for i, (_, cb, ch, esl, _) in enumerate(self.para_rows):
+        for i, (ref, cb, ch, esl, _) in enumerate(self.para_rows):
             if not cb.GetValue():
                 continue
             if self._kind_of(i) == RLC_KIND:
@@ -1041,23 +1074,54 @@ class SettingsDialog(wx.Dialog):
                 # its fields ARE the body. A text that is not a number
                 # counts as nothing here, and `_on_ok` refuses it.
                 try:
-                    ind.append(self._rlc_values(i)["l"] or 0.0)
+                    ind.append((self._rlc_values(i)["l"] or 0.0,
+                                "The L of %s" % ref))
                 except ValueError:
                     pass
                 continue
             if self._kind_of(i) == "L":
-                ind.append(self._part_value(i) or 0.0)
-            ind.append(self._para_value(ch, esl, 1e-9) or 0.0)
-        nh = 1e9 * max(ind or [0.0])
+                ind.append((self._part_value(i) or 0.0,
+                            "The inductor %s" % ref))
+            ind.append((self._para_value(ch, esl, 1e-9) or 0.0,
+                        "The body of %s" % ref))
+        value, source = max(ind or [(0.0, "")])
+        nh = 1e9 * value
+        cost = 1.0 / solverenv.time_step_factor(nh)
         text = ""
-        if nh > 1.0:
-            text = ("An inductor of %g nH divides the timestep by %.1f, "
+        # The rule starts to cost at 0.25 nH, and a body ESL of 0603 to
+        # 2512 (0.35 to 0.90 nH) costs 1.2 to 1.9 times. Under 1.05 the
+        # number rounds to "1.0 times longer", which is a warning that
+        # says nothing; the label thus starts at 0.28 nH.
+        #
+        # **ONE floor for every source**, by a decision of the owner of
+        # 2026-09-21: a body costs the same run time as a value that the
+        # user typed, thus it must show the same warning. The words say
+        # which one it is.
+        if cost >= 1.05:
+            text = ("%s (%g nH) divides the timestep by %.1f, "
                     "thus the run takes about %.1f times longer."
-                    % (nh, nh ** 0.5, nh ** 0.5))
+                    % (source, nh, cost, cost))
         if label.GetLabel() != text:
             label.SetLabel(text)
             label.Wrap(560)
             self.Layout()
+
+    def _pml_mm(self):
+        """Give the depth of the PML band that the run will use, in mm.
+
+        The band is 8 cells of the mesh step, thus it follows the top of
+        the sweep, the mesh preset and the largest er. The preview draws
+        the domain with it. It reads the SAME rule as `extract`, which
+        sizes the region, and as the runner, which lays the cells.
+        """
+        if self.uses_board_stackup():
+            eps = max(d["epsilon"] for d
+                      in self._preview_model["dielectric_layers"])
+        else:
+            eps = float(self.er.GetValue())
+        return solverenv.pml_depth(solverenv.mesh_res(
+            float(self.f_stop.GetValue()) * 1e9, eps,
+            MESH_LEVELS[self.mesh.GetSelection()]))
 
     def _redraw_preview(self):
         if self._prev_fig is None:
@@ -1067,6 +1131,7 @@ class SettingsDialog(wx.Dialog):
         try:
             _draw_board(ax, self._preview_model, compact=True,
                         margin_mm=self.margin.GetValue(),
+                        pml_mm=self._pml_mm(),
                         show_lumped=(not self.para_rows
                                      or self._any_modelled()))
         except Exception as e:  # the preview must never stop the dialog
@@ -1694,7 +1759,7 @@ class ResultsFrame(wx.Frame):
         # The canvas takes the size from the sizer only after a size
         # event. Without this call, the figure paints at its native size
         # and the label of the bottom axis stays clipped until the user
-        # changes the size of the window. the window
+        # changes the size of the window.
         wx.CallAfter(self.SendSizeEvent)
 
     def _plot(self):

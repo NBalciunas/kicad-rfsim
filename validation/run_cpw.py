@@ -98,7 +98,8 @@ def main(mesh="coarse", kind="cpw"):
             os.path.join(outdir, "stripline.kicad_pcb"))
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = kind
     model["settings"] = {

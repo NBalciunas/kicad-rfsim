@@ -59,7 +59,7 @@ def near(lines, want, tol=1e-6):
 
 
 def test_via_center_line():
-    """A via needs a mesh line at its CENTER, and not only at its edges.
+    """A via needs a mesh line at its CENTER, and its surface lines go IN.
 
     openEMS makes a metal primitive into PEC on the edges of the Yee
     grid. Thus a mesh NODE must lie inside the barrel. With the two edge
@@ -67,6 +67,14 @@ def test_via_center_line():
     openEMS writes "Unused primitive (type: Cylinder)" and the via
     conducts NOTHING. The planes then stay separate, and the run gives
     an incorrect impedance with no error message.
+
+    **A node exactly on the surface counts only when the doubles put it
+    inside**, and that is why the two surface lines go 1 ppm in
+    (`runner.VIA_SURFACE`): 12.3 - 12.0 = 0.3000000000000007 stands
+    OUTSIDE r = 0.3, thus the barrel of a 0.6 mm drill held ONE PEC edge
+    and read +155% in inductance against Goldfarb and Pucel, where a
+    barrel of 5 edges reads +13% to +20%. The nudge is 0.3 nm on this
+    via, thus it cannot move the geometry.
     """
     m = model("stripline")
     m["vias"] = [{"x": 12.0, "y": -7.0, "r": 0.3, "z0": 0.0, "z1": 1.46}]
@@ -75,7 +83,13 @@ def test_via_center_line():
         assert near(lines, c), "no mesh line at the via center on %s" % axis
         assert near(lines, c - 0.3) and near(lines, c + 0.3), \
             "no mesh line at the via edges on %s" % axis
-    print("via center line OK")
+        for want in (c - 0.3, c + 0.3):
+            got = min(lines, key=lambda v: abs(v - want))
+            assert abs(got - c) < 0.3, \
+                "the surface line at %s=%.9f stands %.12f mm from the " \
+                "centre, thus ON or outside the barrel of r = 0.3" \
+                % (axis, got, abs(got - c))
+    print("via center line OK (and the surface lines stand inside)")
 
 
 def test_flat_and_vertical_ports():
@@ -134,8 +148,8 @@ def test_port_length_uses_list_position():
 def test_port_length_is_capped_by_the_copper_run():
     """A de-embedded port must not go past the end of its feed line.
 
-    Problem 13. The length is `max(3*w, 6*res)`, and `6*res` is 14 mm at
-    the coarse preset. A short feed line is shorter than that: the
+    The length is `max(3*w, 6*res)`, and `6*res` is 14 mm at the coarse
+    preset. A short feed line is shorter than that: the
     measurement plane, which is at the MIDDLE of the port, then lies
     inside the patch that the line feeds, and the metal strip that every
     de-embedded port adds over its box goes out past the end of the
@@ -303,6 +317,60 @@ def test_lumped_element_keeps_its_cells():
                         "%s (%s-axis): the face at %s=%g moved" \
                         % (name, ny, axis, want)
     print("lumped element cells OK (%d cases, both axes)" % len(cases))
+
+
+def test_one_cell_in_series_across_a_lumped_element():
+    """The gap of a part keeps ONE cell along the current.
+
+    The gap between the two pads is a narrow copper feature, thus
+    `_feature_lines` put a line at the middle of it and the element
+    covered 2 cells in series. **2 is the ONE bad count** for the
+    stability of a lumped inductor: the reference board at 10 nH turns
+    at 2.09 ns with 2 cells and the runner refuses the run, while 1, 3,
+    4 and 6 cells are accepted, and 1 cell is accepted at er 2.2, 4.5
+    and 10.2. The count inside the box does not change the value that
+    the engine models (0.3105 nH against 0.3104 nH on the shunt board),
+    thus the cell costs nothing to give up.
+
+    The rule takes the gap of the element on ITS OWN layer and along its
+    own axis. A feature of another layer, or a feature that reaches
+    outside the box, is a track or a slot and it keeps its line.
+
+    The count of lines INSIDE a box is not the whole test of this rule:
+    the grade of a port puts lines beside the strip, thus the box of a
+    part that stands across the track holds them as well. The rule
+    itself comes first, and then a series part in the track, which is
+    the board of `run_rlc.py`: its box stands on the axis of the line,
+    where the grade of the port makes no line.
+    """
+    a, b = 20.0, 20.5                       # the gap between two pads
+    res, tol = 2.355, 0.125
+    got, _ = runner._feature_lines([a, b], [a, b], res, tol)
+    assert near(got, 0.5 * (a + b)), \
+        "a gap that no element covers must keep its middle line: %s" \
+        % sorted(got)
+    got, _ = runner._feature_lines([a, b], [a, b], res, tol,
+                                   one_cell=[(a, b)])
+    assert not got, \
+        "the gap of an element took a line, thus 2 cells in series: %s" \
+        % sorted(got)
+    # The copper beside the box is a feature of its own.
+    got, _ = runner._feature_lines([a - 0.3, a], [a - 0.3, a], res, tol,
+                                   one_cell=[(a, b)])
+    assert near(got, a - 0.15), \
+        "a feature beside the box lost its line: %s" % sorted(got)
+    # A series part in the track. The mesh of HEAD put a line at 20.25
+    # here, which `mesh_diff.py` lists for every board of `run_rlc.py`.
+    m = model("msl")
+    e = lumped(0.5, 0.5)                    # ny="x", the gap 20.0 to 20.5
+    m["lumped_elements"] = [e]
+    xs, _, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+    lo, hi = sorted((e["start"][0], e["stop"][0]))
+    inside = [v for v in xs if lo - 1e-9 <= v <= hi + 1e-9]
+    assert len(inside) == 2, \
+        "the box of the part holds %d mesh line(s), want the 2 faces " \
+        "alone, thus ONE cell in series: %s" % (len(inside), inside)
+    print("one cell in series OK (the rule, and a series part with 2 faces)")
 
 
 def test_shunt_element_and_its_via():
@@ -509,6 +577,7 @@ if __name__ == "__main__":
     test_strip_cells()
     test_cpw_z_cells()
     test_lumped_element_keeps_its_cells()
+    test_one_cell_in_series_across_a_lumped_element()
     test_shunt_element_and_its_via()
     test_two_elements_near_each_other()
     test_lumped_element_does_not_wreck_the_mesh()

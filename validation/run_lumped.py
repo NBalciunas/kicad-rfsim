@@ -204,8 +204,8 @@ def make_shunt(path, ref="C1", val="10p", pkg=None):
     B.Cu.
 
     `pkg` gives the land pattern of a package (SHUNT_LAND). With no
-    package the pads are square and 1.0 mm, which is the board of the log
-    of 2026-08-04 (8).
+    package the pads are square and 1.0 mm, which is the DEFAULT land of
+    this rig.
 
     The part and that via then make a SERIES resonance to ground, and
     |S21| has a deep notch at it. A frequency is immune to a scale error
@@ -311,7 +311,8 @@ def main(mesh="medium"):
     board, pads = make(os.path.join(outdir, "series_r.kicad_pcb"))
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     les = model["lumped_elements"]

@@ -28,19 +28,28 @@ _ATTR = {getattr(pcbnew, n): n for n in dir(pcbnew)
          if n.startswith("PAD_ATTRIB_")}
 
 
-def report(board=None, margin_mm=4.0):
-    """Show the result of each test for every R*/L*/C* footprint."""
+def report(board=None, margin_mm=4.0, f_stop=6e9, mesh="coarse"):
+    """Show the result of each test for every R*/L*/C* footprint.
+
+    The domain is the board plus `margin_mm` of clear air plus the PML
+    band, and the band is 8 cells of the mesh step. Thus `f_stop` and
+    `mesh` move the region as well, and the default values are the
+    default values of the dialog.
+    """
     board = board or pcbnew.GetBoard()
     out = print
-    copper, _, _ = br._stackup(board)
+    copper, diel, _ = br._stackup(board)
     z_of = {c["name"]: c["z"] for c in copper}
     out("stackup copper: %s" % list(z_of))
 
+    pml_mm = br.solverenv.pml_depth(br.solverenv.mesh_res(
+        f_stop, max(d["epsilon"] for d in diel), mesh))
     brd = board.GetBoardEdgesBoundingBox()
     region = pcbnew.BOX2I(brd.GetPosition(), brd.GetSize())
-    region.Inflate(pcbnew.FromMM(2.0 * margin_mm))
-    out("region (margin %g mm): x %.2f..%.2f  y %.2f..%.2f mm"
-        % (margin_mm, pcbnew.ToMM(region.GetLeft()),
+    region.Inflate(pcbnew.FromMM(margin_mm + pml_mm))
+    out("region (margin %g mm, PML %.2f mm at %s): x %.2f..%.2f  "
+        "y %.2f..%.2f mm"
+        % (margin_mm, pml_mm, mesh, pcbnew.ToMM(region.GetLeft()),
            pcbnew.ToMM(region.GetRight()), pcbnew.ToMM(region.GetTop()),
            pcbnew.ToMM(region.GetBottom())))
 

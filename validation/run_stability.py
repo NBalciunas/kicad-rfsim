@@ -17,9 +17,15 @@ itself:
    does not blow up FAST. Each run is short (`STEPS` timesteps, with the
    end criteria off), and the matrix takes about 15 minutes.
 2. **The slow stage** (`survival`) answers the question that the ladder
-   cannot: a lumped inductor also carries a mode that grows with an
-   e-fold of about 5 ns and that **no timestep corrects** (B30, the log
-   of 2026-08-31). That mode needs tens of nanoseconds to appear, thus a
+   cannot: a board whose mesh holds a column of REFINED cells also
+   carries a mode that grows with an e-fold of some nanoseconds and that
+   **no timestep corrects**. The element does not make that mode and the
+   break in the copper does not make it either: the PML that stands near
+   the copper in z gives the energy, and the fine cells that a gap, a
+   narrow track or an element box puts into the grid let it stand. The
+   same board with NO element grows with an e-fold of 6.9 ns against
+   14.1 ns at 1 nH, and the same board with no fine cell there decays
+   for 120 ns. The mode needs tens of nanoseconds to appear, thus a
    ladder of 6000 steps calls such a board STABLE. The slow stage runs
    the model at the factor that the RULE gives, long enough to pass the
    turn of the trace, and it compares the time of that turn with the
@@ -64,15 +70,16 @@ STEPS = 6000
 LADDER = (1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.12, 0.09, 0.06, 0.04)
 L_NH = (1, 10, 100)
 # The margin that the rule must keep on EVERY geometry of the matrix.
-# The bare law 1/sqrt(L) gives 1.0 on the thickest board, which is no
-# margin at all; with LE_STAB_MARGIN it gives about 1.5. One ladder step
-# is 1.4, thus this limit is the resolution of the measurement.
+# The bare law 1/sqrt(L) gives about 0.9 on the thickest board, thus no
+# margin at all; with LE_STAB_MARGIN = 0.5 that geometry keeps 1.8x. One
+# ladder step is 1.4, thus this limit is the resolution of the
+# measurement.
 MARGIN_MIN = 1.35
 
 # ---------------------------------------------------------- the slow stage
 # The steps of a run of the slow stage, in the same units as STEPS: the
 # simulated time is STEPS_SLOW times the Courant step of the board.
-# 45000 steps is about 30 ns on the reference board, and the mode of B30
+# 45000 steps is about 30 ns on the reference board, and the slow mode
 # turns at about 5 ns there and grows with an e-fold near 5 ns. Thus the
 # window holds the turn and about 5 e-folds after it, which is enough to
 # separate a growth from the noise of the decay.
@@ -83,12 +90,12 @@ STEPS_SLOW = 45000
 # "slow100" on the command line to add it.
 L_NH_SLOW = (1, 10)
 # The envelope of the trace goes into this many segments, and the
-# smallest of them is the turn. The recipe is the one of 2026-08-31.
+# smallest of them is the turn.
 SEGMENTS = 200
 # A run of the slow stage must reach its end criteria at least this many
 # times BEFORE the turn of the trace. A user run stops at the end
 # criteria, thus this ratio is the margin that a real run keeps against
-# the growth. The 8 repeats of the 0603 board of B30 stopped between
+# the growth. The 8 repeats of the 0603 board stopped between
 # 5.8 ns and 49 ns against a turn at about 45 ns: a ratio near 1, and
 # one run in three then ended inside the growth.
 SURVIVAL_MIN = 2.0
@@ -116,9 +123,25 @@ def set_epsilon(model, er):
     This moves the mesh as well as the physics: `res` follows
     1/sqrt(er), thus a large er gives a finer mesh and a smaller Courant
     step, and the cells of the dielectric rule follow it.
+
+    **The domain follows it too.** The PML band is 8 cells of `res`
+    since 2026-09-20, thus a model whose er changes needs a new depth
+    and a new region: `extract` would have made them together. With the
+    region of the old er the band no longer matches the mesh that it
+    stands in, and the board is not the board that a user gets.
     """
+    old_pml = model.get("pml_mm")
     for d in model["dielectric_layers"]:
         d["epsilon"] = er
+    if old_pml:
+        s = model["settings"]
+        pml = solverenv.pml_depth(solverenv.mesh_res(s["f_stop"], er,
+                                                     s["mesh"]))
+        grow = pml - old_pml
+        r = model["region"]
+        for k, sign in (("x0", -1), ("x1", 1), ("y0", -1), ("y1", 1)):
+            r[k] += sign * grow
+        model["pml_mm"] = pml
     return model
 
 
@@ -155,6 +178,16 @@ def solve(model, factor, tmp):
     """
     model["settings"]["time_step_factor"] = factor
     shutil.rmtree(tmp, ignore_errors=True)
+    # **Say why the directory stays**, and do not give a traceback for
+    # it. A run that somebody stopped leaves its solver behind, that
+    # process holds the port files open, and Windows then refuses to
+    # remove them.
+    if os.path.isdir(tmp):
+        raise SystemExit(
+            "cannot remove %s. A run that was stopped leaves its solver "
+            "behind, and that process holds the files of this directory. "
+            "Stop the python that runs runner.py, then start this file "
+            "again." % tmp)
     os.makedirs(tmp)
     path = os.path.join(tmp, "model.json")
     with open(path, "w") as fh:
@@ -194,7 +227,7 @@ def envelope(tmp):
     is the turn of the trace. The slope of a line through the log of the
     segments after the turn is the growth. The port file takes '%' as
     its comment mark and it is SUBSAMPLED, thus column 0 is the only
-    correct x axis. The recipe is the one of the log of 2026-08-31.
+    correct x axis.
     """
     names = sorted(glob.glob(os.path.join(tmp, "exc*", "port_ut_*")))
     if not names:
@@ -281,7 +314,7 @@ def slow_stage(rows, tmp, l_values):
     """The second stage: how long may a run be before the mode takes over.
 
     The ladder cannot answer this. It gives every rung the same short
-    window, and the mode of B30 needs tens of nanoseconds; and no factor
+    window, and the slow mode needs tens of nanoseconds; and no factor
     of the ladder corrects that mode, because its rate does not follow
     the timestep.
     """
@@ -328,11 +361,11 @@ def slow_stage(rows, tmp, l_values):
               "after the turn gives an S-matrix that is flat near 1, and "
               "`_diverged` calls it a growth."
               % (worst[1], worst[0], SURVIVAL_MIN))
-        print("**This stage cannot pass until B30 is corrected.** No value "
-              "of LE_STAB_MARGIN and no time_step_factor moves the rate of "
-              "that mode, thus do NOT make SURVIVAL_MIN smaller to get a "
-              "green line: the margin above is the one that a user really "
-              "has. Read B30 and the log of 2026-09-01 (2).")
+        print("**This stage cannot pass until the slow mode is "
+              "corrected.** No value of LE_STAB_MARGIN and no "
+              "time_step_factor moves the rate of that mode, thus do NOT "
+              "make SURVIVAL_MIN smaller to get a green line: the margin "
+              "above is the one that a user really has.")
         return False
     print("PASS: a normal run ends at least %.1fx before the turn"
           % SURVIVAL_MIN)

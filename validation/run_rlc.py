@@ -119,7 +119,8 @@ def simulate(ref, val, mesh):
         os.path.join(outdir, "series_%s.kicad_pcb" % ref), ref, val)
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     les = model["lumped_elements"]
@@ -144,7 +145,7 @@ def simulate(ref, val, mesh):
         print(log.stdout[-3000:])
         print(log.stderr[-2000:])
         raise SystemExit("solver failed for %s" % ref)
-    # "timesteps" keeps the line that says HOW the run ended (B29). The
+    # "timesteps" keeps the line that says HOW the run ended. The
     # log gave the numbers of a run and no way to see whether it met its
     # end criteria or stopped at the limit, and a run that stops at the
     # limit measures a notch that is not yet at its full depth.

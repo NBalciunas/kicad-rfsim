@@ -69,7 +69,8 @@ def run(mesh, void):
     board, pads = make_test_board.make_zone_holes(
         os.path.join(outdir, "zone.kicad_pcb"), void=void)
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     model["settings"] = {

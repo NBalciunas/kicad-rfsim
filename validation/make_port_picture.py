@@ -1,6 +1,6 @@
 """Draw the geometry of a lumped port for the README.
 
-Problem 3: the documents do not show WHERE a port is. A reviewer of
+The documents did not show WHERE a port is, and a reviewer of
 2026-08-03 assumed a lumped port at the EDGE of the substrate on B.Cu.
 It is at a PAD that the user selects, and it drives that pad against the
 adjacent copper layer.

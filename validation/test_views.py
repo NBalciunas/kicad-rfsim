@@ -64,8 +64,8 @@ def test_every_view_draws():
 def test_the_field_views_say_what_they_show():
     """The unit, the plane, the frequency, the phase and the maximum.
 
-    Problem 2. The title said "E-Field (f=2.4 GHz)" and nothing else:
-    not the plane, and the view had no colour bar. The numbers now sit
+    The title said "E-Field (f=2.4 GHz)" and nothing else: not the
+    plane, and the view had no colour bar. The numbers now sit
     in a block of text at the left, and the colour bar carries the unit
     alone.
     """
@@ -122,8 +122,8 @@ def test_the_far_field_views_say_directivity():
 def test_the_ports_are_on_the_field_views():
     """The field views are the pictures that leave the tool.
 
-    Problem 3: a reviewer assumed a lumped port at the edge of the
-    substrate on B.Cu, because no picture showed where a port is.
+    A reviewer once assumed a lumped port at the edge of the substrate
+    on B.Cu, because no picture showed where a port is.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings()

@@ -153,8 +153,12 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         # model.json must hold the values that the solver uses.
         para = settings.pop("lumped_parasitics", None) or {}
 
+        # `f_stop` and `mesh` size the PML band, thus the domain holds
+        # the clear air AND the absorber: refer to `solverenv.pml_depth`.
         model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate, live_stackup=live)
+                                     substrate, live_stackup=live,
+                                     f_stop=settings["f_stop"],
+                                     mesh=settings["mesh"])
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
@@ -198,7 +202,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 # `extract()` measured the copper run for the direction
                 # of a TRACK, and this pad had none. Measure it for the
                 # direction that the user gave, or the runner cannot cap
-                # the length of the port (problem 13).
+                # the length of the port.
                 p["copper_run"] = board_reader.copper_run(
                     model["polygons"].get(p["layer"], []),
                     p["x"], p["y"], p["direction"])

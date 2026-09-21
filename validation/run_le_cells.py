@@ -1,4 +1,4 @@
-"""B30: what makes the FAST growth of a lumped inductor, on ONE variable.
+"""What makes the FAST growth of a lumped inductor, on ONE variable.
 
 A lumped inductor on the reference board grows in two different ways, and
 an earlier measurement separated them:
@@ -11,12 +11,26 @@ an earlier measurement separated them:
   - a **SLOW** mode with an e-fold near 6 ns, which no timestep corrects
     and which stays after the fast one is gone.
 
-**The rule behind the fast half is not pinned.** A matrix that changed
-the BOX said that 4 cells in series are as good as 1, thus "more cells in
-series is worse" is not the rule. Every box variant moves more than one
-thing: the length of the box sets `tol` (`_mesh` takes 0.25 x min(box)),
-thus it moves the mesh of the WHOLE board, and it moves the physical gap
-as well.
+**This file no longer separates the two counts, and that is expected
+since 2026-09-20.** The mesh moved the absorber away from the copper
+(B30) and the fast mode went with it. Five boards were tried for one
+that still carries it — the reference, a board of 3.2 mm, a board of
+6.4 mm, a box of 1.0 mm, and the thick board with the large box — and
+none of them separates 1 cell from 2 (B51). The rule stands on the
+measurement of 2026-09-16 alone.
+
+**The rule is in the code since 2026-09-16**: `_feature_lines` takes
+the gap of an element, on its own layer and along its own axis, and it
+gives that gap NO line. Thus the box holds 1 cell in series, and this
+file is the regression test of that rule: the row "the mesh that ships"
+must behave as the row of 1 cell.
+
+**A box variant cannot name the rule.** A matrix that changed the BOX
+said that 4 cells in series are as good as 1, thus "more cells in series
+is worse" is not the rule. Every box variant moves more than one thing:
+the length of the box sets `tol` (`_mesh` takes 0.25 x min(box)), thus it
+moves the mesh of the WHOLE board, and it moves the physical gap as
+well.
 
 **This file moves ONE thing.** It holds the box, `tol` and the board, and
 it changes the count of mesh lines INSIDE the box alone:
@@ -26,8 +40,8 @@ it changes the count of mesh lines INSIDE the box alone:
 A copy of `plugins/` carries that change, thus the code that ships is not
 touched. The copy reads two variables of the environment:
 
-    RFSIM_B30_CELLS   force exactly N cells in series (0: leave the mesh)
-    RFSIM_B30_CAPS    "0" gives the element `caps=False`
+    RFSIM_LE_CELLS   force exactly N cells in series (0: leave the mesh)
+    RFSIM_LE_CAPS    "0" gives the element `caps=False`
 
 Two stages, and each one gives the growth of the trace:
 
@@ -40,7 +54,7 @@ Two stages, and each one gives the growth of the trace:
 Run it with the python of KiCad 10 or with the python of the solver. It
 needs `out_rlc_L1_coarse/model.json`, thus run `run_rlc.py coarse` first:
 
-    C:\\openEMS\\venv\\Scripts\\python.exe run_b30.py [ladder|matrix|all]
+    C:\\openEMS\\venv\\Scripts\\python.exe run_le_cells.py [ladder|matrix|all]
 
 Each run is short (about 4 ns of simulated time), because the fast growth
 reaches its turn inside 2 ns. The slow mode needs tens of nanoseconds and
@@ -60,7 +74,7 @@ import run_stability as rs  # noqa: E402
 
 # The copy of `plugins/` that carries the hook. It goes beside the
 # output, thus a run does not touch the code that ships.
-COPY = os.path.join(HERE, "out_b30_plugins")
+COPY = os.path.join(HERE, "out_le_cells_plugins")
 
 # **The TURN of the trace names the fast mode, and the e-fold does not.**
 # A board with the fast growth turns at about 2 ns. A board without it
@@ -73,6 +87,15 @@ COPY = os.path.join(HERE, "out_b30_plugins")
 # slope that comes out is noise. The slow mode needs a window of tens of
 # nanoseconds, which `run_stability.py slow` carries.
 FAST_TURN_NS = 4.0
+# ...and the growth of that row must be FAST as well. The e-fold of the
+# fast mode is 0.3 to 0.5 ns and the e-fold of the slow mode is about
+# 6 ns, thus a slope of 1 /ns stands between them with a factor of 6 at
+# each side. **The turn alone is not enough**: a row that only DECAYS
+# turns where its trace reaches the floor, and that point moves with the
+# timestep. At the factor of a 10 nH inductor with `LE_STAB_MARGIN` =
+# 0.5 the row of 3 cells turns at 3.34 ns with an e-fold of 8.2 ns, thus
+# it decays and the runner accepts it.
+FAST_SLOPE = 1.0
 
 # The steps of one run, in the units of `run_stability.STEPS`: `build()`
 # raises the count by 1/factor, thus this is the SIMULATED time and not
@@ -89,11 +112,11 @@ STEPS = 12000
 # call, thus a new global of that name replaces it.
 HOOK = '''
 
-# ---------------------------------------------------------------- B30 hook
-# Appended by validation/run_b30.py. It is NOT part of the plugin.
-_B30_CELLS = int(os.environ.get("RFSIM_B30_CELLS", "0"))
-if _B30_CELLS:
-    _b30_mesh = _mesh
+# ---------------------------------------------------------------- the hook
+# Appended by validation/run_le_cells.py. It is NOT part of the plugin.
+_LE_CELLS = int(os.environ.get("RFSIM_LE_CELLS", "0"))
+if _LE_CELLS:
+    _le_mesh = _mesh
 
     def _mesh(model, ports, res):
         """Give the mesh, then force N cells in series at every element.
@@ -102,14 +125,14 @@ if _B30_CELLS:
         board outside the box does not move. Only the lines strictly
         inside the box change.
         """
-        out = list(_b30_mesh(model, ports, res))
+        out = list(_le_mesh(model, ports, res))
         for e in model.get("lumped_elements", []):
             axis = 0 if e["ny"] == "x" else 1
             lo, hi = sorted((e["start"][axis], e["stop"][axis]))
             eps = 1e-9
             keep = [v for v in out[axis] if v <= lo + eps or v >= hi - eps]
-            step = (hi - lo) / _B30_CELLS
-            keep += [lo + i * step for i in range(1, _B30_CELLS)]
+            step = (hi - lo) / _LE_CELLS
+            keep += [lo + i * step for i in range(1, _LE_CELLS)]
             out[axis] = sorted(keep)
         return tuple(out)
 '''
@@ -124,13 +147,15 @@ def make_copy():
     path = os.path.join(COPY, "runner.py")
     with open(path, "r", newline="") as fh:
         text = fh.read()
-    # `caps=True` stands once in the file, at the lumped element.
-    if text.count("caps=True") != 1:
-        raise SystemExit("runner.py holds %d 'caps=True', expected 1"
+    # `caps=True` stands at the two `AddLumpedElement` calls of
+    # `build()`: the series RLC part and every other type. The hook
+    # takes both, thus a board of either kind obeys RFSIM_LE_CAPS.
+    if text.count("caps=True") != 2:
+        raise SystemExit("runner.py holds %d 'caps=True', expected 2"
                          % text.count("caps=True"))
     text = text.replace(
         "caps=True",
-        'caps=(os.environ.get("RFSIM_B30_CAPS", "1") != "0")')
+        'caps=(os.environ.get("RFSIM_LE_CAPS", "1") != "0")')
     # **The hook goes BEFORE the `__main__` block and not at the end of
     # the file.** `runner.py` calls `main()` from that block, thus a hook
     # under it replaces `_mesh` after the whole run is over and every row
@@ -166,14 +191,14 @@ def selftest():
     py = rs.solverenv.solver_python() or sys.executable
     got = {}
     for n in (1, 4):
-        env = dict(os.environ, RFSIM_B30_CELLS=str(n), PYTHONPATH=COPY)
+        env = dict(os.environ, RFSIM_LE_CELLS=str(n), PYTHONPATH=COPY)
         p = subprocess.run([py, "-c", code, src], capture_output=True,
                            env=env, cwd=COPY)
         out = p.stdout.decode("utf-8", "replace").strip().splitlines()
         got[n] = out[-1] if out else "?"
     if got[1] != "1" or got[4] != "4":
         raise SystemExit(
-            "the hook does not move the mesh: RFSIM_B30_CELLS=1 gave %s "
+            "the hook does not move the mesh: RFSIM_LE_CELLS=1 gave %s "
             "cell(s) and =4 gave %s. Every row of the matrix would be "
             "equal. Look at where the hook sits in the copy of runner.py."
             % (got[1], got[4]))
@@ -182,8 +207,8 @@ def selftest():
 
 def measure(src, lnh, cells=0, caps=True, er=None, steps=None, tmp=None):
     """Run one row. Give (the cause, the turn ns, the growth 1/ns)."""
-    os.environ["RFSIM_B30_CELLS"] = str(cells)
-    os.environ["RFSIM_B30_CAPS"] = "1" if caps else "0"
+    os.environ["RFSIM_LE_CELLS"] = str(cells)
+    os.environ["RFSIM_LE_CAPS"] = "1" if caps else "0"
     model = rs.variant(src, lnh * 1e-9, er=er, steps=steps or STEPS)
     factor = runner._time_step_factor(
         {"settings": {"lumped": True},
@@ -226,11 +251,11 @@ def ladder_stage(src, tmp, lnh=10):
     for n in (1, 2, 3, 4, 6):
         cause, f, turn, slope = measure(src, lnh, cells=n, tmp=tmp)
         row("%d cell(s) in series" % n, cause, f, turn, slope)
-        out.append((n, cause, turn))
+        out.append((n, cause, turn, slope))
     # The mesh that ships, for the same board and the same value.
     cause, f, turn, slope = measure(src, lnh, cells=0, tmp=tmp)
     row("the mesh that ships", cause, f, turn, slope)
-    out.append(("ships", cause, turn))
+    out.append(("ships", cause, turn, slope))
     return out
 
 
@@ -255,26 +280,42 @@ def verdict(ladder):
     """Say whether the count of cells in series names the fast growth.
 
     A row carries the fast mode when the runner refused it for a growth,
-    or when its trace turns early. Both are robust inside this window.
+    or when its trace turns early AND grows fast after the turn. The
+    verdict itself keys on three rows: 2 cells carry the mode, and 1 cell
+    and the mesh that ships do not.
     """
-    fast = [n for n, cause, turn in ladder
-            if cause == "growth" or (turn == turn and turn < FAST_TURN_NS)]
-    ok = [n for n, _, _ in ladder if n not in fast]
-    print("\nthe FAST mode (refused, or a turn under %.1f ns): %s"
-          % (FAST_TURN_NS, ", ".join(str(n) for n in fast) or "none"))
+    fast = [n for n, cause, turn, slope in ladder
+            if cause == "growth"
+            or (turn == turn and turn < FAST_TURN_NS
+                and slope == slope and slope > FAST_SLOPE)]
+    ok = [n for n, _, _, _ in ladder if n not in fast]
+    print("\nthe FAST mode (refused, or a turn under %.1f ns with an "
+          "e-fold under %.1f ns): %s"
+          % (FAST_TURN_NS, 1.0 / FAST_SLOPE,
+             ", ".join(str(n) for n in fast) or "none"))
     print("no fast mode: %s" % (", ".join(str(n) for n in ok) or "none"))
-    if fast and 1 not in fast and "ships" in fast:
-        print("\nthe count of cells in series MOVES it: the mesh that ships "
-              "grows fast\nand 1 cell does not. A mesh rule that keeps a "
-              "lumped element on ONE cell\nin series removes the fast half "
-              "of B30 on this board.")
+    if 2 in fast and "ships" not in fast and 1 not in fast:
+        print("\nPASS: the mesh that ships keeps ONE cell in series and "
+              "it does not grow\nfast, while 2 cells still do. That is the "
+              "rule of `_feature_lines` at work.")
+    elif "ships" in fast:
+        print("\nFAIL: the mesh that ships grows fast, thus it holds 2 "
+              "cells in series.\n`_feature_lines` must give the gap of an "
+              "element no line: the rule is not\nin the code, or it does "
+              "not reach this board.")
     elif not fast:
-        print("\nNO row grew fast, thus this board does not reproduce the "
-              "fast mode\ntoday. Read the factor and the value before you "
-              "read anything else.")
+        print("\nNO row grew fast, and that is the verdict of every board that was tried"
+              "\nsince 2026-09-20: the PML band is 8 cells of `res` now (B30), thus the"
+              "\nabsorber no longer stands near the copper. The same board gave 2 cells"
+              "\nan e-fold of 0.31 ns on the mesh of 2026-09-16 and it gives 5.51 ns now,"
+              "\nthus that absorber fed the FAST mode as well as the slow one. Five"
+              "\nboards were tried for one that still carries it, and NONE separates 1"
+              "\ncell from 2 (B51). **This is NOT a failure of the rule**, which costs"
+              "\nnothing and stays in the code: it says that this file cannot measure"
+              "\nthe rule any more.")
     else:
-        print("\nthe count alone does NOT name it. The rule is still open, "
-              "and a change\nto the mesh has no support yet.")
+        print("\nRead the rows: 2 cells in series are the ONE bad count, "
+              "and the mesh\nthat ships must behave as the row of 1 cell.")
 
 
 def main(stage="all"):
@@ -283,7 +324,7 @@ def main(stage="all"):
         raise SystemExit("run `run_rlc.py coarse` first: this file needs "
                          "its model.json")
     rs.PLUGINS = make_copy()
-    tmp = os.path.join(HERE, "out_b30_tmp")
+    tmp = os.path.join(HERE, "out_le_cells_tmp")
     ladder = []
     try:
         if stage in ("all", "ladder"):

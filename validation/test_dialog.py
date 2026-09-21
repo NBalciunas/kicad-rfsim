@@ -39,7 +39,7 @@ def fire(ctrl, evt_type):
 # `extract()` gives "default" and the dialog starts at FR-4. This is
 # the model of a board that HAS one: a Rogers RO4350B of 0.508 mm.
 # `dialog(stackup=...)` puts it into the preview, which is the only
-# thing that the dialog reads (P8/F7/B7).
+# thing that the dialog reads.
 ROGERS = {
     "stackup_source": "file",
     "dielectric_layers": [{"name": "dielectric 1", "z_top": 0.508,
@@ -326,7 +326,7 @@ def test_the_whole_dialog_scrolls_and_keeps_the_run_button():
 
     The rows of the parts scrolled since 2026-08-05, and the dialog was
     still 1084 px tall with ONE part against about 1040 px of client
-    area on a screen of 1920x1080 (problem 10). The whole dialog scrolls
+    area on a screen of 1920x1080. The whole dialog scrolls
     now, and the Run button is OUTSIDE the scrolled body: a button that
     scrolls out of view is the defect that the scroll must not make.
     """
@@ -361,26 +361,62 @@ def test_the_whole_dialog_scrolls_and_keeps_the_run_button():
 def test_the_inductor_warning_follows_the_value():
     """A lumped inductor multiplies the run time, and the dialog says so.
 
-    `runner._time_step_factor` gives min(1, 1/sqrt(L[nH])), thus 100 nH
-    divides the timestep by 10 and multiplies the number of steps by 10.
-    Nothing said this before: the user saw a run that was 10 times
+    `solverenv.time_step_factor` gives min(1, `LE_STAB_MARGIN`/sqrt(L
+    [nH])) with the margin of 0.5, and the runner divides the step limit
+    by that factor for the same simulated time. Thus 100 nH takes the
+    timestep to 0.05 and the run takes 20 times longer. The dialog must
+    read the SAME function as the runner: the label said 10.0 times
+    before 2026-09-16, because it left the margin out.
+
+    The label starts at 1.05 times, which is 0.28 nH. Under that the
+    number rounds to "1.0 times longer" and says nothing; above it a
+    body ESL counts as well, and a 2512 body of 0.90 nH costs 1.9 times.
+    Nothing said this before: the user saw a run that was 20 times
     longer, with no message.
+
+    **The label names the SOURCE of the largest value and its part**
+    since 2026-09-21 (B49): "The body of R1", "The inductor L9" or "The
+    L of X1". It said "An inductor of 0.4 nH" for a package body before
+    that, thus it named a part that the board does not hold. ONE floor
+    of 1.05 times holds for every source, by a decision of the owner: a
+    body costs the same run time as a value that the user typed.
     """
     d = dialog([unknown("L9")])
+    # **The body of a part counts as well**, and the R1 of this board
+    # carries the 0.40 nH of an unknown package: the runner divides the
+    # timestep for it, thus the label must say so.
+    assert "1.3 times longer" in d.lumped_warn.GetLabel(), \
+        "a body of 0.40 nH costs 1.3 times: %r" % d.lumped_warn.GetLabel()
+    # **The label must name the SOURCE and the part** (B49). It said "An
+    # inductor of 0.4 nH" before 2026-09-21, and the board holds NO
+    # inductor: 0.40 nH is the body of an unknown package on R1.
+    first = d.lumped_warn.GetLabel()
+    assert first.startswith("The body of R1 "),         "the label must name the body and its part: %r" % first
+    # With no parasitics the board holds no inductance at all.
+    ch = d.para_rows[0][2]
+    ch.SetSelection(ch.GetStrings().index(gui.NO_PARASITICS))
+    fire(ch, wx.EVT_CHOICE)
     assert d.lumped_warn.GetLabel() == "", \
-        "a board with no inductor must give no warning"
+        "a board with no inductance must give no warning: %r" \
+        % d.lumped_warn.GetLabel()
     r = d.part_rows[1]
     r["kind"].SetSelection(gui.KIND_ORDER.index("L"))
     fire(r["kind"], wx.EVT_CHOICE)
     d.para_rows[1][1].SetValue(True)
     d._on_lumped(None)
-    r["value"].SetValue("0.5")          # 0.5 nH: the timestep does not move
+    r["value"].SetValue("0.2")          # 0.2 nH: the full timestep
     assert d.lumped_warn.GetLabel() == "", \
-        "0.5 nH keeps the full timestep, thus it needs no warning: %r" \
+        "0.2 nH keeps the full timestep, thus it needs no warning: %r" \
         % d.lumped_warn.GetLabel()
-    r["value"].SetValue("100")          # 100 nH: 10 times more timesteps
+    r["value"].SetValue("0.9")          # the body of a 2512: 1.9 times
+    got = d.lumped_warn.GetLabel()
+    assert "1.9 times longer" in got, got
+    # The same number from a part of type L reads differently: the
+    # words follow the SOURCE.
+    assert got.startswith("The inductor "),         "a part of type L must be named as an inductor: %r" % got
+    r["value"].SetValue("100")          # 100 nH: 20 times more steps
     text = d.lumped_warn.GetLabel()
-    assert "10.0 times longer" in text, text
+    assert "20.0 times longer" in text, text
     d.Destroy()
     print("the inductor warning OK (%s)" % text)
 
@@ -390,8 +426,9 @@ def test_the_substrate_starts_at_fr4():
 
     A version that filled the four fields from the `(stackup ...)` block
     of the board file went in and came out again on 2026-08-05, at the
-    request of the owner. B7 holds that work. What must hold now: the
-    fields start at the FR-4 preset, and that preset must agree with the
+    request of the owner, and the "KiCad's Stackup" preset holds that
+    work now. What must hold: the fields start at the FR-4 preset for a
+    board with NO stackup, and that preset must agree with the
     fallback of `board_reader`, or the SAME board gives one substrate
     through the dialog and another through a run with no GUI.
     """
@@ -503,7 +540,7 @@ def test_the_run_limits_reach_the_settings():
 
 
 def test_the_kicad_stackup_preset_gives_the_board():
-    """A board that HAS a stackup starts at "KiCad's Stackup" (P8/F7/B7).
+    """A board that HAS a stackup starts at "KiCad's Stackup".
 
     The four fields then show what the board gives and they are
     read-only, and `get_settings` gives None for the four. None is the
@@ -512,7 +549,7 @@ def test_the_kicad_stackup_preset_gives_the_board():
     """
     d = dialog(stackup=ROGERS)
     assert d.preset.GetStringSelection() == gui.BOARD_PRESET, \
-        "a board with a stackup must not start at FR-4 (problem 8)"
+        "a board with a stackup must not start at FR-4"
     assert d.uses_board_stackup()
     got = (d.er.GetValue(), d.tand.GetValue(), d.h.GetValue(),
            d.cu_t.GetValue())
@@ -576,7 +613,7 @@ def test_the_kicad_stackup_preset_gives_the_board():
 
 
 def test_the_x_of_the_dialog_does_not_start_the_run():
-    """Close the window and NO simulation starts (problem 17).
+    """Close the window and NO simulation starts.
 
     The dialog held the Run button alone, and its ID is wxID_OK. The
     default close handler of wxWidgets searches for a button with
@@ -707,11 +744,15 @@ def test_a_series_rlc_part_needs_a_positive_component():
                     "%s was accepted: %s" % (fields, stopped)
     finally:
         wx.MessageBox = old_box
-    assert d.lumped_warn.GetLabel() == "", \
-        "0.6 nH keeps the full timestep: %r" % d.lumped_warn.GetLabel()
+    assert "1.5 times longer" in d.lumped_warn.GetLabel(), \
+        "0.6 nH costs 1.5 times the run time: %r" % d.lumped_warn.GetLabel()
     r["rlc"]["L"].SetValue("100")
     text = d.lumped_warn.GetLabel()
-    assert "10.0 times longer" in text, text
+    assert "20.0 times longer" in text, text
+    # **The third source of the label** (B49): the L of a Series RLC.
+    # A part of type L reads "The inductor ..." and a package body
+    # reads "The body of ...".
+    assert text.startswith("The L of "),         "the L of a Series RLC must be named as such: %r" % text
     d.Destroy()
     print("a series RLC part needs a positive component OK (and its L warns)")
 
