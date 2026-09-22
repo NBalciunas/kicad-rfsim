@@ -53,6 +53,12 @@ ENTRY_SCALE = {"R": 1.0, "C": 1e-12, "L": 1e-9}
 # The three fields of a series RLC row, and the key of each one in
 # model.json. Each field takes the unit of the single value of its type.
 RLC_FIELDS = (("R", "r"), ("L", "l"), ("C", "c"))
+# The field that gives an inductor its self-resonance. The user types the
+# SRF, because every datasheet of an inductor prints THAT, and the code
+# gives the capacitance that stands in parallel with the value at that
+# frequency: C = 1 / ((2 pi f)^2 L). An empty field leaves the part as it
+# was, thus this field changes no board that does not fill it in.
+SRF_LABEL, SRF_UNIT = "SRF:", "GHz"
 
 
 def _board_substrate_text(model):
@@ -533,7 +539,7 @@ class SettingsDialog(wx.Dialog):
             self.part_area = wx.ScrolledWindow(lbox.GetStaticBox(),
                                                style=wx.VSCROLL)
             self.part_area.SetScrollRate(0, 10)
-            lg = wx.FlexGridSizer(cols=13, vgap=6, hgap=8)
+            lg = wx.FlexGridSizer(cols=16, vgap=6, hgap=8)
             lg.AddGrowableCol(3, 1)
             self.part_area.SetSizer(lg)
             lbox.Add(self.part_area, 0, wx.ALL | wx.EXPAND, 6)
@@ -565,6 +571,12 @@ class SettingsDialog(wx.Dialog):
                     esl0 = esr0 = "0"
                 esl = wx.TextCtrl(pane, value=esl0, size=(55, -1))
                 esr = wx.TextCtrl(pane, value=esr0, size=(55, -1))
+                # The self-resonance of an inductor. It starts EMPTY: no
+                # table gives the self-capacitance of a winding, and the
+                # code must not invent one.
+                srf = wx.TextCtrl(pane, value="%g" % (1e-9 * (e.get("srf")
+                                                              or 0.0))
+                                  if e.get("srf") else "", size=(55, -1))
                 # The refdes gives the type and the Value field gives the
                 # number, and the row SHOWS what the parser read. But
                 # both controls stay open: the user knows the part, and
@@ -634,14 +646,22 @@ class SettingsDialog(wx.Dialog):
                 # R before L, in the sequence of "RLC". There is no third
                 # field: a series capacitance is not a parasitic of
                 # these parts.
+                srf_ctrls = []
                 for label, ctrl, unit in (("ESR:", esr, "ohm"),
-                                          ("ESL:", esl, "nH")):
+                                          ("ESL:", esl, "nH"),
+                                          (SRF_LABEL, srf, SRF_UNIT)):
                     p_lbl = wx.StaticText(pane, label=label)
                     p_uni = wx.StaticText(pane, label=unit)
                     lg.Add(p_lbl, 0, mid | wx.LEFT, 6)
                     lg.Add(ctrl, 0, mid)
                     lg.Add(p_uni, 0, mid)
-                    para_ctrls += [p_lbl, ctrl, p_uni]
+                    # The SRF keeps a list of its own: `para_ctrls` holds
+                    # what a Series RLC row hides, and the SRF hides for
+                    # every type but an inductor.
+                    if ctrl is srf:
+                        srf_ctrls += [p_lbl, ctrl, p_uni]
+                    else:
+                        para_ctrls += [p_lbl, ctrl, p_uni]
                 lg.Add(cb, 0, mid | wx.LEFT, 12)
                 # A preset writes the ESL with ChangeValue, which sends no
                 # EVT_TEXT. Thus the choice stays on the package. An edit
@@ -675,7 +695,10 @@ class SettingsDialog(wx.Dialog):
                                        "esl0": esl0, "esr0": esr0,
                                        "area": area, "single": single,
                                        "triple": triple, "rlc": rlc,
+                                       "srf": srf, "srf_ctrls": srf_ctrls,
                                        "para_ctrls": para_ctrls})
+                for ctrl in srf_ctrls:
+                    ctrl.Show(kind == "L")
             # A lumped inductor makes the FDTD unstable at the full
             # Courant step, thus the runner takes the timestep to
             # `solverenv.time_step_factor` of it and divides the step
@@ -1266,6 +1289,22 @@ class SettingsDialog(wx.Dialog):
                     % (r["ref"], ENTRY_UNITS[self._kind_of(i)]),
                     "RFsim", wx.ICON_ERROR)
                 return
+            # The SRF field is empty or a positive number. An empty field
+            # leaves the inductor as it was, with no self-resonance.
+            text = r["srf"].GetValue().strip()
+            if self._kind_of(i) == "L" and text:
+                try:
+                    ok = float(text) > 0
+                except ValueError:
+                    ok = False
+                if not ok:
+                    wx.MessageBox(
+                        'Element "%s": the SRF is the self-resonance of the '
+                        "inductor in GHz, from its datasheet. Give a "
+                        "positive number, or leave the field empty to model "
+                        "the part with no self-resonance." % r["ref"],
+                        "RFsim", wx.ICON_ERROR)
+                    return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
             wx.MessageBox("Each pad needs a unique port number.",
@@ -1422,11 +1461,18 @@ class SettingsDialog(wx.Dialog):
         """Show the single value of a row, or the three fields of a series
         RLC and no parasitics."""
         r = self.part_rows[i]
-        rlc = self._kind_of(i) == RLC_KIND
+        kind = self._kind_of(i)
+        rlc = kind == RLC_KIND
         r["area"].Show(r["single"], not rlc)
         r["area"].Show(r["triple"], rlc)
         for ctrl in r["para_ctrls"]:
             ctrl.Show(not rlc)
+        # **The EPC belongs to an inductor alone.** A capacitor already
+        # HAS its capacitance, and the parallel capacitance of a resistor
+        # is not what this field models. The text stays in the hidden
+        # field, thus a return to Inductor gives the row back as it was.
+        for ctrl in r["srf_ctrls"]:
+            ctrl.Show(kind == "L")
         self.part_area.GetSizer().Layout()
         self.part_area.FitInside()
 
@@ -1451,8 +1497,37 @@ class SettingsDialog(wx.Dialog):
                 "package": self._pkg_of(ch),
                 "esl": self._para_value(ch, esl, 1e-9),
                 "esr": self._para_value(ch, esr),
+                "epc": self._epc_value(i),
                 "type": kind,
                 "value": self._part_value(i)}
+
+    def _epc_value(self, i):
+        """Give the EPC of an inductor in farads, or give None.
+
+        The field holds the SELF-RESONANCE in GHz, because that is the
+        number that a datasheet prints, and the capacitance that stands
+        with the value at that frequency follows:
+
+            C = 1 / ((2 pi f)^2 L)
+
+        A row that is not an inductor, an empty field, a field that is
+        not a number and a part with no value all give None: the part
+        then keeps the model that it had, which is DCR + L with no
+        self-resonance.
+        """
+        if self._kind_of(i) != "L":
+            return None
+        text = self.part_rows[i]["srf"].GetValue().strip()
+        if not text:
+            return None
+        try:
+            f = float(text) * 1e9
+        except ValueError:
+            return None
+        l = self._part_value(i)
+        if f <= 0 or not l:
+            return None
+        return 1.0 / ((2 * 3.141592653589793 * f) ** 2 * l)
 
     def _on_para_edit(self, i, evt):
         """Move the choice of that row to Custom when the user types.

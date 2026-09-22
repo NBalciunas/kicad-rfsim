@@ -115,15 +115,47 @@ FLAT_MM = 1e-7
 # to 1e-9 mm: 1 ppm of a 0.1 mm radius is 0.1 nm, thus 100 times that
 # rounding.
 #
-# **`_merge_close` can still take a line of a via.** A via whose radius
-# is under `tol` keeps ONE edge, because the merge joins its own three
-# lines: at coarse `tol` is 0.18 mm, thus r = 0.15 mm stays at +54%. The
-# owner refused a smaller `tol`, because it makes the cells of the whole
-# board smaller. A copper edge within `tol` of a via line moves that
-# line as well, and 19 of the 102 axis cases of `validation/` stand so;
-# the other 83 hold all three nodes inside, against 2 of 102 before the
-# lines went in.
+# **The three lines of a via are ANCHORS of `_merge_close`**, in the same
+# way as the two faces of a lumped element box. A copper edge within
+# `tol` of a via line took that line to the mean of the two and the node
+# then stood OUTSIDE the barrel: 19 of the 102 axis cases of
+# `validation/` lost a line so, and the 0402 and the 0603 land of the
+# ESL table were among them. The copper edge moves to the via line
+# instead, thus no cell becomes smaller than the merge permits.
+#
+# **A via whose radius is under `tol` still keeps ONE edge**, because
+# the merge joins its own three lines: at coarse `tol` is 0.18 mm, thus
+# r = 0.15 mm stays a thin wire. The owner refused a smaller
+# `tol`, because it makes the cells of the whole board smaller.
+#
+# **The rank below decides WHICH of the three lines that one is**, and
+# it moved the number: the CENTRE wins, thus the node stands at the axis
+# of the barrel and `run_via.py coarse` reads -16% against Goldfarb and
+# Pucel, where the mean of the centre and a surface line put that node
+# 0.106 mm off the axis and it read +54%. The centre must also win for a
+# reason that is not the number: three anchors of one rank keep the FIRST,
+# which is the surface line at x - r, and a barrel whose only node lies
+# within 1 ppm of its wall can hold no node at all on the other axis.
+# Such a barrel writes "Unused primitive" and conducts nothing.
 VIA_SURFACE = 1.0 - 1e-6
+# The rank of an anchor of `_merge_close`. A line of a higher rank does
+# not move, and a line of a lower rank that stands within `tol` of it is
+# lost. Only these three rules make an anchor; every other line takes
+# the mean, as before.
+#
+# **The face of an element outranks a via**, because the two failures are
+# not the same size. A face that moves can CLOSE the gap of the part and
+# give a piece of track with no message (a series 50 ohm read S21
+# -0.16 dB in the place of -4.5 dB), while a via that loses one of its
+# three lines keeps the others and reads as a thinner barrel. The case
+# is a real one: on the 0402 and the 0603 land of `run_shunt.py
+# packages` the surface line of the via stands 0.02 mm from a face of
+# the element box, thus the via keeps its centre alone on that axis.
+# Those two boards did the same before the ranks, because a face was
+# the only anchor then.
+RANK_FACE = 2
+RANK_VIA_CENTRE = 1
+RANK_VIA_SURFACE = 0
 # The number of mesh cells across a copper feature that is narrower than
 # `res` and that no port covers: a track, a gap between two pads, or a
 # slot. 2 cells put ONE line inside the feature, and its two edge lines
@@ -482,31 +514,43 @@ def _merge_close(vals, tol, anchors=()):
 
     This prevents very thin mesh cells.
 
-    A value in `anchors` does NOT move: the merged line takes the value
-    of the anchor, and not the mean of the two. A lumped element is a box
-    between two mesh lines and it has no line of its own inside, thus a
-    face that the mean moves can leave the box with no cell at all.
+    `anchors` holds (the value, the rank) of each line that must NOT
+    move: the merged line takes the value of the anchor, and not the mean
+    of the two. A lumped element is a box between two mesh lines and it
+    has no line of its own inside, thus a face that the mean moves can
+    leave the box with no cell at all.
 
     The failure is measured, and it is not an open circuit: the copper of
     the two pads meets on that one line, thus the gap CLOSES and the run
     gives a piece of line. A series 50 ohm in a 50 ohm line gave S21
     -0.16 dB in the place of -4.5 dB, and S11 -17.4 dB in the place of
-    -10.3 dB. openEMS gives NO warning for it.
+    -10.3 dB. openEMS gives NO warning for it. A via that loses a line
+    fails in the same silent way, one step smaller: the node leaves the
+    barrel and the via reads as a thinner one.
+
+    **Two anchors within `tol` cannot both stay**, because the cell
+    between them is what this function exists to prevent. The HIGHER
+    rank wins, and two anchors of one rank keep the first: refer to
+    RANK_FACE for the order and for the reason of it.
     """
-    keep = set(round(a, 9) for a in anchors)
+    rank = {}
+    for value, k in anchors:
+        key = round(value, 9)
+        rank[key] = max(k, rank.get(key, k))
     vals = sorted(vals)
     out = [vals[0]]
-    held = [round(vals[0], 9) in keep]
+    held = [rank.get(round(vals[0], 9), -1)]
     for v in vals[1:]:
+        k = rank.get(round(v, 9), -1)
         if v - out[-1] < tol:
-            if round(v, 9) in keep and not held[-1]:
+            if k > held[-1]:
                 out[-1] = v          # the anchor takes the place of the mean
-                held[-1] = True
-            elif not held[-1]:
+                held[-1] = k
+            elif held[-1] < 0:       # neither line is an anchor
                 out[-1] = 0.5 * (out[-1] + v)
         else:
             out.append(v)
-            held.append(round(v, 9) in keep)
+            held.append(k)
     return out
 
 
@@ -743,6 +787,7 @@ def _mesh(model, ports, res):
         poly_y |= ly
     xs |= poly_x
     ys |= poly_y
+    via_x, via_y = [], []
     for v in model["vias"]:
         # The CENTER line is necessary, and not only the two edges.
         # openEMS makes a metal primitive into PEC on the edges of the
@@ -755,9 +800,17 @@ def _mesh(model, ports, res):
         # **The two surface lines go 1 ppm INSIDE the barrel**
         # (`VIA_SURFACE`), because a node exactly on the surface counts
         # only when the doubles put it inside.
+        #
+        # **All three are anchors of the merge below**: a copper edge
+        # that stands within `tol` of one of them moves to the via, and
+        # not the via to the mean of the two.
         r = v["r"] * VIA_SURFACE
         xs.update((v["x"] - r, v["x"], v["x"] + r))
         ys.update((v["y"] - r, v["y"], v["y"] + r))
+        via_x += [(v["x"] - r, RANK_VIA_SURFACE), (v["x"], RANK_VIA_CENTRE),
+                  (v["x"] + r, RANK_VIA_SURFACE)]
+        via_y += [(v["y"] - r, RANK_VIA_SURFACE), (v["y"], RANK_VIA_CENTRE),
+                  (v["y"] + r, RANK_VIA_SURFACE)]
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
@@ -1008,8 +1061,47 @@ def _mesh(model, ports, res):
               % (len(narrow), POLY_FEATURE_CELLS * tol, POLY_FEATURE_CELLS,
                  min(narrow)),
               flush=True)
-    return (_merge_close(xs, tol, le_x), _merge_close(ys, tol, le_y),
+    anchor_x = [(v, RANK_FACE) for v in le_x] + via_x
+    anchor_y = [(v, RANK_FACE) for v in le_y] + via_y
+    return (_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
             _merge_close(zs, tol_z))
+
+
+def _epc_split(grid, e):
+    """Give the mesh line that divides the land of an element in two.
+
+    The EPC of an inductor stands in PARALLEL with it, and TWO lumped
+    elements CANNOT share one box: the engine gives the cells of a box to
+    one property alone and the other one is silent, with no message. It
+    does that whatever the caps of the box and whatever the priority of
+    CSXCAD, and the one that survives is the FIRST on the plain path and
+    the SECOND on the path of the RLC extension. Thus the part and its
+    EPC stand side by side ACROSS the current, on the two halves of the
+    land, and they are in parallel because both bridge the same gap.
+
+    **The line between them must be a line that the mesh holds already.**
+    A new line there would make a smaller cell and cost the timestep of
+    the whole board, and the faces of these two boxes are not anchors of
+    `_merge_close`. Thus the line nearest the middle of the land divides
+    it, and the mesh does not move at all.
+
+    **A land of ONE cell holds no line inside, thus it cannot carry an
+    EPC** and this function gives None.
+
+    The cost of the division, measured on 2026-09-21 against
+    1/(2 pi sqrt(LC)) with 10 nH and 0.28 pF: a land of 4 cells, thus 2
+    for each box, puts the notch +0.6% high, and the land of a real 0402
+    (0.640 mm, 2 cells of 0.32 mm, thus ONE for each box) puts it +8.7%
+    high. The two boxes must ABUT: one cell of the land between them
+    takes the notch to -16%.
+    """
+    k = 1 if e["ny"] == "x" else 0
+    lo, hi = sorted((e["start"][k], e["stop"][k]))
+    inside = [v for v in grid.GetLines("xy"[k]) if lo + 1e-9 < v < hi - 1e-9]
+    if not inside:
+        return None
+    mid = 0.5 * (lo + hi)
+    return min(inside, key=lambda v: abs(v - mid))
 
 
 def build(model, excite_idx, res, want_ff=False):
@@ -1150,9 +1242,51 @@ def build(model, excite_idx, res, want_ff=False):
                 comp = {e["type"]: e["value"]}
                 if para:
                     comp.update(_parasitic_components(e))
+                # **The EPC goes on the OTHER half of the land**, because
+                # two elements cannot share a box: refer to `_epc_split`.
+                # The part keeps the half that comes first, and its value
+                # does not change: an element carries the same value over
+                # half a land as over the whole of it (a resistor of
+                # 50 ohm read +0.2% on the half).
+                epc = (e.get("epc") or 0.0) if para else 0.0
+                start, stop = list(e["start"]), list(e["stop"])
+                k = 1 if e["ny"] == "x" else 0
+                split = _epc_split(grid, e) if epc > 0 else None
+                if split is not None:
+                    stop[k] = split
                 csx.AddLumpedElement("le_" + e["ref"], ny=e["ny"], caps=True,
                                      **dict(le_kw, **comp)).AddBox(
-                    e["start"], e["stop"], priority=15)
+                    start, stop, priority=15)
+                if split is not None:
+                    c_start = list(e["start"])
+                    c_start[k] = split
+                    # **`LEtype=0` and NOT `le_kw`.** `LEtype` selects
+                    # the topology of a WHOLE element, thus a C alone
+                    # gives the same curve with either value on a box of
+                    # its own. Beside another element it does NOT: the
+                    # same geometry with `LEtype=1` on this element put
+                    # the self-resonance 30% LOW, where `LEtype=0` puts
+                    # it within 1% on a wide land.
+                    csx.AddLumpedElement("epc_" + e["ref"], ny=e["ny"],
+                                         caps=True, LEtype=0,
+                                         C=epc).AddBox(
+                        c_start, list(e["stop"]), priority=15)
+                    f_res = 1.0 / (2 * np.pi * np.sqrt(e["value"] * epc)) \
+                        if e["type"] == "L" and e["value"] else 0.0
+                    print("[rfsim] lumped %s: EPC %g pF in parallel, on the "
+                          "other half of its land%s" % (
+                              e["ref"], epc * 1e12,
+                              "; the self-resonance stands near %.2f GHz"
+                              % (f_res / 1e9) if f_res else ""), flush=True)
+                elif epc > 0:
+                    print("[rfsim] WARNING: the land of %s holds ONE mesh "
+                          "cell across the current, thus it cannot carry "
+                          "the EPC beside the part: two lumped elements "
+                          "cannot share one box, and the engine would keep "
+                          "one of them with no message. %s keeps its value "
+                          "alone and it has NO self-resonance. Use a finer "
+                          "mesh preset, which gives the land more cells."
+                          % (e["ref"], e["ref"]), flush=True)
                 unit = {"R": "ohm", "L": "H", "C": "F"}[e["type"]]
                 extra = ["%s %g %s" % (k, v, {"R": "ohm", "L": "H",
                                               "C": "F"}[k])

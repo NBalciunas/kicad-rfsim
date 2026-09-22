@@ -162,7 +162,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
-                e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
+                e.update(package=v["package"], esl=v["esl"], esr=v["esr"],
+                         epc=v.get("epc"))
                 # A part whose refdes does not give the type comes back
                 # from extract() with type None and value None. The user
                 # selected them in the dialog, thus they go in here. A

@@ -757,6 +757,68 @@ def test_a_series_rlc_part_needs_a_positive_component():
     print("a series RLC part needs a positive component OK (and its L warns)")
 
 
+def test_the_srf_field_belongs_to_an_inductor():
+    """The SRF field shows for an inductor alone, and it gives the EPC.
+
+    A real inductor has a capacitance in PARALLEL with its winding, thus
+    it has a self-resonance and it stops being an inductor above it. No
+    table gives that capacitance, and it cannot be separated from the
+    land without the S-parameters of the part. Thus the field takes the
+    SELF-RESONANCE, which every datasheet prints, and the dialog gives
+    the capacitance that stands with the value at that frequency:
+
+        C = 1 / ((2 pi f)^2 L)
+
+    An empty field leaves the part as it was: DCR + L, with no
+    self-resonance and no second element.
+    """
+    d = dialog([unknown("D1")])
+    r = d.part_rows[1]
+    cb = d.para_rows[1][1]
+    cb.SetValue(True)
+    fire(cb, wx.EVT_CHECKBOX)
+    for kind, shown in (("R", False), ("C", False), ("L", True),
+                        (gui.RLC_KIND, False)):
+        r["kind"].SetSelection(gui.KIND_ORDER.index(kind))
+        fire(r["kind"], wx.EVT_CHOICE)
+        assert all(c.IsShown() == shown for c in r["srf_ctrls"]),             "the SRF field must %sshow for %s" % ("" if shown else "not ", kind)
+    # 10 nH that resonates at 3 GHz gives 0.2815 pF.
+    r["kind"].SetSelection(gui.KIND_ORDER.index("L"))
+    fire(r["kind"], wx.EVT_CHOICE)
+    r["value"].SetValue("10")
+    r["srf"].SetValue("3")
+    got = d.get_settings()["lumped_parasitics"]["D1"]
+    want = 1.0 / ((2 * 3.141592653589793 * 3e9) ** 2 * 10e-9)
+    assert abs(got["epc"] - want) < 1e-18,         "the SRF of 3 GHz on 10 nH gives %r, want %g" % (got["epc"], want)
+    # An empty field gives no EPC at all, and so does a row that is not
+    # an inductor: the part then keeps the model that it had.
+    r["srf"].SetValue("")
+    assert d.get_settings()["lumped_parasitics"]["D1"]["epc"] is None
+    r["srf"].SetValue("3")
+    r["kind"].SetSelection(gui.KIND_ORDER.index("C"))
+    fire(r["kind"], wx.EVT_CHOICE)
+    assert d.get_settings()["lumped_parasitics"]["D1"]["epc"] is None
+    # A text that is not a positive number stops the run.
+    r["kind"].SetSelection(gui.KIND_ORDER.index("L"))
+    fire(r["kind"], wx.EVT_CHOICE)
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        for text, ok in (("abc", False), ("0", False), ("-1", False),
+                         ("", True), ("3", True)):
+            r["srf"].SetValue(text)
+            del stopped[:]
+            d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+            if ok:
+                assert not stopped, "%r was refused: %s" % (text, stopped)
+            else:
+                assert stopped and "SRF" in stopped[-1],                     "%r was accepted: %s" % (text, stopped)
+    finally:
+        wx.MessageBox = old_box
+    print("the SRF field OK (an inductor alone, SI from the datasheet, "
+          "and the refusals)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -776,4 +838,5 @@ if __name__ == "__main__":
     test_the_x_of_the_dialog_does_not_start_the_run()
     test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics()
     test_a_series_rlc_part_needs_a_positive_component()
+    test_the_srf_field_belongs_to_an_inductor()
     print("PASS")

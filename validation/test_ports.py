@@ -92,6 +92,53 @@ def test_via_center_line():
     print("via center line OK (and the surface lines stand inside)")
 
 
+def test_via_lines_are_anchors():
+    """A copper edge beside a via moves to the via, and not the via to it.
+
+    `_merge_close` joins two lines that stand nearer to each other than
+    `tol` at their MEAN, thus a copper edge beside a via took the line
+    of that via out of the barrel: 19 of the 102 axis cases of the
+    boards of `validation/` lost a line so, and the 0402 and the 0603
+    land of the ESL table were among them. The three lines of a via are
+    anchors now, in the same way as the two faces of an element box, and
+    the copper edge moves instead. No cell becomes smaller: the edge
+    stands within `tol` of a line that exists already.
+
+    **The face of an element outranks a via**, because a face that moves
+    can CLOSE the gap of the part and give a piece of track with no
+    message, where a via that loses one line keeps the others. The
+    second half of this test holds that order.
+    """
+    c, r = 12.0, 0.3
+    # The edge of a pad 5 microns beside the surface line of the via,
+    # which is under every `tol` that this board can give.
+    edge = c + r - 0.005
+    m = model("stripline")
+    m["vias"] = [{"x": c, "y": -7.0, "r": r, "z0": 0.0, "z1": 1.46}]
+    m["polygons"]["F.Cu"] = [[[edge, -7.6], [edge + 2.0, -7.6],
+                              [edge + 2.0, -6.4], [edge, -6.4]]]
+    xs, _, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+    for want in (c - r * runner.VIA_SURFACE, c, c + r * runner.VIA_SURFACE):
+        assert near(xs, want, 1e-9), \
+            "the via lost its line at x=%.9f to the copper edge" % want
+    assert not near(xs, edge, 1e-9), \
+        "the copper edge at x=%.6f kept its own line, thus the merge made " \
+        "a cell of 5 microns" % edge
+    # The same via, and now a face of an element box beside the SAME
+    # surface line. The face keeps its value and the via gives up that
+    # one line, which is the order of the ranks.
+    m["polygons"].pop("F.Cu")
+    m["lumped_elements"] = [
+        {"ref": "C1", "type": "C", "value": 1e-12, "ny": "x", "layer": "F.Cu",
+         "start": [edge, -7.6, 1.46], "stop": [edge + 0.5, -6.4, 1.46]}]
+    xs, _, _ = runner._mesh(m, runner._port_geometry(m, RES), RES)
+    assert near(xs, edge, 1e-9), \
+        "the face of the element box moved: the gap of the part can close"
+    assert near(xs, c, 1e-9), "the via lost the line at its centre"
+    print("via lines are anchors OK (a copper edge yields, an element "
+          "face does not)")
+
+
 def test_flat_and_vertical_ports():
     """Only a microstrip port goes down to the reference plane.
 
@@ -568,8 +615,84 @@ def test_a_series_rlc_part_is_one_element():
               rlc.items())), factor))
 
 
+def test_an_inductor_with_an_epc_is_two_elements():
+    """An EPC makes a SECOND element, on the other half of the land.
+
+    Two lumped elements cannot share one box: the engine gives the cells
+    of a box to one property alone and the other one is silent, with no
+    message. Thus the part keeps one half of the land across the current
+    and the EPC takes the other, and the two are in parallel because
+    both bridge the same gap.
+
+    **The EPC element takes `LEtype=0`, and not the `LEtype=1` of every
+    other element.** The same geometry with `LEtype=1` on this element
+    put the self-resonance of a 10 nH inductor 30% LOW, where `LEtype=0`
+    put it within 1% on a wide land.
+
+    **The line that divides the land is a line that the mesh holds
+    already**, thus the mesh does not move: a new line there would make
+    a smaller cell and cost the timestep of the whole board. A land of
+    ONE cell holds no such line, and the part then keeps the whole land
+    and gets a warning.
+    """
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    def boxes(width, y0=-10.0, epc=0.28e-12):
+        m = model("msl")
+        e = lumped(0.5, width, y0=y0, ny="x")
+        e.update(ref="L1", type="L", value=1e-8, package="Custom",
+                 esl=0.0, esr=0.1, epc=epc)
+        m["lumped_elements"] = [e]
+        m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9,
+                             z0=50.0, mesh="coarse", max_timesteps=1000,
+                             end_criteria=1e-4, lumped=True, parasitics=True)
+        fdtd = runner.build(m, 0, RES)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "csx.xml")
+            fdtd.GetCSX().Write2XML(path)
+            root = ET.parse(path).getroot()
+            out = {}
+            for prop in root.iter():
+                if prop.get("Name") in ("le_L1", "epc_L1"):
+                    # A Box holds its two corners in P1 and P2, and not
+                    # in its own attributes.
+                    box = [[float(c.get("Y")) for c in b]
+                           for b in prop.iter("Box")]
+                    out[prop.get("Name")] = (dict(prop.attrib), box[0])
+        return out
+
+    # A land of 2.9 mm holds 4 cells, thus each box keeps 2 of them.
+    got = boxes(2.9)
+    assert set(got) == {"le_L1", "epc_L1"}, \
+        "want the part and its EPC, got %s" % sorted(got)
+    assert float(got["epc_L1"][0]["LEtype"]) == 0, \
+        "the EPC must take LEtype=0, got %s" % got["epc_L1"][0].get("LEtype")
+    assert float(got["le_L1"][0]["LEtype"]) == 1, "the part keeps LEtype=1"
+    assert abs(float(got["epc_L1"][0]["C"]) - 0.28e-12) < 1e-18, \
+        "the EPC lost its value: %s" % got["epc_L1"][0].get("C")
+    # The two boxes ABUT on one line, and together they cover the land.
+    # One cell of the land between them takes the self-resonance to -16%.
+    part, epc = got["le_L1"][1], got["epc_L1"][1]
+    assert abs(part[1] - epc[0]) < 1e-9, \
+        "the two boxes do not abut: %g and %g" % (part[1], epc[0])
+    assert abs(part[0] - (-10.0)) < 1e-9 and abs(epc[1] - (-7.1)) < 1e-9, \
+        "the pair does not cover the land: %g..%g" % (part[0], epc[1])
+    # A land that holds ONE cell cannot be divided: the part keeps the
+    # whole land and the run says so. The cells across the strip of this
+    # port stand 0.15 mm apart, thus a land of 0.13 mm between two of
+    # them holds no line inside: its own two faces are anchors, and they
+    # take the two lines beside them.
+    got = boxes(0.13, y0=-10.14)
+    assert set(got) == {"le_L1"}, \
+        "a land of one cell must keep the part alone, got %s" % sorted(got)
+    print("an inductor with an EPC is two elements OK (LEtype=0 beside "
+          "LEtype=1, and one cell keeps the part alone)")
+
+
 if __name__ == "__main__":
     test_via_center_line()
+    test_via_lines_are_anchors()
     test_flat_and_vertical_ports()
     test_fallback_to_lumped()
     test_port_length_uses_list_position()
@@ -583,4 +706,5 @@ if __name__ == "__main__":
     test_lumped_element_does_not_wreck_the_mesh()
     test_a_feature_stays_on_one_layer()
     test_a_series_rlc_part_is_one_element()
+    test_an_inductor_with_an_epc_is_two_elements()
     print("PASS")

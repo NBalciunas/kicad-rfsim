@@ -1054,10 +1054,17 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
             warnings.append("%s: %s" % (ref, pkg_warn))
+        # **The EPC is None until the user gives it**, and no table gives
+        # it: the self-capacitance of a winding cannot be read from the
+        # size of the package, and it cannot be separated from the land
+        # without the S-parameters of the part. The dialog takes the SRF,
+        # which every datasheet of an inductor prints, and it gives the
+        # capacitance that stands with the value at that frequency.
         elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
                          "layer": layer, "start": start, "stop": stop,
                          "pads": [list(c1), list(c2)],
-                         "package": pkg, "esl": esl, "esr": esr})
+                         "package": pkg, "esl": esl, "esr": esr,
+                         "epc": None})
     return elements, warnings
 
 

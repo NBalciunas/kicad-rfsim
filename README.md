@@ -12,7 +12,7 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
 - Animate the E-field and the H-field on the mid-plane of the substrate.
 - Calculate the far field with NF2FF: three polar cuts, a 3D pattern, Dmax and the efficiency.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
-- Model the R, L and C parts as lumped elements with the parasitics of the package, and any 2-terminal part as a series RLC.
+- Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
 - Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
 - Draw the board layout that the solver uses.
@@ -147,7 +147,12 @@ Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "L
 
 The letter can also come after the number (`4.7k` = 4.7 kohm, `22p` = 22 pF). **The unit letter is optional**, thus `4p7F` and `10uH` read the same as `4p7` and `10u`, and the unit can be a word of its own (`10 kOhm`, `4.7 uF`, `10 nH`). A word that starts with a digit after a space has no effect (`100nF 10%`, `10u 25V`). "DNP" and the other words for a part that is not there give no value. The dialog shows the number that the plugin read, thus you see which value it took.
 
-**Each row also holds the parasitics of the body**, an ESR and an ESL. The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512. Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element. A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR but no self-resonance.
+**Each row also holds the parasitics of the body**, an ESR and an ESL.
+The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512.
+Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element.
+A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR.
+
+**An inductor row also holds its SRF**, the self-resonance in GHz that its datasheet prints. A real inductor has a capacitance across its winding, thus it stops being an inductor above that frequency and it starts to pass. Give the SRF and the plugin models the part as its DCR and its inductance in parallel with that capacitance: the run then shows the resonance and what the part does above it. Leave the field empty and the part keeps the model it had, with no self-resonance. The plugin puts the capacitance on the other half of the land of the part, thus the two work in parallel; the resonance stands about 1% high on a wide land and about 9% high on an 0402, where the land holds two mesh cells. A land of one cell cannot hold both, and the run says so and keeps the part alone.
 
 **An inductance makes the run longer.** A lumped inductor needs a smaller timestep, thus the plugin divides the step and gives the run the same factor more steps. An inductance of 0.25 nH or less costs nothing, 1 nH takes about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well. The label under the rows of the parts says the number before you start the run.
 
@@ -199,19 +204,23 @@ A filled zone with a void of 8 x 6 mm below the line, against the same board wit
 * **`run_feature.py [mesh] [stub width in mm]`**  
 The number of mesh cells across a copper feature that no port covers, against closed-form theory. An open stub is a quarter-wave resonator, thus the notch of |S21| gives its eps_eff, and two stub lengths remove the end effects. Run it with the python of the solver.
 * **`run_via.py [mesh]`**  
-The inductance of one via to the ground plane, against the closed form of Goldfarb and Pucel, for four drill sizes. A board with no via removes the line from the result. Every drill stands within 20% of the closed form at the medium preset. At the coarse preset the smallest drill (0.3 mm) does not pass: the mesh step there merges the three lines of that barrel into one, the via becomes a thin wire and it reads +54%. Use a finer preset for a board with such a via. Run it with the python of the solver.
+The inductance of one via to the ground plane, against the closed form of Goldfarb and Pucel, for four drill sizes. A board with no via removes the line from the result. Every drill stands within 20% of the closed form at the medium preset. At the coarse preset the mesh step merges the three lines of the smallest drill (0.3 mm) into one: that barrel is a thin wire at the axis of the via and not a barrel, and it reads −16%. Use a finer preset for a board with such a via. Run it with the python of the solver.
+* **`run_epc.py [mesh]`**  
+The self-resonance of an inductor, against the closed form 1/(2 pi sqrt(LC)). The board is a microstrip with the land of an 0402 in series, thus the land holds the two mesh cells that a real small part gives. A parallel LC blocks at its resonance, thus |S21| has a deep notch there, and the tool compares that frequency with the closed form. The run with no SRF is the control: it has no resonance in the band. Run it with the python of KiCad.
 * **`run_stability.py [fast|slow|all]`**  
 The timestep rule for a lumped inductor. `fast` compares the timestep of the plugin against the one at which the run diverges, on 8 geometries, in about 40 minutes: the smallest margin is 1.8 times. `slow` finds a different failure: a board with a small feature in it, such as a gap, a narrow track or a part, also carries a mode that grows, and no timestep corrects it. A run that stops at its end criteria ends 3 times or more before that mode, thus a normal run does not reach it; a run that you make long on purpose can.
 * **`test_ports.py`**  
-The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh line at each via, the cells near a CPW and a stripline, the copper of one layer at a time, and the one element of a Series RLC part. It needs no KiCad and no solver run, thus it takes seconds. Run it with the python of the solver.
+The geometry of the ports and the mesh: the box of each type, the fallback to a lumped port, the mesh lines at each via and what happens when copper stands beside one, the cells near a CPW and a stripline, the copper of one layer at a time, and the one element of a Series RLC part. It needs no KiCad and no solver run, thus it takes seconds. Run it with the python of the solver.
 * **`mesh_diff.py [revision]`**  
 The mesh of every `model.json` in `validation/`, with the runner of this checkout against the runner of a git revision (HEAD by default). It lists each board whose mesh lines move, thus you know which results a change of the mesh can move before you run the solver. It takes about a second. Run it with the python of the solver.
+* **`via_nodes.py [-v] [revision]`**  
+The grid nodes that stand inside the barrel of every via in `validation/`. openEMS makes a via into metal on the grid edges whose node lies in the barrel, thus a via with no node inside conducts nothing and a via with one node is a thin wire. The tool counts those nodes for each via and names the vias that lost a mesh line, and it takes a revision or a path in the same way as `mesh_diff.py`. It starts no solver. Run it with the python of the solver.
 * **`run_headless.py [mesh] [msl|lumped]`**  
 The full path from the board to the Touchstone file. A microstrip of 30 mm and about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
 * **`diag_lumped.py board.kicad_pcb`**  
 Why the plugin does not simulate an R/L/C part. It shows the result of each test, for each part.
 * **`test_dialog.py`**  
-The dialog with no display: the rows of the parts, the packages, the parasitics and the values that `get_settings` gives back.
+The dialog with no display: the rows of the parts, the packages, the parasitics, the SRF of an inductor and the values that `get_settings` gives back.
 * **`test_views.py`**  
 Every view of the results window, with no display. It reads back the title, the labels and the color bar, and it needs `validation/out_coarse` from `run_headless.py coarse`.
 * **`test_touchstone.py`**  
