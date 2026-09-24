@@ -286,10 +286,26 @@ def test_unknown_part_without_a_value_cannot_run():
         fire(r["kind"], wx.EVT_CHOICE)
         d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
         assert "needs a value in pF" in stopped[-1], stopped
+        # A C of 0 is no part, thus the dialog refuses it. A resistor of
+        # 0 ohm is a short (a 0R link), and the dialog accepts it. Its body
+        # sets no timestep, because the runner makes it a box of metal.
+        r["value"].SetValue("0")
+        del stopped[:]
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert stopped and "needs a value in pF" in stopped[-1], stopped
+        r["kind"].SetSelection(gui.KIND_ORDER.index("R"))
+        fire(r["kind"], wx.EVT_CHOICE)
+        r["value"].SetValue("0")
+        del stopped[:]
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert not stopped, "0 ohm must be a short: %s" % stopped
+        assert d._row_components(1) == {"R": 0.0}, d._row_components(1)
+        assert d.get_settings()["lumped_parasitics"]["D1"]["value"] == 0.0
     finally:
         wx.MessageBox = old_box
     d.Destroy()
-    print("a modelled part with no type or no value is refused OK")
+    print("a modelled part with no type or no value is refused OK "
+          "(and 0 ohm is a short)")
 
 
 def test_the_rows_scroll_and_the_dialog_stops_growing():
@@ -620,6 +636,9 @@ def test_the_run_window_keeps_its_log():
         text = open(path, encoding="utf-8").read()
         assert ("CLASSIC path" in text) if rc == 0 else (
             "ERROR: NaN" in text and "exit code 3" in text), text
+        # Each line of the file starts with "- ", thus it is easy to read.
+        assert all(ln.startswith("- ") for ln in text.splitlines()
+                   if ln.strip()), text
     print("the run window keeps its log OK (run.log, and a failed run says "
           "so)")
 
@@ -928,8 +947,8 @@ def test_a_series_rlc_part_needs_a_positive_component():
     """_on_ok refuses a series RLC with no component, a negative value, or
     a text.
 
-    Each field is 0 or a positive number. 0 (or an empty field) leaves that
-    component out, and at least one component must stay. The L of the part
+    Each field is 0 or a positive number. 0 (or an empty field) removes
+    that component, and one component or more must stay. The L of the part
     changes the timestep as an inductor does, thus the warning follows it.
     """
     d = dialog([unknown("D1")])
@@ -1032,6 +1051,42 @@ def test_the_srf_field_belongs_to_an_inductor():
           "and the refusals)")
 
 
+def test_an_inductor_row_keeps_its_model_box_in_view():
+    """A row that becomes an inductor keeps the Model checkbox in view.
+
+    The SRF columns show only for an inductor. Before, the window of the
+    rows got its width from the rows when the dialog opened. Thus a board
+    with no inductor gave a window with no space for the SRF. A row that
+    then became an inductor pushed its Model checkbox out of the window.
+    """
+    d = dialog([unknown("D1")])
+    d.Show()
+    for _ in range(3):
+        wx.Yield()
+    r = d.part_rows[1]
+    cb = d.para_rows[1][1]
+    cb.SetValue(True)
+    fire(cb, wx.EVT_CHECKBOX)
+    for kind in ("R", "L", gui.RLC_KIND):
+        r["kind"].SetSelection(gui.KIND_ORDER.index(kind))
+        fire(r["kind"], wx.EVT_CHOICE)
+        d.Layout()
+        for _ in range(3):
+            wx.Yield()
+        right = cb.GetPosition().x + cb.GetSize().width
+        room = d.part_area.GetClientSize().width
+        assert right <= room, \
+            "%s: the Model box ends at %d px, and the window is %d px" \
+            % (kind, right, room)
+    # The labels of a series RLC name the quantity.
+    labels = [c.GetWindow().GetLabel() for c in r["triple"].GetChildren()
+              if c.IsWindow() and isinstance(c.GetWindow(), wx.StaticText)]
+    for want in ("Resistance:", "Inductance:", "Capacitance:"):
+        assert want in labels, labels
+    d.Destroy()
+    print("an inductor row keeps its Model box in view OK (R, L, Series RLC)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_preset_holds_the_package()
@@ -1056,4 +1111,5 @@ if __name__ == "__main__":
     test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics()
     test_a_series_rlc_part_needs_a_positive_component()
     test_the_srf_field_belongs_to_an_inductor()
+    test_an_inductor_row_keeps_its_model_box_in_view()
     print("PASS")

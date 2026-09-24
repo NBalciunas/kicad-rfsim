@@ -382,11 +382,17 @@ def unsaved_stackup(board):
         return None
     if live == saved:
         return None
+    # When one side has no stackup, there is no pair of values to compare.
+    # Thus give the values of the other side, and the user sees what that
+    # side holds.
     if saved is None:
-        diffs = ["the saved file has no stackup" if board.GetFileName()
-                 else "the board has no saved file"]
+        diffs = [("the saved file has no stackup" if board.GetFileName()
+                  else "the board has no saved file")
+                 + ". The new values are:\n"
+                 + "\n".join("      " + _layer_text(it) for it in live)]
     elif live is None:
-        diffs = ["Board Setup has no stackup"]
+        diffs = ["Board Setup has no stackup. The saved values are:\n"
+                 + "\n".join("      " + _layer_text(it) for it in saved)]
     elif [it["name"] for it in live] != [it["name"] for it in saved]:
         diffs = ["layers: new %s; saved %s"
                  % (", ".join(it["name"] for it in live),
@@ -411,6 +417,17 @@ def unsaved_stackup(board):
             text += (" With the %s values, the dialog starts at the FR-4 "
                      "preset." % which)
     return text
+
+
+def _layer_text(it):
+    """Give one layer of a stackup list as text, for the question of
+    `unsaved_stackup`: "dielectric 1: 1.51 mm, er 4.5, tan d 0.02"."""
+    parts = []
+    for key, fmt in (("thickness", "%g mm"), ("epsilon", "er %g"),
+                     ("loss_tangent", "tan d %g")):
+        if it.get(key) is not None:
+            parts.append(fmt % it[key])
+    return "%s: %s" % (it["name"], ", ".join(parts) or "no values")
 
 
 def _uniform_stackup(cu_names, diel_total, eps, tand, cu_t):
@@ -911,12 +928,12 @@ def _package(name):
         return pkg, None
     twin, twin_esl = _AMBIGUOUS_PKG[pkg]
     other = ("an imperial %s (ESL %.2f nH)" % (twin, twin_esl) if twin_esl
-             else "an imperial %s, which this code does not know" % twin)
-    return pkg, ('the footprint "%s" gives the size %s with no metric code '
-                 'beside it, thus that size can be imperial or metric. The '
-                 'model uses the imperial %s (ESL %.2f nH). A METRIC %s is '
-                 '%s: give the values by hand in the dialog if the part is '
-                 'that one.'
+             else "an imperial %s, which RFsim does not know" % twin)
+    return pkg, ("the footprint \"%s\" gives the code %s with no metric "
+                 "code adjacent to it, thus the dimension can be "
+                 "imperial or metric. The model uses the imperial %s "
+                 "(ESL %.2f nH). A METRIC %s is %s. If the part is "
+                 "metric, give its values in the dialog."
                  % (name, pkg, pkg, _ESL_NH[pkg], pkg, other))
 
 
@@ -990,20 +1007,22 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             # three tests below.
             if kind and _parse_value(fp.GetValue(), kind) is not None:
                 warnings.append(
-                    "%s (value \"%s\") has %d numbered pad(s), not 2 -> not "
-                    "modeled. A lumped element bridges exactly two terminals."
+                    "%s (value \"%s\") has %d numbered pads and not 2, "
+                    "thus RFsim does not model it. A lumped element "
+                    "connects two terminals only."
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
             if kind:
-                warnings.append("%s: not an SMD part (THT barrel not modeled) "
-                                "-> not modeled" % ref)
+                warnings.append("%s: not an SMD part, thus RFsim does "
+                                "not model it (the model has no THT "
+                                "barrel)" % ref)
             continue
         layer = _pad_layer(pads[0])
         if layer not in z_of or _pad_layer(pads[1]) != layer:
             if kind:
-                warnings.append("%s: pads not both on one copper layer -> not "
-                                "modeled" % ref)
+                warnings.append("%s: its pads are not on the same copper "
+                                "layer, thus RFsim does not model it" % ref)
             continue
         # A part with no type also has no value: the Value field of a diode
         # has a part number, and not a quantity. The dialog tells the user
@@ -1018,11 +1037,13 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             # that has a type AND a value.
             if _unit_mark_only(fp.GetValue(), kind):
                 warnings.append(
-                    "%s: value \"%s\" gives the type and no quantity -> give "
-                    "the value in the dialog" % (ref, fp.GetValue()))
+                    "%s: the value \"%s\" gives the type and no "
+                    "quantity. Give the value in the dialog."
+                    % (ref, fp.GetValue()))
             else:
-                warnings.append("%s: value \"%s\" not understood -> not "
-                                "modeled" % (ref, fp.GetValue()))
+                warnings.append("%s: RFsim cannot read the value \"%s\", "
+                                "thus it does not model the part"
+                                % (ref, fp.GetValue()))
                 continue
         b1, b2 = pads[0].GetBoundingBox(), pads[1].GetBoundingBox()
         c1 = (_mm(b1.Centre().x), -_mm(b1.Centre().y))
@@ -1048,12 +1069,13 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             start, stop = [c - hw, g0, z], [c + hw, g1, z]
         if g1 - g0 <= 0:
             if kind:
-                warnings.append("%s: pads overlap (no gap to bridge) -> not "
-                                "modeled" % ref)
+                warnings.append("%s: its pads overlap (there is no gap "
+                                "between them), thus RFsim does not "
+                                "model it" % ref)
             continue
         if kind and min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
-            warnings.append("%s is placed off-axis; approximated as a %s-axis "
-                            "element" % (ref, ny))
+            warnings.append("%s is at an angle, thus RFsim models it as "
+                            "an element on the %s axis" % (ref, ny))
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
             warnings.append("%s: %s" % (ref, pkg_warn))
@@ -1075,11 +1097,13 @@ def _port(board, pad, number, copper_layers):
     layer_name = _pad_layer(pad)
     names = [c["name"] for c in copper_layers]
     if layer_name not in names:
-        raise ValueError("Pad of port %d is not on a copper layer in the stackup"
+        raise ValueError("Pad of port %d is not on a copper layer of the "
+                         "stackup"
                          % number)
     idx = names.index(layer_name)
     if len(names) < 2:
-        raise ValueError("Board needs at least 2 copper layers (signal + reference)")
+        raise ValueError("The board must have 2 copper layers or more "
+                         "(signal and reference)")
     ref = names[idx - 1] if idx == len(names) - 1 else names[idx + 1]
 
     # A stripline must have a plane above the strip and a plane below it.
@@ -1207,9 +1231,9 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     warnings = []
     if clipped:
         warnings.append(
-            "Copper on %s extends beyond the simulation domain and is cut "
-            "at the boundary. If it's part of the structure under test, "
-            "increase the domain margin." % "/".join(clipped))
+            "Copper on %s goes across the edge of the simulation domain, "
+            "and RFsim cuts it there. If this copper is a part of the "
+            "structure, increase the domain margin." % "/".join(clipped))
     cu_ids = {c["id"] for c in copper_layers}
     texts = list(board.GetDrawings())
     for fp in board.GetFootprints():
@@ -1219,8 +1243,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 and it.GetLayer() in cu_ids
                 and it.GetBoundingBox().Intersects(region)):
             warnings.append(
-                "text \"%s\" on %s is inside the simulated area but NOT "
-                "modeled as copper"
+                "the text \"%s\" on %s is in the simulated area, but "
+                "RFsim does NOT model it as copper"
                 % (it.GetShownText(True), _lname(it.GetLayer())))
 
     z_of = {c["name"]: c["z"] for c in copper_layers}
@@ -1258,8 +1282,9 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
                                         _pad_box(pad)):
             warnings.append(
-                "Port %d (%s): no copper on %s above the pad, so this is "
-                "not a stripline. The Stripline port type is not offered."
+                "Port %d (%s): there is no copper on %s above the pad, "
+                "thus this is not a stripline. The Stripline port type "
+                "is not available."
                 % (p["number"], p["label"], p["ref_layer2"]))
             p["height"], p["ref_layer2"], p["asymmetry"] = None, None, 0.0
         if not p["direction"]:
@@ -1271,9 +1296,10 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
         if p["height"] and p["asymmetry"] > 0.25:
             warnings.append(
-                "Port %d (%s): the strip is not centered between %s and %s "
-                "(%.0f%% off). A Stripline port models a centered strip, so "
-                "its reference plane is approximate."
+                "Port %d (%s): the strip is not at the center between %s "
+                "and %s (%.0f%% off center). A Stripline port models a "
+                "strip at the center, thus its reference plane is "
+                "approximate."
                 % (p["number"], p["label"], p["ref_layer2"], p["ref_layer"],
                    100.0 * p["asymmetry"]))
     # A port must have a ground return: copper on the reference layer that
@@ -1293,21 +1319,22 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                                   if v), None)
             if g:
                 warnings.append(
-                    "Port %d (%s): no copper on reference layer %s, but "
-                    "there is coplanar copper %.3f mm from the feed line. "
-                    "Set this port to \"Coplanar (CPW)\": a Lumped or "
-                    "Microstrip port has no return path here."
+                    "Port %d (%s): there is no copper on the reference "
+                    "layer %s, but there is coplanar copper %.3f mm from "
+                    "the feed line. Set this port to \"Coplanar (CPW)\", "
+                    "because a Lumped port or a Microstrip port has no "
+                    "return path here."
                     % (p["number"], p["label"], p["ref_layer"], g))
                 continue
             raise ValueError(
-                "Port %d (%s): no copper on reference layer %s under the "
-                "pad.\nThe port drives the pad against %s, so a ground "
-                "plane/pour on %s must reach at least the edge of the pad "
-                "(for PCB antennas the pour edge typically sits right at "
-                "the feed pad). Add/extend a filled zone there, refill "
-                "zones, then re-run." % (p["number"], p["label"],
-                                         p["ref_layer"], p["ref_layer"],
-                                         p["ref_layer"]))
+                "Port %d (%s): there is no copper on the reference layer "
+                "%s below the pad.\nThe port excites the pad against %s. "
+                "Thus a ground plane or a pour on %s must touch the edge "
+                "of the pad, or more. For a PCB antenna, the edge of the "
+                "pour is usually at the feed pad. Add or extend a filled "
+                "zone there, fill the zones again, and run again."
+                % (p["number"], p["label"], p["ref_layer"], p["ref_layer"],
+                   p["ref_layer"]))
 
     # Model the SMD R/L/C parts as lumped elements. A part that holds a
     # port pad is the port, not a different element. Thus ignore its

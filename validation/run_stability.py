@@ -206,8 +206,8 @@ def solve(model, factor, tmp):
     # a growth has no such text. Thus such a run read as STABLE.
     if "not stable" in txt or "grew and did not decay" in txt:
         return "growth", txt
-    # Match the words of the message, and not only "nan". The warning of a
-    # step limit has "resonance", which contains "nan".
+    # Match the words of the message, and not only "nan". Other words, for
+    # example "resonance", contain "nan".
     if "diverged" in txt:
         return "nan", txt
     return "failed", txt

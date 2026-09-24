@@ -166,6 +166,10 @@ def parasitic_effect(comp, own, f_start, f_stop):
     r = comp.get("R") or 0.0
     l = comp.get("L") or 0.0
     c = comp.get("C") or 0.0
+    # A part of 0 (a 0 ohm link) has no |Z| of its own. Thus each body
+    # changes it by more than all limits, and the body stays.
+    if not comp.get(own):
+        return math.inf
 
     def ratio(w):
         x = w * l - (1.0 / (w * c) if c else 0.0)

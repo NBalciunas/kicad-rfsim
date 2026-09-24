@@ -401,8 +401,9 @@ def _time_step_choice(model):
     if s.get("time_step_factor"):
         f = float(s["time_step_factor"])
         rule, why = _time_step_rule(model)
-        return f, ("%.4g, the Timestep factor of the settings, which has "
-                   "priority over the rule (the rule gives %s)"
+        return f, ("%.4g, from the Timestep factor of the settings, "
+                   "which is more important than the rule (the rule "
+                   "gives %s)"
                    % (f, "%.4g, %s" % (rule, why) if rule
                       else "the full Courant step"))
     if not s.get("lumped", True):
@@ -455,7 +456,7 @@ def _time_step_rule(model):
                          "the resistance of %s in a series branch, %g ohm"
                          % (ref, comp["R"])))
     if not cand or min(cand)[0] >= 1.0:
-        return None, "no element asks for less"
+        return None, "no element must have a smaller step"
     f, what = min(cand)
     # The law comes from the constants, thus it follows a new margin.
     law = ("%g/sqrt(L[nH])" % solverenv.LE_STAB_MARGIN if "nH" in what
@@ -493,14 +494,14 @@ def _decisions(model, res, rlc=True):
     ports = _port_geometry(model, res, quiet=True)
     for g in ports:
         if g.get("fallback"):
-            out.append("port %d: a LUMPED port and not a %s" % (
+            out.append("port %d: a LUMPED port, and not a %s" % (
                 g["number"], g["fallback"]))
     mesh = []
     _mesh(model, ports, res, mesh)
     out += ["mesh: " + line for line in mesh]
     if not s.get("lumped", True):
-        out.append("lumped elements: none is modelled (every Model box is "
-                   "clear), thus every gap stays open")
+        out.append("lumped elements: no element is modelled (all Model "
+                   "boxes are clear), thus all gaps stay open")
     else:
         para = s.get("parasitics", True) and rlc
         ported = _ported_refs(model)
@@ -508,16 +509,17 @@ def _decisions(model, res, rlc=True):
         for e in model.get("lumped_elements", []):
             ref = e.get("ref", "?")
             if ref in ported:
-                out.append("%s: a PORT stands in its box (lumped_ports), and "
-                           "its value enters the S-matrix after the run" % ref)
+                out.append("%s: a PORT is in its box (lumped_ports), and "
+                           "its value goes into the S-matrix after the "
+                           "run" % ref)
                 continue
             if e.get("type") == "R" and e.get("value") == 0:
-                out.append("%s: 0 ohm, thus a box of metal: a short" % ref)
+                out.append("%s: 0 ohm, thus a box of metal (a short)" % ref)
                 continue
             comp = _components(e, para, s)
             if not comp:
-                out.append("%s: NOT modelled: it has no type or no value, "
-                           "thus its gap stays open" % ref)
+                out.append("%s: NOT modelled, because it has no type or "
+                           "no value. Its gap stays open." % ref)
                 continue
             # The value of the part first, and then what its body adds.
             own = e.get("type") if e.get("type") in comp else None
@@ -537,8 +539,9 @@ def _decisions(model, res, rlc=True):
                     {"L": "ESL", "R": "ESR"}[k],
                     _si(full[k], {"R": "ohm", "L": "H"}[k]))
                     for k in "LR" if k in full and k not in comp)
-                body = (", WITHOUT the %s of its %s body, which moves |Z| "
-                        "by %.2g%% at most over %s (the limit is %g%%)"
+                body = (", WITHOUT the %s of its %s body, which changes "
+                        "|Z| by %.2g%% or less from %s (the limit is "
+                        "%g%%)"
                         % (left, e.get("package") or "unknown",
                            100 * solverenv.parasitic_effect(
                                full, e["type"], s["f_start"], s["f_stop"]),
@@ -548,27 +551,30 @@ def _decisions(model, res, rlc=True):
             if ref in opens:
                 epc = (e.get("epc") or 0.0) if para else 0.0
                 out.append(
-                    "%s (%s%s): an OPEN over %s, because its smallest |Z| is "
-                    "%s, %.0f times z0 (the limit is %g times): out of the "
-                    "grid, %s, and it costs no timestep"
+                    "%s (%s%s): an OPEN from %s, because its smallest "
+                    "|Z| is %s, %.0f times z0 (the limit is %g times). "
+                    "Thus it is not in the grid, %s, and it costs no "
+                    "timestep"
                     % (ref, parts, body, band, _si(z, "ohm"), z / z0,
                        solverenv.OPEN_Z_RATIO,
-                       "its EPC of %s stays alone on the classic path"
+                       "only its EPC of %s stays, on the classic path"
                        % _si(epc, "F") if epc > 0
-                       else "thus its gap stays open"))
+                       else "its gap stays open"))
                 continue
             if _le_topology(comp, rlc):
                 # Tell WHICH component causes the series path. A resistor
                 # on it is there for the ESL of its body.
-                why = ("it holds an inductance" if e.get("type") in (
+                why = ("it has an inductance" if e.get("type") in (
                     "L", "RLC") and "L" in comp else
                        "the ESL of its body is an inductance" if "L" in comp
-                       else "it holds %d components" % len(comp))
+                       else "it has %d components" % len(comp))
                 path = "the SERIES path (LEtype 1), because %s" % why
             else:
-                path = "the CLASSIC path (LEtype 0), because it is one R or C"
-            out.append("%s (%s%s): in the grid on %s; its smallest |Z| over "
-                       "%s is %s, %.2g times z0, thus not an open"
+                path = ("the CLASSIC path (LEtype 0), because it is one R "
+                        "or one C")
+            out.append("%s (%s%s): in the grid, on %s. Its smallest |Z| "
+                       "from %s is %s (%.2g times z0), thus it is not an "
+                       "open"
                        % (ref, parts, body, path, band, _si(z, "ohm"),
                           z / z0))
             # The position of its EPC comes from the MESH. Thus `main`
@@ -576,9 +582,10 @@ def _decisions(model, res, rlc=True):
     f, why = _time_step_choice(model)
     out.append("timestep: " + why)
     if f and f < 1.0:
-        out.append("step limit: %d, which is the %d of Max steps over the "
-                   "factor, for the same simulated time; a run stops "
-                   "before it as soon as its field settles"
+        out.append("step limit: %d, which is the %d of Max steps divided "
+                   "by the factor, for the same simulated time. A run "
+                   "usually stops before it, when its field becomes "
+                   "stable."
                    % (_max_timesteps(model), s["max_timesteps"]))
     return out
 
@@ -602,12 +609,12 @@ def _epc_decisions(model, grid, rlc=True):
         split = _epc_split(grid, e)
         out.append("%s: its EPC of %s %s" % (
             e.get("ref", "?"), _si(epc, "F"),
-            "stands BESIDE it on the other half of its land, which the "
-            "mesh line at %.4f mm divides" % split if split is not None
-            else "is DROPPED, because its land holds ONE cell across the "
-            "current and two elements cannot share a box: the part has no "
-            "self-resonance; a finer mesh preset gives the land more "
-            "cells"))
+            "is ADJACENT to it, on the other half of its land (the mesh "
+            "line at %.4f mm divides the land)" % split if split is not None
+            else "is REMOVED, because its land has only ONE cell across "
+                 "the current, and two elements cannot share a box. Thus "
+                 "the part has no self-resonance. A finer mesh preset "
+                 "gives the land more cells."))
     return out
 
 
@@ -726,6 +733,10 @@ def _components(e, para, s=None):
         return {k: float(e[k.lower()]) for k in "RLC" if e.get(k.lower())}
     if not e.get("type") or e.get("value") is None:
         return {}
+    # A 0 ohm part is a box of metal (a short). `build` models no body for
+    # it, thus its body sets no timestep.
+    if e["type"] == "R" and e["value"] == 0:
+        return {"R": 0.0}
     comp = {e["type"]: e["value"]}
     if para:
         comp.update(_parasitic_components(e))
@@ -815,18 +826,18 @@ def _report_end(sim_path, nrts, end_criteria):
     steps, dt, every = end
     ns = steps * dt * 1e9
     if steps + every >= nrts:
-        print("[rfsim] WARNING: the run stopped at the STEP LIMIT of %d "
-              "timesteps (%.1f ns) and NOT at its end criteria of %.3g, "
-              "thus the field had not decayed and the result is not "
-              "complete. A resonance with a high Q needs more time: raise "
-              "\"Max timesteps\", or make \"End criteria\" larger."
+        print("[rfsim] WARNING: the run stopped at the step limit of %d "
+              "timesteps (%.1f ns), before its end criteria of %.3g. "
+              "Thus the result is not complete. Increase \"Max steps\", "
+              "or make \"End criteria\" larger."
               % (nrts, ns, end_criteria), flush=True)
-        return ("stopped at the STEP LIMIT of %d timesteps (%.1f ns), and "
-                "NOT at its end criteria" % (nrts, ns))
-    print("[rfsim] the run met its end criteria of %.3g after %d of %d "
-          "timesteps (%.1f ns)" % (end_criteria, steps, nrts, ns),
+        return ("stopped at the STEP LIMIT of %d timesteps (%.1f ns), "
+                "before its end criteria" % (nrts, ns))
+    print("[rfsim] the run got to its end criteria of %.3g after %d of "
+          "%d timesteps (%.1f ns)" % (end_criteria, steps, nrts, ns),
           flush=True)
-    return ("met its end criteria of %.3g after %d of %d timesteps (%.1f ns)"
+    return ("got to its end criteria of %.3g after %d of %d timesteps "
+            "(%.1f ns)"
             % (end_criteria, steps, nrts, ns))
 
 
@@ -1095,16 +1106,16 @@ def _port_geometry(model, res, quiet=False):
             g.update(start=start, stop=stop, msl_width=w, msl_len=length)
         else:
             if p["type"] in TL_PORTS:
-                why = ("it has no attached track" if not p["direction"] else
+                why = ("it has no track" if not p["direction"] else
                        "it has no coplanar gap" if p["type"] == "cpw" else
                        "it has no plane above and below the strip")
                 # The cause stays with the port. Thus `_decisions` can tell
                 # it without a second copy of this test.
                 g["fallback"] = "%s: %s" % (p["type"], why)
                 if not quiet:
-                    print("[rfsim] WARNING: port %d (%s): %s; falling back "
-                          "to a lumped port" % (p["number"], p["type"], why),
-                          flush=True)
+                    print("[rfsim] WARNING: port %d (%s): %s, thus it "
+                          "changes to a lumped port"
+                          % (p["number"], p["type"], why), flush=True)
             g["type"] = "lumped"
             g["start"] = [p["x"] - p["length"] / 2, p["y"] - p["width"] / 2, z_ref]
             g["stop"] = [p["x"] + p["length"] / 2, p["y"] + p["width"] / 2, z_top]
@@ -1459,9 +1470,10 @@ def _mesh(model, ports, res, notes=None):
         # for two different widths. Thus "the line is as wide as its cell".
         # For that cause, the count and not the width sets the error.
         chose.append(
-            "%d copper feature(s) narrower than %.4f mm (narrowest "
-            "%.4f mm) get 1 mesh cell and not %d, thus Z0 and eps_eff can "
-            "be about 10%% off. Use a finer mesh preset."
+            "%d copper feature(s) are narrower than %.4f mm (the "
+            "narrowest is %.4f mm). They get 1 mesh cell and not %d, "
+            "thus Z0 and eps_eff can have an error of about 10%%. Use a "
+            "finer mesh preset."
             % (len(narrow), POLY_FEATURE_CELLS * tol, min(narrow),
                POLY_FEATURE_CELLS))
     # The merge attaches the three lines of a via with a radius smaller
@@ -1470,8 +1482,9 @@ def _mesh(model, ports, res, notes=None):
     thin = [v["r"] for v in model["vias"] if v["r"] * VIA_SURFACE < tol]
     if thin:
         chose.append(
-            "%d via(s) have a radius under %.4f mm (smallest %.4f mm), thus "
-            "the mesh models them as thin wires. Use a finer mesh preset."
+            "%d via(s) have a radius less than %.4f mm (the smallest is "
+            "%.4f mm), thus the mesh models them as thin wires. Use a "
+            "finer mesh preset."
             % (len(thin), tol, min(thin)))
     if notes is None:
         for line in chose:
@@ -1539,10 +1552,10 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         if "Application Control policy" not in str(e):
             raise
         raise SystemExit(
-            "[rfsim] Windows stopped the openEMS libraries. These libraries"
-            " have no signature. Thus Smart App Control does not let them"
-            " start. To correct this, open Windows Security. Select"
-            " 'App & browser control'. Set Smart App Control to Off.")
+            "[rfsim] ERROR: Windows Smart App Control stopped the "
+            "openEMS libraries, because they have no signature. To "
+            "correct this, open Windows Security > App & browser "
+            "control, and set Smart App Control to Off.")
 
     s = model["settings"]
     f0 = 0.5 * (s["f_start"] + s["f_stop"])
@@ -1555,7 +1568,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
     fdtd = openEMS(NrTS=nrts, EndCriteria=s["end_criteria"])
     if tsf and tsf < 1.0:
         fdtd.SetTimeStepFactor(tsf)
-        say("[rfsim] timestep factor %s; max steps %d"
+        say("[rfsim] timestep factor: %s. Step limit: %d"
               % (_time_step_choice(model)[1], nrts), flush=True)
     fdtd.SetGaussExcite(f0, fc)
     # MUR showed a slow increase of the energy at late times on this setup.
@@ -1615,17 +1628,18 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         # the parasitics on such an engine.
         para = s.get("parasitics", True) and rlc
         if s.get("parasitics", True) and not rlc:
-            say("[rfsim] WARNING: this openEMS build has no LEtype; the "
-                  "package parasitics are OFF (ideal elements)", flush=True)
+            say("[rfsim] WARNING: this openEMS version has no LEtype, "
+                "thus the package parasitics are OFF (ideal elements)",
+                flush=True)
         ported = _ported_refs(model)
         opens = _open_parts(model)
         for e in model.get("lumped_elements", []):
             # A PORT is in the box of this element. Thus the grid has no
             # value for it, and the run pays no timestep for it.
             if e.get("ref") in ported:
-                say("[rfsim] lumped %s: a port stands in its box; the "
-                      "value of the part goes into the S-matrix after the "
-                      "run" % e["ref"], flush=True)
+                say("[rfsim] lumped %s: a port is in its box, and the "
+                    "value of the part goes into the S-matrix after the "
+                    "run" % e["ref"], flush=True)
                 continue
             # **An OPEN at all frequencies of the sweep stays out of the
             # grid**: refer to `_open_parts`. Its mesh lines stay, thus the
@@ -1645,11 +1659,11 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                         **dict(_le_topology({"C": epc}, rlc),
                                C=epc)).AddBox(e["start"], e["stop"],
                                               priority=15)
-                say("[rfsim] lumped %s: an OPEN over the sweep (%.3g ohm "
-                      "at the least, %.0f times z0); %s, and it costs no "
-                      "timestep" % (
+                say("[rfsim] lumped %s: an OPEN at all frequencies of "
+                    "the sweep (%.3g ohm or more, %.0f times z0). Thus "
+                    "%s, and it costs no timestep" % (
                           e["ref"], z, z / s["z0"],
-                          "its EPC of %g pF stays alone" % (epc * 1e12)
+                          "only its EPC of %g pF stays" % (epc * 1e12)
                           if epc > 0 else "its gap stays open"),
                       flush=True)
                 continue
@@ -1664,9 +1678,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                 comp = _components(e, para, s)
                 if not comp:
                     say("[rfsim] WARNING: lumped %s is a series RLC with "
-                          "no R, no L and no C; not modeled (the gap between "
-                          "its pads stays open)" % e.get("ref", "?"),
-                          flush=True)
+                        "no R, no L and no C, thus RFsim does not model "
+                        "it (the gap between its pads stays open)"
+                        % e.get("ref", "?"), flush=True)
                     continue
                 csx.AddLumpedElement(
                     "le_" + e["ref"], ny=e["ny"], caps=True,
@@ -1684,8 +1698,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             # The dialog removes it when the user models nothing. A
             # model.json that a person edits can continue to have one.
             if not e.get("type") or e.get("value") is None:
-                say("[rfsim] WARNING: lumped %s has no type or no value; "
-                      "not modeled (the gap between its pads stays open)"
+                say("[rfsim] WARNING: lumped %s has no type or no value, "
+                    "thus RFsim does not model it (the gap between its "
+                    "pads stays open)"
                       % e.get("ref", "?"), flush=True)
                 continue
             if e["type"] == "R" and e["value"] == 0:  # 0 ohm = a short circuit
@@ -1736,16 +1751,16 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                     say("[rfsim] lumped %s: EPC %g pF in parallel, on the "
                           "other half of its land%s" % (
                               e["ref"], epc * 1e12,
-                              "; the self-resonance stands near %.2f GHz"
+                              "; the self-resonance is near %.2f GHz"
                               % (f_res / 1e9) if f_res else ""), flush=True)
                 elif epc > 0:
-                    say("[rfsim] WARNING: the land of %s holds ONE mesh "
-                          "cell across the current, thus it cannot carry "
-                          "the EPC beside the part: two lumped elements "
-                          "cannot share one box, and the engine would keep "
-                          "one of them with no message. %s keeps its value "
-                          "alone and it has NO self-resonance. Use a finer "
-                          "mesh preset, which gives the land more cells."
+                    say("[rfsim] WARNING: the land of %s has only ONE "
+                        "mesh cell across the current, thus it cannot "
+                        "hold the EPC adjacent to the part. Two lumped "
+                        "elements cannot share one box. %s keeps only "
+                        "its value, and it has NO self-resonance. Use a "
+                        "finer mesh preset, which gives the land more "
+                        "cells."
                           % (e["ref"], e["ref"]), flush=True)
                 unit = {"R": "ohm", "L": "H", "C": "F"}[e["type"]]
                 extra = ["%s %g %s" % (k, v, {"R": "ohm", "L": "H",
@@ -1781,7 +1796,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             else:
                 ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
                 note = ", %.3f mm to each plane" % g["height"]
-            note = "dir " + g["prop_dir"] + note
+            note = "direction " + g["prop_dir"] + note
         else:
             # **The axis comes from the port.** A lumped port of the board
             # is between a pad and the plane below it, thus its axis is z.
@@ -1920,7 +1935,8 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
             "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
             "P_in_W": P_in, "efficiency_pct": eff,
         }, fh, indent=1)
-    print("[rfsim] far-field: Dmax %.1f dBi, radiated %.1f%% of input power"
+    print("[rfsim] far field: Dmax %.1f dBi, radiated power %.1f%% of "
+          "the input power"
           % (10.0 * np.log10(Dmax), eff if eff is not None else -1), flush=True)
 
 
@@ -2028,10 +2044,8 @@ def main(model_path, outdir):
     if version > MODEL_VERSION:
         raise SystemExit(
             "[rfsim] ERROR: %s is a version %d model, and this runner "
-            "knows version %d. Update the plugin: an older runner can "
-            "read a newer model and give an incorrect result with no "
-            "message." % (os.path.basename(model_path), version,
-                          MODEL_VERSION))
+            "reads only version %d or lower. Update the plugin."
+            % (os.path.basename(model_path), version, MODEL_VERSION))
     for w in model.get("warnings", []):
         print("[rfsim] WARNING: %s" % w, flush=True)
     s = model["settings"]
@@ -2041,7 +2055,8 @@ def main(model_path, outdir):
     ported = _ported_refs(model) | _open_parts(model)
     n = len(_ports_of(model))
     if n < 1:
-        raise SystemExit("expected at least 1 port, got %d" % n)
+        raise SystemExit("[rfsim] ERROR: the model has %d ports, and it "
+                         "must have 1 or more." % n)
 
     # A lumped inductor must have openEMS v0.37 or after, which has lumped
     # RLC. An older engine writes "Lumped Element R or C not specified!
@@ -2054,12 +2069,11 @@ def main(model_path, outdir):
                if e["type"] == "L" and e.get("ref") not in ported]
         if bad and not _has_lumped_rlc():
             raise SystemExit(
-                "[rfsim] ERROR: %s: this openEMS build cannot simulate "
-                "lumped inductors — it silently drops them, so results "
-                "would be wrong (open circuit at the part). Set the value "
-                "to DNP, or run the solver under a Python 3.13/3.14 "
-                "interpreter with openEMS >= v0.37 (see README, "
-                "\"Installation\")." % ", ".join(bad))
+                "[rfsim] ERROR: %s: this openEMS version cannot simulate "
+                "lumped inductors. It removes them with no message, and "
+                "the result is then incorrect. Use openEMS v0.37 or "
+                "newer (see the README, \"Installation\"), or set the "
+                "value to DNP." % ", ".join(bad))
         # A series RLC part must have the SERIES topology. An engine with
         # no LEtype has only the parallel topology. It puts R, L and C in
         # parallel, which is a different circuit and not a worse one.
@@ -2067,10 +2081,9 @@ def main(model_path, outdir):
                   if e["type"] == "RLC" and e.get("ref") not in ported]
         if series and not _has_lumped_rlc():
             raise SystemExit(
-                "[rfsim] ERROR: %s: this openEMS build has no series lumped "
-                "element (LEtype), thus it cannot simulate a Series RLC part "
-                "- it would put R, L and C in parallel. Run the solver under "
-                "a Python 3.13/3.14 interpreter with openEMS >= v0.37 (see "
+                "[rfsim] ERROR: %s: this openEMS version has no series "
+                "lumped element (LEtype). Thus it cannot simulate a "
+                "Series RLC part. Use openEMS v0.37 or newer (see the "
                 "README, \"Installation\")." % ", ".join(series))
 
     # Remove the results of a previous run from this output directory. An
@@ -2088,7 +2101,8 @@ def main(model_path, outdir):
 
     eps_max = max(d["epsilon"] for d in model["dielectric_layers"])
     res = solverenv.mesh_res(s["f_stop"], eps_max, s["mesh"])
-    print("[rfsim] mesh resolution: %.3f mm (%s)" % (res, s["mesh"]), flush=True)
+    print("[rfsim] mesh step: %.3f mm (%s preset)" % (res, s["mesh"]),
+          flush=True)
 
     # **Tell the decisions of the run ONE time, and keep them.** `build`
     # runs one time for each excitation, thus its own lines come again each
@@ -2097,23 +2111,23 @@ def main(model_path, outdir):
     # lines of the engine and of the end of each run go after it.
     log_path = os.path.join(outdir, "decisions.log")
     choices = _decisions(model, res, _has_lumped_rlc())
-    print("[rfsim] --- what the run chose by itself ---", flush=True)
+    print("[rfsim] --- the decisions of the run ---", flush=True)
     for line in choices:
         print("[rfsim] decision: %s" % line, flush=True)
 
     def keep(line):
-        """Add one line to decisions.log; a log must not stop a run."""
+        """Add one line to decisions.log, with "- " in front, thus the
+        file is easy to read. A log must not stop a run."""
         try:
             with open(log_path, "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+                fh.write("- " + line + "\n")
         except OSError:
             pass
 
     try:
         with open(log_path, "w", encoding="utf-8") as fh:
-            fh.write("RFsim: the choices that the run made by itself\n"
-                     "%s\nmodel: %s\nsweep: %g to %g GHz, z0 %g ohm, "
-                     "mesh %s\n\n"
+            fh.write("RFsim: the decisions of the run\n%s\nmodel: "
+                     "%s\nsweep: %g to %g GHz, z0 %g ohm, mesh %s\n\n"
                      % (time.strftime("%Y-%m-%d %H:%M:%S"), model_path,
                         s["f_start"] / 1e9, s["f_stop"] / 1e9, s["z0"],
                         s["mesh"]))
@@ -2148,9 +2162,10 @@ def main(model_path, outdir):
             print("[rfsim] engine: multithreaded, %d thread(s)" % threads,
                   flush=True)
             keep("engine: %d thread(s), %s" % (
-                threads, "the Threads of the settings" if s.get("threads")
-                else "the rule for %d cells (4 under 150 k, else 8)"
-                % cells))
+                threads, "from the CPU threads of the settings"
+                if s.get("threads")
+                else "from the rule for %d cells (4 below 150 k cells, 8 "
+                     "above)" % cells))
             for line in _epc_decisions(model, fdtd.GetCSX().GetGrid(),
                                        _has_lumped_rlc()):
                 print("[rfsim] decision: %s" % line, flush=True)
@@ -2170,26 +2185,21 @@ def main(model_path, outdir):
             tsf = _time_step_factor(model) or 1.0
             if cause == "nan":
                 raise SystemExit(
-                    "[rfsim] ERROR: the FDTD run diverged — NaN in %s.\n"
-                    "A lumped element needs a sub-Courant timestep, and "
-                    "either its INDUCTANCE or its RESISTANCE can ask for "
-                    "one: a series branch with a large R diverges in the "
-                    "same way as a large L. This run used "
-                    "time_step_factor %.3g; set a smaller "
-                    "\"time_step_factor\" in the model's settings (e.g. "
-                    "%.3g) and re-run." % (name, tsf, tsf / 2.0))
+                    "[rfsim] ERROR: the FDTD run diverged: %s has NaN "
+                    "values. A large inductance or a large series "
+                    "resistance must have a smaller timestep. This run "
+                    "used a timestep factor of %.3g. Set a smaller "
+                    "\"Timestep\" in the dialog (for example %.3g), and "
+                    "run again." % (name, tsf, tsf / 2.0))
             raise SystemExit(
-                "[rfsim] ERROR: the FDTD run is not stable — the port data of "
-                "%s ends more than %g times above the lowest point that it "
-                "reached, thus the field turned and grew again.\n"
-                "The run would still write an S-matrix, and that S-matrix is "
-                "NOT valid: |S11| and |S21| come out flat near 1 over the "
-                "whole sweep, with no NaN in the file.\n"
-                "A shorter timestep does NOT correct this, and this run used "
-                "time_step_factor %.3g. Give the domain more room: a larger "
-                "\"margin_mm\" moves the absorber away from the copper. A "
-                "lumped inductor makes such a mode faster, thus a smaller "
-                "inductance also buys time."
+                "[rfsim] ERROR: the FDTD run is not stable. The port "
+                "data of %s increased again after its lowest point, to "
+                "more than %g times that point. The S-matrix of such a "
+                "run is NOT correct: |S11| and |S21| are almost 1 at all "
+                "frequencies. A smaller timestep does not correct this "
+                "(this run used a timestep factor of %.3g). Increase "
+                "\"Domain margin\" to move the absorber away from the "
+                "copper. A smaller inductance also helps."
                 % (name, GROWTH_LIMIT, tsf))
         # **Read the line of EACH de-embedded port, and keep the port that
         # this run did NOT excite.** The three voltage probes of a port are
@@ -2232,7 +2242,8 @@ def main(model_path, outdir):
                   "(at %.3f GHz)%s"
                   % (j + 1, ld["Z0_real"][i_at], ld["Z0_imag"][i_at],
                      ld["eps_eff"][i_at], freq[i_at] / 1e9,
-                     " [this run excites it, thus eps_eff reads high]"
+                     " [this run excites this port, thus eps_eff is too "
+                     "high]"
                      if was_exc else ""), flush=True)
         for p in ports:
             p.CalcPort(sim_path, freq, ref_impedance=s["z0"])
@@ -2243,15 +2254,16 @@ def main(model_path, outdir):
                 _farfield(outdir, ff, sim_path, ports[k], freq,
                           "_p%d" % (k + 1))
             except Exception as e:
-                print("[rfsim] WARNING: far-field (port %d) failed: %s"
+                print("[rfsim] WARNING: the far field of port %d is not "
+                      "available: %s"
                       % (k + 1, e), flush=True)
             # This comes after the far field. CalcPort at one frequency
             # replaces the port values that `_farfield` reads.
             try:
                 _field_norm(sim_path, ports[k], ff.freq[0], s["z0"])
             except Exception as e:
-                print("[rfsim] WARNING: the scale of the field views "
-                      "(port %d) failed: %s" % (k + 1, e), flush=True)
+                print("[rfsim] WARNING: the scale of the field views of "
+                      "port %d is not available: %s" % (k + 1, e), flush=True)
 
     if lines:
         with open(os.path.join(outdir, "lines.json"), "w") as fh:
@@ -2269,10 +2281,11 @@ def main(model_path, outdir):
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
         if power.max() > 1.05:
             print("[rfsim] WARNING: port %d gives out more power than it "
-                  "takes in (max sum|S|^2 = %.2f). The S-parameters of this "
-                  "port are NOT reliable. On a CPW port or a stripline port "
-                  "the usual cause is a mesh that is too coarse across the "
-                  "line. Run again at a finer mesh preset."
+                  "gets (max sum|S|^2 = %.2f). Thus the S-parameters of "
+                  "this port are not reliable. On a CPW port or a "
+                  "stripline port, the usual cause is a mesh that is too "
+                  "coarse across the line. Run again at a finer mesh "
+                  "preset."
                   % (k + 1, power.max()), flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)

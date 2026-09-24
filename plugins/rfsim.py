@@ -215,10 +215,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                             model["polygons"].get(p["layer"], []),
                             p["x"], p["y"], p["direction"])):
                     model["warnings"].append(
-                        "Port %d: no copper along the manual feed "
-                        "direction. The %s port adds its own strip there, "
-                        "so the simulated board differs from the real "
-                        "one. Check the direction, or draw the feed line."
+                        "Port %d: there is no copper along the manual "
+                        "feed direction. The %s port adds its own strip "
+                        "there, thus the simulated board is different "
+                        "from the board in KiCad. Examine the direction, "
+                        "or add the feed line to the board."
                         % (p["number"], t))
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),

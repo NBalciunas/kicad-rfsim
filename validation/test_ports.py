@@ -804,12 +804,12 @@ def test_the_run_says_what_it_chose():
         return got
 
     got = lines(dict(type="L", value=90e-6))
-    assert "an OPEN over 1 to 6 GHz" in got[0] and "565 kohm" in got[0] \
+    assert "an OPEN from 1 to 6 GHz" in got[0] and "565 kohm" in got[0] \
         and "its gap stays open" in got[0], got
-    assert got[-1] == ("timestep: the full Courant step: no element asks "
-                       "for less"), got
+    assert got[-1] == ("timestep: the full Courant step: no element must "
+                       "have a smaller step"), got
     got = lines(dict(type="L", value=10e-9))
-    assert "the SERIES path (LEtype 1), because it holds an inductance" \
+    assert "the SERIES path (LEtype 1), because it has an inductance" \
         in got[0], got
     assert "set by the inductance of X1, 10 nH (0.5/sqrt(L[nH]))" in got[1], got
     assert got[2].startswith("step limit: 1897366"), got
@@ -826,11 +826,11 @@ def test_the_run_says_what_it_chose():
     # uses the classic path at the full step.
     got = lines(dict(type="R", value=1000.0, esl=0.5e-9, package="0603"))
     assert got[0].startswith("X1 (R 1 kohm, WITHOUT the ESL 500 pH of its "
-                             "0603 body, which moves |Z| by 0.018% at most "
-                             "over 1 to 6 GHz (the limit is 2%))"), got
+                             "0603 body, which changes |Z| by 0.018% or "
+                             "less from 1 to 6 GHz (the limit is 2%))"), got
     assert "the CLASSIC path (LEtype 0)" in got[0], got
-    assert got[-1] == ("timestep: the full Courant step: no element asks "
-                       "for less"), got
+    assert got[-1] == ("timestep: the full Courant step: no element must "
+                       "have a smaller step"), got
     got = lines(dict(type="R", value=1000.0, esl=0.5e-9, package="0603"),
                 keep_idle_body=True)
     assert "the SERIES path (LEtype 1)" in got[0], \
@@ -838,13 +838,13 @@ def test_the_run_says_what_it_chose():
     got = lines(dict(type="R", value=1000.0), parasitics=False)
     assert "the CLASSIC path (LEtype 0)" in got[0], got
     got = lines(dict(type="L", value=10e-9), time_step_factor=0.3)
-    assert ("0.3, the Timestep factor of the settings, which has priority "
-            "over the rule (the rule gives 0.1581") in got[1], got
+    assert ("0.3, from the Timestep factor of the settings, which is more "
+            "important than the rule (the rule gives 0.1581") in got[1], got
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
-    assert "its EPC of 2.81 pF stays alone on the classic path" in got[0], got
+    assert "only its EPC of 2.81 pF stays, on the classic path" in got[0], got
     got = lines(dict(type="L", value=10e-9), port={"direction": None})
-    assert got[0].startswith("port 1: a LUMPED port and not a msl: it has "
-                             "no attached track"), got
+    assert got[0].startswith("port 1: a LUMPED port, and not a msl: it has "
+                             "no track"), got
     got = lines(dict(type="R", value=None))
     assert "NOT modelled" in got[0], got
 
@@ -864,10 +864,10 @@ def test_the_run_says_what_it_chose():
         return runner._epc_decisions(m, fdtd.GetCSX().GetGrid())
 
     got = epc_lines(2.9, -10.0)
-    assert len(got) == 1 and "stands BESIDE it" in got[0] \
+    assert len(got) == 1 and "is ADJACENT to it" in got[0] \
         and "280 fF" in got[0], got
     got = epc_lines(0.13, -10.14)
-    assert len(got) == 1 and "is DROPPED" in got[0], got
+    assert len(got) == 1 and "is REMOVED" in got[0], got
     print("the run says what it chose OK (the path, the open, the source "
           "of the timestep, a port that falls back, where the EPC went)")
 
@@ -926,6 +926,15 @@ def test_a_body_that_changes_nothing_stays_out():
     m["lumped_elements"] = [part(type="R", value=50.0, esl=0.5e-9)]
     assert abs(runner._time_step_factor(m) - 0.5 / 0.5 ** 0.5) < 1e-9, \
         "50 ohm keeps its body and the factor of its ESL"
+    # A 0 ohm link is a box of metal (a short): it has no body, and it sets
+    # no timestep. The body rule must not divide by zero.
+    assert runner._components(part(type="R", value=0.0, esl=0.5e-9),
+                              True, s) == {"R": 0.0}
+    m["lumped_elements"] = [part(type="R", value=0.0, esl=0.5e-9)]
+    assert runner._time_step_factor(m) is None, \
+        "a 0 ohm link costs no timestep"
+    assert solverenv.parasitic_effect({"R": 0.0, "L": 0.5e-9}, "R",
+                                      1e9, 6e9) == float("inf")
     print("a body that changes nothing stays out OK (0.018% for 1 kohm; a "
           "resonance inside the sweep keeps it)")
 
@@ -948,12 +957,12 @@ def test_the_mesh_says_what_it_chose():
         runner._mesh(m, runner._port_geometry(m, RES, quiet=True), RES, notes)
     assert not out.getvalue(), "a list must stop the print: %r" % out.getvalue()
     assert len(notes) == 1 and notes[0].startswith(
-        "1 via(s) have a radius under"), notes
+        "1 via(s) have a radius less than"), notes
     got = runner._decisions(m, RES)
     assert got[0] == "mesh: " + notes[0], got
     with contextlib.redirect_stdout(out):
         runner._mesh(m, runner._port_geometry(m, RES, quiet=True), RES)
-    assert "WARNING: 1 via(s) have a radius under" in out.getvalue()
+    assert "WARNING: 1 via(s) have a radius less than" in out.getvalue()
     print("the mesh says what it chose OK (a thin via)")
 
 

@@ -537,8 +537,8 @@ class SettingsDialog(wx.Dialog):
             #
             #   Element "R1"  [Resistor v]  Resistance: [50 v] ohm
             #       ... Parasitics: [0402 Package v] ESR: [] ESL: [] [x] Model
-            #   Element "D1"  [Series RLC v]  R: [] ohm  L: [] nH  C: [] pF
-            #       ...                                              [x] Model
+            #   Element "D1"  [Series RLC v]  Resistance: [0] ohm
+            #       ... Inductance: [0] nH  Capacitance: [0] pF      [x] Model
             #
             # Column 3 is an empty column that becomes WIDER. Thus the part
             # stays at the left, and the parasitics stay at the right end.
@@ -637,10 +637,12 @@ class SettingsDialog(wx.Dialog):
                 rlc = {}
                 for k, _ in RLC_FIELDS:
                     field = wx.TextCtrl(pane, value="0", size=(55, -1))
-                    field.SetToolTip("0 leaves %s out of the part." % k)
+                    field.SetToolTip("0 leaves the %s out of the part."
+                                     % KIND_QUANTITY[k].lower())
                     if rlc:
                         triple.AddSpacer(10)
-                    triple.Add(wx.StaticText(pane, label="%s:" % k), 0, mid)
+                    triple.Add(wx.StaticText(pane, label="%s:"
+                                             % KIND_QUANTITY[k]), 0, mid)
                     triple.Add(field, 0, mid | wx.LEFT, 4)
                     triple.Add(wx.StaticText(pane, label=ENTRY_UNITS[k]), 0,
                                mid | wx.LEFT, 4)
@@ -1054,7 +1056,20 @@ class SettingsDialog(wx.Dialog):
         if area is None:
             return
         rows = max(1, len(self.part_rows))
+        # **The width holds the SRF columns, also when they are hidden.**
+        # They show only for an inductor. A row that becomes an inductor
+        # after the dialog opens adds them, and the Model checkbox then
+        # went out of the window. Thus measure the width with the SRF
+        # shown, and then hide it again.
+        srf = [(c, c.IsShown()) for r in self.part_rows
+               for c in r["srf_ctrls"]]
+        for c, _ in srf:
+            c.Show(True)
+        wide = area.GetSizer().GetMinSize().GetWidth()
+        for c, shown in srf:
+            c.Show(shown)
         best = area.GetSizer().GetMinSize()
+        best.SetWidth(max(best.GetWidth(), wide))
         one = best.GetHeight() / float(rows)
         try:
             screen = wx.Display().GetClientArea().GetHeight()
@@ -1182,6 +1197,9 @@ class SettingsDialog(wx.Dialog):
             return None
         if kind is None or val is None:
             return None
+        # A 0 ohm part is a short, as in `runner._components`: no body.
+        if kind == "R" and val == 0:
+            return {"R": 0.0}
         comp = {kind: val}
         body_l = self._para_value(ch, esl, 1e-9) or 0.0
         body_r = self._para_value(ch, esr) or 0.0
@@ -1457,8 +1475,8 @@ class SettingsDialog(wx.Dialog):
             if self._kind_of(i) == RLC_KIND:
                 # Each field is 0 or a positive number. 0 (or an empty
                 # field) removes that component from the part, thus a
-                # series C of 0 pF is NOT an open circuit here. At least
-                # one component must stay.
+                # series C of 0 pF is NOT an open circuit here. One
+                # component or more must stay.
                 try:
                     vals = list(self._rlc_values(i).values())
                 except ValueError:
@@ -1468,15 +1486,20 @@ class SettingsDialog(wx.Dialog):
                     wx.MessageBox(
                         'Element "%s" is a Series RLC: give R in ohm, L in '
                         "nH or C in pF as positive numbers. 0 leaves that "
-                        "component out, and at least one must stay."
+                        "component out, and one or more must stay."
                         % r["ref"], "RFsim", wx.ICON_ERROR)
                     return
                 continue
+            # A resistor of 0 ohm is a short (a 0R link): the runner makes it
+            # a box of metal. An L or a C of 0 is no part.
             v = self._part_value(i)
-            if v is None or v <= 0:
+            short = self._kind_of(i) == "R" and v == 0
+            if v is None or (v <= 0 and not short):
                 wx.MessageBox(
-                    'Element "%s" needs a value in %s: a positive number.'
-                    % (r["ref"], ENTRY_UNITS[self._kind_of(i)]),
+                    'Element "%s" needs a value in %s: a positive number%s.'
+                    % (r["ref"], ENTRY_UNITS[self._kind_of(i)],
+                       ", or 0 for a short" if self._kind_of(i) == "R"
+                       else ""),
                     "RFsim", wx.ICON_ERROR)
                 return
             # The SRF field is 0 or a positive number. 0 (or an empty
@@ -1897,8 +1920,18 @@ class RunDialog(wx.Dialog):
         self.Bind(wx.EVT_BUTTON, self._on_cancel, id=wx.ID_CANCEL)
         threading.Thread(target=self._pump, daemon=True).start()
 
+    def _log_lines(self, lines):
+        """Write complete lines to run.log, each with "- " in front, thus
+        the file is easy to read. An empty line stays empty."""
+        for line in lines:
+            self._log_file.write(("- " + line if line.strip() else "")
+                                 + "\n")
+
     def _pump(self):
         stream = self.proc.stdout
+        # A chunk can end in the middle of a line. Thus the file keeps the
+        # part after the last line end until the next chunk.
+        pending = ""
         while True:
             chunk = stream.read(256)
             if not chunk:
@@ -1906,15 +1939,18 @@ class RunDialog(wx.Dialog):
             text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
             text = text.replace("\r", "\n")
             if self._log_file:
-                self._log_file.write(text)
+                *done, pending = (pending + text).split("\n")
+                self._log_lines(done)
             wx.CallAfter(self._append, text)
         rc = self.proc.wait()
         # Close the file BEFORE the dialog ends. Thus the caller can read
         # it immediately when ShowModal returns.
         if self._log_file:
+            if pending:
+                self._log_lines([pending])
             if rc:
-                self._log_file.write("\n*** solver failed (exit code %s) "
-                                     "***\n" % rc)
+                self._log_lines(["*** the solver stopped with an error "
+                                 "(exit code %s) ***" % rc])
             self._log_file.close()
         wx.CallAfter(self._done, rc)
 
@@ -1927,7 +1963,8 @@ class RunDialog(wx.Dialog):
         if rc == 0:
             self.EndModal(wx.ID_OK)
         else:
-            self._append("\n*** solver failed (exit code %s) ***\n" % rc)
+            self._append("\n*** the solver stopped with an error (exit "
+                         "code %s) ***\n" % rc)
             self.btn.SetLabel("Close")
 
     def _on_cancel(self, evt):
