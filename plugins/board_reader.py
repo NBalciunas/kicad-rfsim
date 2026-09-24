@@ -1,11 +1,11 @@
 """Read the stackup and the copper geometry of a pcbnew BOARD into a dict.
 
 Only this module uses pcbnew for geometry. You can write its result to a
-JSON file: floats in mm, right-handed coordinates (the y axis points in
-the opposite direction to the y axis of the screen coordinates of KiCad),
-and z=0 at the bottom of the board. The module uses the pcbnew SWIG
-bindings of KiCad 10. The IPC API is not an alternative yet: IPC has no
-function that makes polygons from tracks, arcs or text.
+JSON file. The floats are in mm, and the coordinates are right-handed. Thus
+the y axis points in the opposite direction to the y axis of the screen of
+KiCad. z=0 is at the bottom of the board. The module uses the pcbnew SWIG
+bindings of KiCad 10. The IPC API is not an alternative at this time: IPC
+has no function that makes polygons from tracks, arcs or text.
 """
 import math
 import os
@@ -13,37 +13,37 @@ import re
 
 import pcbnew
 
-# The depth of the PML band: `extract` sizes the domain with it and
-# `runner._mesh` lays the cells of the band in it, thus the two must
-# read the same rule. `solverenv` imports nothing but `math` and `os`.
+# The depth of the PML band. `extract` sets the dimension of the domain
+# with it, and `runner._mesh` puts the cells of the band in it. Thus the
+# two must read the same rule. `solverenv` imports only `math` and `os`.
 # The plugin loads this file as a module of a package, and the self-test
-# below runs it as a script, thus the import needs the two forms.
+# below runs it as a script. Thus the import has the two alternatives.
 try:
     from . import solverenv
 except ImportError:                      # run as a top-level module
     import solverenv
 
-# The version of the model dict, which `extract()` writes into
-# model.json. The runner refuses a model that is NEWER than the version
-# it knows, because a key that it does not read gives a silent and
-# incorrect run, and not an error.
+# The version of the model dict, which `extract()` writes into model.json.
+# The runner refuses a model that is NEWER than the version it knows. A key
+# that the runner does not read gives an incorrect run with no message, and
+# not an error.
 #
-# Raise it when a change makes an OLD runner read a new model
-# incorrectly. Do NOT raise it for a key that is only added: the runner
-# reads each optional key with `.get(key, default)`, thus an old file
-# still runs. The history:
+# Increase it when a change makes a PREVIOUS runner read a new model
+# incorrectly. Do NOT increase it for a key that is only added. The runner
+# reads each optional key with `.get(key, default)`, thus a previous file
+# continues to run. The history:
 #
-#   1  2026-08-05  the first number. Every model.json before it has no
-#      "version" key at all, and the runner reads that as version 1.
-#   2  2026-09-14  a lumped element of type "RLC" holds `r`, `l` and `c`
+#   1  2026-08-05  the first number. No model.json before it has a
+#      "version" key, and the runner reads that as version 1.
+#   2  2026-09-14  a lumped element of type "RLC" has `r`, `l` and `c`
 #      and no `value`. A runner of version 1 reads such a part as a part
-#      with no value: it leaves the gap between its pads open, and the
+#      with no value. It keeps the gap between its pads open, and the
 #      run gives a number for a board that has no part there.
-#   3  2026-09-20  the region holds the clear air PLUS the depth of the
-#      PML band, which "pml_mm" carries, and not two margins. A runner
-#      of version 2 puts a band of margin/8 at the edge of such a
-#      region: the absorber lands in the wrong place and the mesh is
-#      not the mesh that the numbers of the rigs come from.
+#   3  2026-09-20  the region has the clear air PLUS the depth of the
+#      PML band, which is in "pml_mm", and not two margins. A runner of
+#      version 2 puts a band of margin/8 at the edge of such a region.
+#      The absorber is then in an incorrect position, and the mesh is
+#      not the mesh of the numbers of the rigs.
 MODEL_VERSION = 3
 
 # the default values if the board has no stackup: FR4
@@ -55,53 +55,53 @@ DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
 _SI = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3,
        "r": 1.0, "R": 1.0, "f": 1.0, "F": 1.0, "h": 1.0, "H": 1.0,
        "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
-# **The prefixes are the SAME for R, L and C.** Each type had its
-# own set until 2026-08-06, thus a resistor of 5 milliohm, a capacitor
-# of 1 mF and an inductor of 2.2 mH were all "not understood", and a
-# user had to know which letter each type permits. 'K' is an alias of
-# 'k'. The case rule stays: m = milli and M = mega, thus a resistor
-# "1m" is 1 milliohm and NOT 1 Mohm. The dialog shows the number that
-# this function read, thus the user sees which one it took.
+# **The prefixes are the SAME for R, L and C.** Until 2026-08-06, each type
+# had its own set. Thus a resistor of 5 milliohm, a capacitor of 1 mF and
+# an inductor of 2.2 mH were all "not understood". A user had to know the
+# letters of each type. 'K' is an alias of 'k'. The case rule stays: m =
+# milli and M = mega. Thus a resistor "1m" is 1 milliohm and NOT 1 Mohm.
+# The dialog shows the number that this function read, thus the user sees
+# which one it used.
 _PREFIX = "pnuµmkKMGT"
 # The mark of the UNIT. It shows the position of the decimal point and
-# multiplies by 1, thus "4R7" is 4.7 ohm, "4F7" is 4.7 F and "4H7" is
-# 4.7 H. **Each type takes its OWN mark and no other one**,
-# because the mark names the quantity: "4F7" on a resistor and "4H7" on
-# a capacitor give no value.
+# multiplies by 1. Thus "4R7" is 4.7 ohm, "4F7" is 4.7 F and "4H7" is
+# 4.7 H. **Each type uses its OWN mark and no other one**, because the mark
+# gives the quantity. "4F7" on a resistor and "4H7" on a capacitor give no
+# value.
 #
-# **An inductor refuses 'R' on purpose.** A real inductor with "4R7" on
-# its body is 4.7 µH, and no rule here can know that from the text
-# alone. Thus the value stays "not understood" and the user gives it in
-# the dialog, which is better than 4.7 H with no message. A capacitor
-# refuses it for the same reason.
+# **An inductor refuses 'R' on purpose.** An inductor with "4R7" on its
+# body is 4.7 µH, and no rule here can know that from the text only. Thus
+# the value stays "not understood", and the user gives it in the dialog.
+# That is better than 4.7 H with no message. A capacitor refuses it for the
+# same cause.
 _UNIT_MARK = {"R": "rR", "C": "fF", "L": "hH"}
 _DNP = {"dnp", "dnf", "dni", "dnl", "nc", "n/a", "na", "-", "",
         "nopop", "no pop", "?"}
 
 # The body ESL of a chip part with 2 terminals, in nH, against the code of
 # the imperial package. These values are for the BODY only. They are
-# smaller than the "mounted ESL" of a datasheet, because the FDTD model
-# already contains the loop of the pads and the tracks: that copper is in
-# the mesh. If you add the mounted value, you count the loop two times.
+# smaller than the "mounted ESL" of a datasheet. The cause is that the FDTD
+# model contains the loop of the pads and the tracks: that copper is in the
+# mesh. If you add the value of the datasheet, you count the loop two
+# times.
 _ESL_NH = {"0201": 0.20, "0402": 0.25, "0603": 0.35, "0805": 0.45,
            "1206": 0.60, "1210": 0.70, "2010": 0.80, "2512": 0.90}
-_ESL_DEFAULT_NH = 0.40  # a part whose package the code cannot read
+_ESL_DEFAULT_NH = 0.40  # a part with a package that the code cannot read
 # The series loss of the body: the ESR of a capacitor and the DCR of an
 # inductor. A resistor gives its own value, thus it has no entry.
 _ESR_OHM = {"C": 0.03, "L": 0.10}
 # KiCad puts the imperial code first: "R_0402_1005Metric". Thus the first
 # match is the correct one. The tests for a digit on each side prevent a
-# match inside the metric code.
+# match in the metric code.
 _PKG_RE = re.compile(r"(?<!\d)(%s)(?!\d)" % "|".join(_ESL_NH))
-# These two codes are an imperial size AND a metric size, thus a name
-# that holds one of them alone can be either. A library that puts the
-# metric code first and does not write "Metric" gives an incorrect
-# value, and not "unknown": "C_0603" is an imperial 0603 in the usual
-# libraries, and a metric 0603 (= an imperial 0201) in some others. Each
-# of the other metric codes (1005, 1608, 2012, 3216) is not in the
-# table, thus it gives "unknown", which is safe. The name of KiCad always
-# carries the metric code beside the imperial one, thus the absence of
-# "Metric" is the signal.
+# These two codes are an imperial dimension AND a metric dimension. Thus a
+# name that has only one of them can be the two. A library that puts the
+# metric code first and does not write "Metric" gives an incorrect value,
+# and not "unknown". "C_0603" is an imperial 0603 in the usual libraries,
+# and a metric 0603 (= an imperial 0201) in some others. The other metric
+# codes (1005, 1608, 2012, 3216) are not in the table. Thus they give
+# "unknown", which is safe. The name of KiCad always has the metric code
+# adjacent to the imperial one. Thus a name with no "Metric" is the sign.
 _AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 
 # The largest gap that the code accepts as a coplanar gap, in mm. A gap of
@@ -118,21 +118,21 @@ def _parse_value(text, kind):
     decimal point (4R7 = 4.7 ohm, 3n3 = 3.3 nH or 3.3 nF). If the text is
     DNP, or if the function cannot read the text, it gives None.
 
-    **Every type takes every prefix** (`_PREFIX`): p, n, u/µ, m, k, M, G
-    and T. The mark of the UNIT is the exception: a resistor takes
-    'r'/'R', a capacitor takes 'f'/'F' and an inductor takes 'h'/'H',
-    and no type takes the mark of another one (`_UNIT_MARK`).
+    **All types use all prefixes** (`_PREFIX`): p, n, u/µ, m, k, M, G and
+    T. The mark of the UNIT is different. A resistor uses 'r'/'R', a
+    capacitor uses 'f'/'F' and an inductor uses 'h'/'H'. No type uses the
+    mark of a different type (`_UNIT_MARK`).
     """
     if not text:
         return None
     words = text.strip().split()
-    tok = words[0] if words else ""            # this removes " 1%" etc.
+    tok = words[0] if words else ""            # this removes " 1%" and more
     # **The unit can be a word of its own**: "10 kOhm", "4.7 uF", "10 nH".
     # The first word is then a bare number, and the prefix goes away with
     # NO message: "10 kOhm" gave 10 ohm and "4.7 uF" gave 4.7 F. Thus
-    # join the second word when it starts with a prefix or with a unit
-    # letter. A tolerance starts with a DIGIT ("1%"), and a voltage
-    # rating too ("25V"), thus neither one joins.
+    # attach the second word when it starts with a prefix or with a unit
+    # letter. A tolerance starts with a DIGIT ("1%"), and a voltage rating
+    # also starts with a digit ("25V"). Thus the code does not attach them.
     if len(words) > 1 and words[1][:1] in _PREFIX + "rRfFhHoO":
         tok += words[1]
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
@@ -149,11 +149,11 @@ def _parse_value(text, kind):
     for i, ch in enumerate(tok):
         if ch in _PREFIX or ch in _UNIT_MARK.get(kind, ""):
             left, right = tok[:i], tok[i + 1:]
-            # A mark with NO digit on either side of it is not a
-            # quantity: "R" alone names the type of the part and gives
-            # no number. It gave 0.0 before, thus `build()` put a metal
-            # SHORT across the two pads. "0R" and "R47" still carry a
-            # number, thus they stay as they are.
+            # A mark with NO digit on the two sides of it is not a
+            # quantity. "R" only gives the type of the part and no number.
+            # It gave 0.0 before, thus `build()` put a metal SHORT across
+            # the two pads. "0R" and "R47" have a number, thus they stay as
+            # they are.
             if not left and not right:
                 return None
             num = (left + "." + right) if right else left
@@ -168,14 +168,14 @@ def _parse_value(text, kind):
 
 
 def _unit_mark_only(text, kind):
-    """Tell if the Value field holds the unit of `kind` and no number.
+    """Tell if the Value field has the unit of `kind` and no number.
 
-    A resistor whose Value field is "R" names its TYPE and gives no
-    quantity, and "R 0402" is the same field with the package after it.
-    The part is real, thus `extract` keeps it with no value: the dialog
-    then shows it as a resistor with an empty field, and the user gives
-    the number. A field that the parser cannot read ("xyz"), and DNP,
-    are different. Those keep their warning and the part stays out.
+    A resistor with the Value field "R" gives its TYPE and no quantity. "R
+    0402" is the same field with the package after it. The part is on the
+    board, thus `extract` keeps it with no value. The dialog then shows it
+    as a resistor with an empty field, and the user gives the number. A
+    field that the parser cannot read ("xyz"), and DNP, are different. They
+    keep their warning, and the part stays out.
     """
     if not text or not kind:
         return False
@@ -190,11 +190,11 @@ def _lname(layer_id):
 def _pad_layer_id(pad):
     """Give the id of the copper layer of a pad.
 
-    PAD.GetLayer() gives F.Cu for each pad that comes from a file, also
-    for a pad on an inner layer or on the back. Thus it cannot find a
-    stripline. The layer set of the pad keeps the real layer. A pad on
-    more than one copper layer, for example a through-hole pad, has no
-    single layer: then use GetLayer(), as before.
+    PAD.GetLayer() gives F.Cu for each pad that comes from a file. This is
+    also true for a pad on an inner layer or on the back. Thus it cannot
+    find a stripline. The layer set of the pad keeps the correct layer. A
+    pad on more than one copper layer, for example a through-hole pad, has
+    no single layer. For such a pad, use GetLayer(), as before.
     """
     cu = [lid for lid in pad.GetLayerSet().Seq() if pcbnew.IsCopperLayer(lid)]
     return cu[0] if len(cu) == 1 else pad.GetLayer()
@@ -222,10 +222,10 @@ def selected_pads(board):
 def _stackup_from_file(path):
     """Read the (stackup ...) block of a .kicad_pcb file.
 
-    No SWIG version of KiCad (8, 9 or 10) has a BOARD_STACKUP type, thus
-    a run takes the dielectric properties from the SAVED file. The
-    function gives the list of `_stackup_from_text`, or None if the file
-    does not exist or has no stackup.
+    No SWIG version of KiCad (8, 9 or 10) has a BOARD_STACKUP type. Thus a
+    run gets the dielectric properties from the SAVED file. The function
+    gives the list of `_stackup_from_text`. It gives None if the file is
+    missing or has no stackup.
     """
     if not path or not os.path.isfile(path):
         return None
@@ -234,32 +234,32 @@ def _stackup_from_file(path):
 
 
 def _sublayers(node):
-    """Give one dielectric layer for each sub-layer of a `(layer ...)` node.
+    """Give one dielectric layer for each sub-layer of a `(layer ...)`
+    node.
 
-    KiCad holds the sub-layers of a dielectric in ONE node, and a bare
-    `addsublayer` token stands in front of each one after the first:
+    KiCad holds the sub-layers of a dielectric in ONE node. A bare
+    `addsublayer` token is in front of each sub-layer after the first:
 
         (layer "dielectric 1" (type "prepreg")(thickness 0.2)(material "A")
           (epsilon_r 3)(loss_tangent 0.01)
           addsublayer(thickness 0.8)(material "B")(epsilon_r 5)
           (loss_tangent 0.03))
 
-    **Each sub-layer keeps its own er and its own tan d.** The parser
-    added the thicknesses and kept the LAST pair before this, thus
-    0.2 mm at er 3.0 on 0.8 mm at er 5.0 ran as 1.0 mm at er 5.0. One
-    number cannot correct that: the same stack is er 4.6 for a field
-    along the layers and 4.41 for a field across them, and the solver
-    calculates the field itself when each sub-layer is a layer.
+    **Each sub-layer keeps its own er and its own tan d.** Before this, the
+    parser added the thicknesses and kept the LAST pair. Thus 0.2 mm at er
+    3.0 on 0.8 mm at er 5.0 ran as 1.0 mm at er 5.0. One number cannot
+    correct that. The same stack is er 4.6 for a field along the layers and
+    4.41 for a field across them. The solver calculates the field itself
+    when each sub-layer is a layer.
 
-    A sub-layer that gives no `epsilon_r` or no `loss_tangent` takes the
-    value of the sub-layer above it, which is the value that Board Setup
-    shows for it. The name of each sub-layer after the first carries its
+    A sub-layer that gives no `epsilon_r` or no `loss_tangent` uses the
+    value of the sub-layer above it. That is the value that Board Setup
+    shows for it. The name of each sub-layer after the first has its
     number, thus no two layers of one board have the same name.
 
     The sequence of the node is the sequence of the board, from the top
-    down, in the same way as the layers themselves. The thicknesses add
-    up to the value that the node gave before, thus no copper layer
-    moves in z.
+    down, as for the layers themselves. The sum of the thicknesses is the
+    value that the node gave before, thus no copper layer moves in z.
     """
     keys = ("thickness", "epsilon_r", "loss_tangent")
     groups = [{}]
@@ -268,10 +268,9 @@ def _sublayers(node):
             groups.append({})
         elif isinstance(child, list) and len(child) > 1 and child[0] in keys:
             groups[-1][child[0]] = float(child[1])
-    # A sub-layer with no thickness is no layer, and a zero thickness
-    # would also give the mesh a step of zero. A node with no thickness
-    # at all keeps its first group, thus it reads as it did before: one
-    # layer of 0 mm.
+    # A sub-layer with no thickness is no layer, and a zero thickness can
+    # also give the mesh a step of zero. A node with no thickness keeps its
+    # first group. Thus it reads as it did before: one layer of 0 mm.
     subs = [g for g in groups if g.get("thickness")] or groups[:1]
     out, eps, tand = [], DEF_EPSILON, DEF_LOSS_TAN
     for k, sub in enumerate(subs):
@@ -291,8 +290,8 @@ def _stackup_from_text(text):
     """Read the (stackup ...) block of the text of a board file.
 
     The function gives a list from the top layer to the bottom layer, with
-    the keys kind, name, thickness, epsilon and loss_tangent. If the text
-    has no stackup, the function gives None.
+    the keys "kind", "name", "thickness", "epsilon" and "loss_tangent". If
+    the text has no stackup, the function gives None.
     """
     i = text.find("(stackup")
     if i < 0:
@@ -363,17 +362,17 @@ def unsaved_stackup(board):
     """Give a question if the stackup has a change that is not saved.
 
     The OK button of Board Setup > Physical Stackup changes the board in
-    memory at once, and the saved file keeps the old stackup. The function
-    compares the two. It gives None when they agree, and also when the
-    comparison fails: the question must not stop a run. Otherwise it gives
-    the text that asks the user which stackup the run uses, and `extract`
-    then reads that one (`live_stackup`).
+    memory immediately, and the saved file keeps the previous stackup. The
+    function compares the two. It gives None when they agree. It also gives
+    None when it cannot compare them, because the question must not stop a
+    run. If not, it gives the text that tells the user to select the
+    stackup of the run. `extract` then reads that one (`live_stackup`).
 
     `board.IsModified()` cannot see such a change. It reads a flag of the
-    BOARD item, and the PCB editor does not set that flag: the editor
-    sets a flag of its screen, which puts the "*" in the title. On KiCad
-    10.0.5 `IsModified()` stayed False after a change of er in Physical
-    Stackup that the user did not save.
+    BOARD item, and the PCB editor does not set that flag. The editor sets
+    a flag of its screen, which puts the "*" in the title. On KiCad 10.0.5,
+    `IsModified()` stayed False after a change of er in Physical Stackup
+    that the user did not save.
     """
     try:
         live = _stackup_from_text(_board_text(board))
@@ -403,9 +402,9 @@ def unsaved_stackup(board):
     text = ("Board Setup > Physical Stackup has changes that are not saved:"
             "\n\n%s\n\nWhich values should RFsim use?"
             % "\n".join("  - " + d for d in diffs))
-    # `_stackup` uses the FR4 default values for a stackup that does not
-    # exist or that has other copper layers than the board. Say so here,
-    # thus the FR-4 preset of the dialog is not a surprise.
+    # `_stackup` uses the FR4 default values for a stackup that is missing,
+    # or that has copper layers that are different from the board. Tell the
+    # user here, thus the FR-4 preset of the dialog is not a surprise.
     for which, items in (("new", live), ("saved", saved)):
         if items is None or cu_names != [it["name"] for it in items
                                          if it["kind"] == "copper"]:
@@ -432,7 +431,8 @@ def _uniform_stackup(cu_names, diel_total, eps, tand, cu_t):
 
 
 def _default_stackup(board, cu_names):
-    """Make a uniform FR4 stackup from the thickness of the board.
+    """Make an FR4 stackup with the same values in all layers, from the
+    thickness of the board.
 
     Use this function if the board file contains no stackup.
     """
@@ -445,21 +445,22 @@ def _stackup(board, substrate=None, live=False):
     """Give the physical stackup from the top to the bottom.
 
     The result is (copper_layers, dielectric_layers). Copper is a sheet
-    with no thickness on a boundary of the dielectric, but the real
-    thickness stays in the data for the loss model. z=0 is the plane of
-    the bottom copper. The properties of the stackup come from the saved
-    board file, or from the board in memory when `live` is True. The user
-    selects between the two when they differ (`unsaved_stackup`).
+    with no thickness on a boundary of the dielectric, but the correct
+    thickness stays in the data for the loss model. z=0 is the plane of the
+    bottom copper. The properties of the stackup come from the saved board
+    file. When `live` is True, they come from the board in memory. The user
+    selects one of the two when they are different (`unsaved_stackup`).
     """
     cu_ids = list(board.GetEnabledLayers().CuStack())
     cu_names = [_lname(lid) for lid in cu_ids]
     id_of = dict(zip(cu_names, cu_ids))
 
-    # `source` tells WHERE the values came from, and the dialog needs it:
-    # it fills its substrate fields from a stackup that the BOARD gives,
-    # and it must not fill them from the FR4 default values, which would
-    # look like the board and are only a fallback.
-    if substrate:  # the values from the user have priority over the board
+    # `source` tells WHERE the values came from, and the dialog uses it.
+    # The dialog fills its substrate fields from a stackup that the BOARD
+    # gives. It must not fill them from the FR4 default values. Those
+    # values can look like the values of the board, but they are only a
+    # fallback.
+    if substrate:  # the values from the user are more important than the board
         source = "dialog"
         items = _uniform_stackup(cu_names, substrate["h"], substrate["er"],
                                  substrate["tand"], substrate["cu_t"])
@@ -494,12 +495,11 @@ def _stackup(board, substrate=None, live=False):
 
 
 # The code below makes polygons from the tracks, the arcs, the via rings
-# and the graphic shapes with simple mathematics. This is a result of
-# KiCad 8: there, all the TransformShapeToPolygon functions but the
-# function of PAD needed the ERROR_LOC enum, which SWIG did not wrap.
-# KiCad 10 has pcbnew.ERROR_INSIDE. Thus
-# BOARD.ConvertBrdLayerToPolygonalContours can replace all of this code
-# and can also include the text.
+# and the graphic shapes with simple mathematics. This is a result of KiCad
+# 8. In KiCad 8, all the TransformShapeToPolygon functions but the function
+# of PAD used the ERROR_LOC enum, which SWIG did not wrap. KiCad 10 has
+# pcbnew.ERROR_INSIDE. Thus BOARD.ConvertBrdLayerToPolygonalContours can
+# replace all of this code, and it can also include the text.
 
 def _add_outline(ps, pts):
     ps.NewOutline()
@@ -607,10 +607,10 @@ def _copper_polys(board, layer_id, region, max_err):
 
     The function fractures the polygons. n_clipped is the number of items
     that are not zones and that go across the boundary of the region. The
-    absorber terminates their cut ends like a matched load. Thus, if the
-    cut copper is the structure under test, the S-parameters look good
-    but they are incorrect. This occurred with a meander antenna at the
-    default margin.
+    absorber is the end of their cut copper, as a matched load. Thus, if
+    the cut copper is the structure that you test, the S-parameters look
+    good but they are incorrect. This occurred with a meander antenna at
+    the default margin.
     """
     n_clipped = 0
 
@@ -632,10 +632,10 @@ def _copper_polys(board, layer_id, region, max_err):
             except Exception:
                 flashed = True
             if flashed:
-                # A via of KiCad 10 has one padstack for each layer.
-                # Thus you must ask for the annular ring layer by layer.
-                # PCB_VIA.GetWidth() without a layer also causes a
-                # debug assert.
+                # A via of KiCad 10 has one padstack for each layer. Thus
+                # you must get the annular ring layer by layer.
+                # PCB_VIA.GetWidth() without a layer also causes a debug
+                # assert.
                 pos = t.GetPosition()
                 _add_outline(ps, _circle_pts(pos.x, pos.y,
                                              t.GetWidth(int(layer_id)) / 2.0))
@@ -687,13 +687,13 @@ def _ray_hits(px, py, axis, sign, polys):
     """Give the sorted distances from a point to the edges of `polys`.
 
     The ray starts at (px, py) and goes along `axis` (0 = x, 1 = y) in the
-    direction of `sign`. The polygons are the copper of one layer, thus
-    they are fractured and they do not cover each other.
+    direction of `sign`. The polygons are the copper of one layer. Thus
+    they are fractured, and one polygon is not on top of a different one.
 
     The function uses the half-open rule of the standard crossing test.
-    Thus a ray through a vertex gives one hit, and not two, and the parity
-    of the hits stays correct: an odd number of hits shows that the start
-    point is inside the copper.
+    Thus a ray through a vertex gives one hit, and not two. The parity of
+    the hits stays correct: an odd number of hits shows that the start
+    point is in the copper.
     """
     a, b = axis, 1 - axis
     p = (px, py)
@@ -714,21 +714,22 @@ def _ray_hits(px, py, axis, sign, polys):
 def _coplanar_gap(polys, x, y, direction):
     """Measure the gap between a feed line and the copper at its sides.
 
-    A CPW port needs this value. The function sends a ray to each side of
-    the line, at some positions along it. The first hit is the edge of the
-    line, and the second hit is the edge of the copper on the other side
-    of the gap. The result is the median of the measurements, in mm.
+    A CPW port must have this value. The function sends a ray to each side
+    of the line, at some positions along it. The first hit is the edge of
+    the line. The second hit is the edge of the copper on the other side of
+    the gap. The result is the median of the measurements, in mm.
 
-    The function gives None if the copper is not on the two sides, or if
-    it is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+    The function gives None if the copper is not on the two sides, or if it
+    is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
     """
     if not direction or not polys:
         return None
     axis = 1 if direction[0] else 0  # the ray goes across the feed line
     dx, dy = direction
-    # Take samples along the line and not at the pad. A pad is often wider
-    # than the line. A sample that is not on copper (the line stops before
-    # that point) gives an even number of hits, and the code ignores it.
+    # Get samples along the line and not at the pad. Frequently, a pad is
+    # wider than the line. A sample that is not on copper gives a number of
+    # hits that is not odd, and the code ignores it. (The line stops before
+    # that point.)
     gaps = []
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
@@ -750,13 +751,13 @@ def _coplanar_gap(polys, x, y, direction):
 
 
 def copper_along(polys, x, y, direction):
-    """Tell if copper lies along `direction` from the pad at (x, y).
+    """Tell if there is copper along `direction` from the pad at (x, y).
 
     The dialog can give a manual feed direction for a pad that has no
-    track (a feed line that the user drew as a shape or as a polygon).
-    An MSL port adds its own strip over the port box. If the board has
-    no copper there, the simulation then contains a line that the board
-    does not have. The test takes the samples of _coplanar_gap: 0.4 mm
+    track. That is a feed line that the user drew as a shape or as a
+    polygon. An MSL port adds its own strip above the port box. If the
+    board has no copper there, the simulation then contains a line that the
+    board does not have. The test uses the samples of _coplanar_gap: 0.4 mm
     to 2.0 mm from the pad.
     """
     if not direction or not polys:
@@ -765,32 +766,32 @@ def copper_along(polys, x, y, direction):
     dx, dy = direction
     on = 0
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
-        # An odd number of hits shows that the sample point is inside
-        # the copper.
+        # An odd number of hits shows that the sample point is in the
+        # copper.
         on += len(_ray_hits(x + dx * step, y + dy * step, axis, 1,
                             polys)) % 2
     return on >= 3
 
 
 def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
-    """Give the distance that copper runs along `direction`, in mm.
+    """Give the distance that copper goes along `direction`, in mm.
 
-    A de-embedded port is `max(3*w, 6*res)` long, and `6*res` is 14 mm
-    or more at the coarse preset. A SHORT feed line is shorter than
-    that: the measurement plane of the port then lies inside the patch
-    that the line feeds, where the values of a line have no meaning, and
-    the strip that the port adds goes out past the end of the copper.
-    The runner caps the length of the port with this value.
+    A de-embedded port is `max(3*w, 6*res)` long. At the coarse preset,
+    `6*res` is 14 mm or more. A SHORT feed line is shorter than that. The
+    measurement plane of the port is then in the patch that the line feeds.
+    There, the values of a line are not correct. Also, the strip that the
+    port adds goes out across the end of the copper. The runner caps the
+    length of the port with this value.
 
-    The function walks along the direction and gives the distance to the
-    LAST point that is still on copper. An odd number of ray hits shows
-    that a point is inside the copper, which is the standard crossing
-    test. The walk is more robust than one ray: `Fracture` divides the
-    copper into polygons that share an edge, thus a single ray gives a
-    hit where the copper does not in fact end.
+    The function moves along the direction in steps. It gives the distance
+    to the LAST point that is on copper. An odd number of ray hits shows
+    that a point is in the copper, which is the standard crossing test. The
+    steps are more reliable than one ray. `Fracture` divides the copper
+    into polygons that share an edge, thus a single ray can give a hit
+    where the copper does not end.
 
-    It gives None when the copper runs further than `limit`, and None
-    when the pad itself is not on the copper of that layer.
+    It gives None when the copper goes farther than `limit`. It also gives
+    None when the pad itself is not on the copper of that layer.
     """
     if not direction or not polys:
         return None
@@ -817,7 +818,8 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
 
 
 def _touches(polys, box):
-    """Tell if any polygon of `polys` overlaps the box (x0, y0, x1, y1).
+    """Tell if one or more polygons of `polys` overlap the box (x0, y0, x1,
+    y1).
 
     This is a test of the bounding boxes. An antenna feed pad is at the
     EDGE of the ground pour, thus a test on the center of the pad is too
@@ -844,9 +846,10 @@ def _feed_direction(board, pad):
     """Give the direction of the track that goes out of the pad.
 
     The direction is on the x axis or on the y axis. The function also
-    gives the width of the track. If there is no track, the function
-    gives (None, None). The function finds the direction only, which
-    orients an MSL port. The user always selects the *type* of the port.
+    gives the width of the track. If there is no track, the function gives
+    (None, None). The function finds only the direction, which is the
+    direction of an MSL port. The user always selects the *type* of the
+    port.
     """
     bbox = pad.GetBoundingBox()
     best = None
@@ -876,8 +879,8 @@ def _feed_direction(board, pad):
 def package_presets():
     """Give the body ESL of each package that the code knows, in H.
 
-    The settings dialog makes its list of presets from this table. Thus
-    the values stay in one place only.
+    The settings dialog makes its list of presets from this table. Thus the
+    values are only in one location.
     """
     return {k: v * 1e-9 for k, v in _ESL_NH.items()}
 
@@ -885,9 +888,9 @@ def package_presets():
 def esr_presets():
     """Give the body ESR of each type of part, in ohm.
 
-    The dialog needs it for a part whose type the USER selects: the ESR
-    comes from the type, in the same way as it does for a part that the
-    refdes describes. The table stays in this module only.
+    The dialog uses it for a part when the USER selects the type. The ESR
+    comes from the type, as it does for a part that the refdes gives. The
+    table stays only in this module.
     """
     return dict(_ESR_OHM)
 
@@ -895,11 +898,10 @@ def esr_presets():
 def _package(name):
     """Give (the imperial package code, a warning) for a footprint name.
 
-    The name is the library item name, for example "R_0402_1005Metric".
-    The code is None when the name holds no size that the table knows.
-    The warning is None, or the text of an AMBIGUOUS name: the value that
-    such a name gives is incorrect, and not absent, thus the user must
-    see it.
+    The name is the library item name, for example "R_0402_1005Metric". The
+    code is None when the name has no dimension that the table knows. The
+    warning is None, or the text of an AMBIGUOUS name. The value of such a
+    name is incorrect, and not missing. Thus the user must see it.
     """
     m = _PKG_RE.search(name or "")
     if not m:
@@ -919,10 +921,11 @@ def _package(name):
 
 
 def _parasitics(fp, kind):
-    """Give (package, ESL in H, ESR in ohm, warning) for the body of a part.
+    """Give (package, ESL in H, ESR in ohm, warning) for the body of a
+    part.
 
-    An ideal element gives incorrect results above about 1 GHz: the ESL of
-    an 0402 capacitor puts its self-resonance inside a usual sweep. The
+    An ideal element gives incorrect results above approximately 1 GHz: the
+    ESL of an 0402 capacitor puts its self-resonance in a usual sweep. The
     solver puts these values in series with the value of the part.
     """
     try:
@@ -937,21 +940,20 @@ def _parasitics(fp, kind):
 def _lumped_elements(board, region, copper_layers, skip_refs):
     """Find each part with 2 terminals in `region`.
 
-    The result is (elements, warnings). Each element is a box that
-    bridges the gap between the two pads of the part. The box is parallel
-    to the nearest Cartesian axis, because openEMS conducts along one
-    axis only. The function changes the values to SI units. It ignores
-    the parts in `skip_refs`, which hold a port pad. It gives a warning
-    for a part that has an unknown value, or that is not on one copper
-    layer.
+    The result is (elements, warnings). Each element is a box that bridges
+    the gap between the two pads of the part. The box is parallel to the
+    nearest Cartesian axis, because openEMS lets current flow along one
+    axis only. The function changes the values to SI units. It ignores the
+    parts in `skip_refs`, which have a port pad. It gives a warning for a
+    part that has an unknown value, or that is not on one copper layer.
 
-    A refdes that starts with R, L or C gives the TYPE of the part, and
-    the Value field gives its value. **Each other part with 2 terminals
-    also comes back**, with `type` = None and `value` = None: a diode, a
-    ferrite bead, a crystal or a footprint of your own is a 2-terminal
-    part that a user can model as an R, an L or a C. The dialog shows
-    such a part as "Unknown" with its Model checkbox OFF, thus it changes
-    no simulation until the user gives it a type and a value.
+    A refdes that starts with R, L or C gives the TYPE of the part. The
+    Value field gives its value. **Each other part with 2 terminals also
+    comes back**, with `type` = None and `value` = None. A diode, a ferrite
+    bead, a crystal or a footprint of your own is a 2-terminal part. A user
+    can model it as an R, an L or a C. The dialog shows such a part as
+    "Unknown" with its Model checkbox OFF. Thus it changes no simulation
+    until the user gives it a type and a value.
     """
     z_of = {c["name"]: c["z"] for c in copper_layers}
     elements, warnings = [], []
@@ -964,27 +966,28 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
             continue
         if not fp.GetBoundingBox().Intersects(region):
             continue  # not in the simulated area: ignore it, with no warning
-        # The terminals are the pads that have a *number*. Many real
-        # footprints have more copper pads with no number, for mechanical
-        # strength or for paste relief. These pads cannot hold a net and
-        # they are not terminals. But a simple test of len(Pads()) == 2
-        # refuses the complete part. This occurred with a KiLib
-        # SMD_2terminal_chip_molded resistor: 4 pads, 2 of them with no
-        # number. _copper_polys still simulates the copper of the pads
-        # that have no number.
+        # The terminals are the pads that have a *number*. Many footprints
+        # have more copper pads with no number, for mechanical strength or
+        # for paste relief. These pads cannot hold a net, and they are not
+        # terminals. But a simple test of len(Pads()) == 2 refuses the full
+        # part. This occurred with a KiLib SMD_2terminal_chip_molded
+        # resistor: 4 pads, 2 of them with no number. _copper_polys
+        # continues to simulate the copper of the pads that have no number.
         pads = sorted((p for p in fp.Pads() if p.GetNumber()),
                       key=lambda p: p.GetNumber())
         if len(pads) != 2:
-            # Before, this code was quiet. Thus "found nothing, said
-            # nothing" was the most difficult failure to diagnose. Give a
-            # warning only if the value is also correct. Then a default
-            # "REF**", or a connector with a name that starts with R,
-            # stays quiet. But a real 50-ohm part that has 3 terminals
-            # gives a warning.
-            # A part whose type the refdes does not give stays quiet
-            # here: a connector, a mounting hole or a footprint of your
-            # own has any number of pads, and a warning for each one is
-            # noise. The same rule holds for the three tests below.
+            # Before, this code did not give messages. Thus a part that the
+            # code did not find, with no message, was the problem that was
+            # the hardest to find. Give a warning only if the value is also
+            # correct. Then a default "REF**", or a connector with a name
+            # that starts with R, gives no message. But a 50-ohm part that
+            # has 3 terminals gives a warning.
+            #
+            # When the refdes does not give the type of a part, the part
+            # gives no message here. A connector, a mounting hole or a
+            # footprint of your own can have a different number of pads. A
+            # warning for each one is noise. The same rule is true for the
+            # three tests below.
             if kind and _parse_value(fp.GetValue(), kind) is not None:
                 warnings.append(
                     "%s (value \"%s\") has %d numbered pad(s), not 2 -> not "
@@ -1002,17 +1005,17 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                 warnings.append("%s: pads not both on one copper layer -> not "
                                 "modeled" % ref)
             continue
-        # A part with no type has no value either: the Value field of a
-        # diode holds a part number, and not a quantity. The dialog asks
-        # the user for both.
+        # A part with no type also has no value: the Value field of a diode
+        # has a part number, and not a quantity. The dialog tells the user
+        # to give the two.
         val = _parse_value(fp.GetValue(), kind) if kind else None
         if kind and val is None:
-            # "R" alone names the type and no quantity. KEEP that part:
-            # the dialog shows it as a resistor with an empty value, the
-            # user gives the number, and the type stays open in the same
-            # way as it is for every other row. A part that still has no
-            # value goes no further than the dialog, because rfsim.py
-            # takes only an element that holds a type AND a value.
+            # "R" only gives the type and no quantity. KEEP that part. The
+            # dialog shows it as a resistor with an empty value, and the
+            # user gives the number. The type stays open, as it is for all
+            # the other rows. A part that continues to have no value goes
+            # no farther than the dialog. rfsim.py uses only an element
+            # that has a type AND a value.
             if _unit_mark_only(fp.GetValue(), kind):
                 warnings.append(
                     "%s: value \"%s\" gives the type and no quantity -> give "
@@ -1055,11 +1058,11 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if pkg_warn:
             warnings.append("%s: %s" % (ref, pkg_warn))
         # **The EPC is None until the user gives it**, and no table gives
-        # it: the self-capacitance of a winding cannot be read from the
-        # size of the package, and it cannot be separated from the land
-        # without the S-parameters of the part. The dialog takes the SRF,
-        # which every datasheet of an inductor prints, and it gives the
-        # capacitance that stands with the value at that frequency.
+        # it. The dimension of the package does not give the
+        # self-capacitance of a winding. Only the S-parameters of the part
+        # can make it different from the land. The dialog gets the SRF,
+        # which the datasheet of each inductor gives. It then gives the
+        # capacitance that is in parallel with the value at that frequency.
         elements.append({"ref": ref, "type": kind, "value": val, "ny": ny,
                          "layer": layer, "start": start, "stop": stop,
                          "pads": [list(c1), list(c2)],
@@ -1079,11 +1082,11 @@ def _port(board, pad, number, copper_layers):
         raise ValueError("Board needs at least 2 copper layers (signal + reference)")
     ref = names[idx - 1] if idx == len(names) - 1 else names[idx + 1]
 
-    # A stripline needs a plane above the strip and a plane below it. Thus
-    # the port must be on an inner layer. openEMS puts the voltage probes
-    # at the same distance above and below, thus its model is a symmetric
-    # stripline. The code gives the mean distance, and extract() gives a
-    # warning if the two distances do not agree.
+    # A stripline must have a plane above the strip and a plane below it.
+    # Thus the port must be on an inner layer. openEMS puts the voltage
+    # probes at the same distance above and below, thus its model is a
+    # symmetric stripline. The code gives the mean distance, and extract()
+    # gives a warning if the two distances do not agree.
     z_of = {c["name"]: c["z"] for c in copper_layers}
     ref2, height, asym = None, None, 0.0
     if 0 < idx < len(names) - 1:
@@ -1114,14 +1117,15 @@ def _port(board, pad, number, copper_layers):
         "height": height,        # strip to each plane, mm; None = no stripline
         "asymmetry": round(asym, 4),
         "gap": None,             # the coplanar gap; extract() measures it
-        # On the axes of the board: length is the pad extent in x, and
-        # width is the pad extent in y. The lumped port box of the runner
-        # and the port marks of the GUI read them in that way.
+        # On the axes of the board: length is the dimension of the pad in
+        # x, and width is the dimension of the pad in y. The lumped port
+        # box of the runner and the port marks of the GUI read them as
+        # that.
         "width": ext_y,
         "length": ext_x,
         "direction": direction,
         "track_width": track_w,
-        "type": "lumped",  # overwritten from the settings dialog
+        "type": "lumped",  # the settings dialog writes a new value here
     }
 
 
@@ -1131,17 +1135,18 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
 
     The function crops the geometry to the bounding box of the port pads
     plus margin_mm. The coordinates are in mm, the y axis points up, and
-    z=0 is at the bottom of the board. If you give `substrate`, it
-    replaces the stackup of the board with a uniform stackup. Its keys
-    are "er", "tand", "h" (the total dielectric thickness in mm) and
-    "cu_t" (in mm). With no `substrate`, the stackup comes from the saved
-    file, or from the board in memory if `live_stackup` is True.
+    z=0 is at the bottom of the board. If you give `substrate`, it replaces
+    the stackup of the board with a stackup that has the same values in all
+    layers. Its keys are "er", "tand", "h" (the total dielectric thickness
+    in mm) and "cu_t" (in mm). With no `substrate`, the stackup comes from
+    the saved file. If `live_stackup` is True, it comes from the board in
+    memory.
 
-    `f_stop` (Hz) and `mesh` (a key of `solverenv.RES_DIV`) give the
-    depth of the PML band, which the domain must hold beside the clear
-    air of `margin_mm`. The model carries that depth in "pml_mm", thus
-    the runner puts the band exactly where this function left room for
-    it. With either one missing, the depth is `margin_mm`, which is what
+    `f_stop` (Hz) and `mesh` (a key of `solverenv.RES_DIV`) give the depth
+    of the PML band. The domain must hold that band adjacent to the clear
+    air of `margin_mm`. The model keeps that depth in "pml_mm". Thus the
+    runner puts the band in the area that this function kept for it. If one
+    of the two is missing, the depth is `margin_mm`. That is the depth that
     the plugin made before 2026-09-20.
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate,
@@ -1152,24 +1157,24 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
     for p in pads[1:]:
         region.Merge(p.GetBoundingBox())
-    # Fit the domain to the full board (Edge.Cuts). Before, a domain that
-    # had the size of the pad bbox cut the antennas. ponytail: the domain
+    # Fit the domain to the full board (Edge.Cuts). Before, a domain with
+    # the dimensions of the pad bbox cut the antennas. ponytail: the domain
     # is the full board. Use the bbox of the selection again if very large
     # boards make this operation too slow.
     brd = board.GetBoardEdgesBoundingBox()
     if brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
-    # **The margin of clear air PLUS the depth of the PML band.** The
-    # inner band is clear air and the outer band is the absorber. The
-    # code crops the copper at the outer edge. Thus the cut planes and
-    # tracks go through the WHOLE band and terminate almost matched, and
-    # they do not reflect from an open end: a track that stops part of
-    # the way into the band ends where the conductivity of the band is
-    # still small, and such an end reflects.
+    # **The margin of clear air PLUS the depth of the PML band.** The inner
+    # band is clear air and the outer band is the absorber. The code crops
+    # the copper at the outer edge. Thus the cut planes and tracks go
+    # through ALL the band, and their ends are almost matched. They do not
+    # cause a reflection from an open end. A track that stops in the band
+    # ends where the conductivity of the band is small, and such an end
+    # causes a reflection.
     #
-    # The band was as deep as the margin before 2026-09-20 (8 cells of
-    # margin/8), thus this was 2 times the margin. It is 8 cells of the
-    # mesh step now: refer to `solverenv.pml_depth`.
+    # Before 2026-09-20, the band was as deep as the margin (8 cells of
+    # margin/8), thus this was 2 times the margin. At this time, it is 8
+    # cells of the mesh step: refer to `solverenv.pml_depth`.
     pml_mm = float(margin_mm)
     if f_stop and mesh:
         eps_max = max(d["epsilon"] for d in diel_layers)
@@ -1234,8 +1239,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
 
     ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
     # Measure the coplanar gap of each port. The copper of the layer must
-    # exist first, thus this operation comes after the extraction of the
-    # polygons. A port that has a gap can use a CPW port.
+    # be available first. Thus this operation comes after the extraction of
+    # the polygons. A port that has a gap can use a CPW port.
     for p, pad in zip(ports, pads):
         polys_l = polygons.get(p["layer"], [])
         p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
@@ -1244,12 +1249,12 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         # to `copper_run`. None means "further than the limit", and the
         # runner then uses its own length.
         p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
-        # A stripline needs copper on the two planes. _port reads the
-        # stackup only, thus it gives a height for each strip on an inner
+        # A stripline must have copper on the two planes. _port reads only
+        # the stackup. Thus it gives a height for each strip on an inner
         # layer, also when the second plane is empty above the pad. The
-        # port would then put its voltage probes into open board. The
-        # guard below tests the reference layer; this test is for the
-        # second plane.
+        # port then puts its voltage probes into open board. The guard
+        # below tests the reference layer; this test is for the second
+        # plane.
         if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
                                         _pad_box(pad)):
             warnings.append(
@@ -1271,19 +1276,19 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 "its reference plane is approximate."
                 % (p["number"], p["label"], p["ref_layer2"], p["ref_layer"],
                    100.0 * p["asymmetry"]))
-    # A port needs a ground return: copper on the reference layer that
-    # touches any part of the pad. An antenna feed is at the edge of the
+    # A port must have a ground return: copper on the reference layer that
+    # touches a part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
     # ponytail: this is a test of the bounding boxes. Change it to a
     # point-in-polygon test if pours with unusual shapes give incorrect
     # results.
     for p, pad in zip(ports, pads):
         if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
-            # A CPW carries its return current on the coplanar ground of
-            # its own layer. Thus a board with no plane below the pad is
-            # correct for a CPW port, and the guard must not stop it. A
-            # drawn CPW has no track: then the gap of a candidate
-            # direction counts too.
+            # The return current of a CPW is on the coplanar ground of its
+            # own layer. Thus a board with no plane below the pad is
+            # correct for a CPW port, and the guard must not stop it. A CPW
+            # that the user drew has no track. Then the gap of a candidate
+            # direction also counts.
             g = p["gap"] or next((v for v in (p.get("gaps") or {}).values()
                                   if v), None)
             if g:
@@ -1320,8 +1325,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         "copper_layers": copper_layers,
         "dielectric_layers": diel_layers,
         "region": rect_mm(region),
-        # The depth of one PML band, inside the region on each face. The
-        # clear air between the structure and the band is margin_mm.
+        # The depth of one PML band, in the region on each face. The clear
+        # air between the structure and the band is margin_mm.
         "pml_mm": pml_mm,
         "board_rect": rect_mm(diel_box),
         "polygons": polygons,
@@ -1348,34 +1353,34 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         ("1mF", "C", 1e-3), ("2m2F", "C", 2.2e-3), ("1kF", "C", 1e3),
         ("2.2mH", "L", 2.2e-3), ("10mH", "L", 1e-2), ("1kH", "L", 1e3),
         ("100p", "L", 100e-12), ("1G", "L", 1e9),
-        # The case rule: m is milli and M is mega, on every type.
+        # The case rule: m is milli and M is mega, on all types.
         ("1m", "R", 1e-3), ("1M", "L", 1e6),
         # The ohm mark stays on the resistor. An inductor marked "4R7"
         # is 4.7 µH on its package, thus the parser must NOT give 4.7 H.
         ("4R7", "L", None), ("4R7", "C", None), ("0R", "R", 0.0),
-        # The mark of the unit is not for the resistor alone. A
-        # medial 'F' or 'H' gave None before 2026-08-20.
+        # The mark of the unit is not only for the resistor. A medial 'F'
+        # or 'H' gave None before 2026-08-20.
         ("4F7", "C", 4.7), ("1F5", "C", 1.5), ("4f7", "C", 4.7),
         ("4H7", "L", 4.7), ("2H2", "L", 2.2), ("4h7", "L", 4.7),
-        # ...but each type takes its OWN mark and no other one.
+        # ...but each type uses its OWN mark and no other one.
         ("4F7", "L", None), ("4F7", "R", None),
         ("4H7", "C", None), ("4H7", "R", None),
-        # A mark with no number is not a value. The trailing unit goes
+        # A mark with no number is not a value. The unit at the end goes
         # away first, thus the token is empty and not "0" (compare 0R).
         ("F", "C", None), ("H", "L", None),
-        # The resistor took no such path, thus "R" alone gave 0.0
-        # and `build()` put a metal SHORT across the two pads. A zero
-        # ohm link still writes "0R", and it must keep its 0.0 above.
+        # The resistor did not have this path, thus "R" only gave 0.0, and
+        # `build()` put a metal SHORT across the two pads. A zero ohm link
+        # continues to write "0R", and it must keep its 0.0 above.
         ("R", "R", None), ("r", "R", None), ("R 0402", "R", None),
         ("n", "C", None), ("k", "R", None),
-        # The unit as a word of its own. Each one of these gave the bare
-        # number before 2026-08-06, thus 1000 times too much or too
-        # little, with no message.
+        # The unit as a word of its own. Before 2026-08-06, each one of
+        # these gave the bare number. That is 1000 times too much or too
+        # small, with no message.
         ("10 kOhm", "R", 10e3), ("10 mOhm", "R", 1e-2),
         ("4.7 uF", "C", 4.7e-6), ("10 nH", "L", 10e-9),
         ("100 ohm", "R", 100.0), ("1 M", "R", 1e6),
-        # A tolerance and a voltage rating must NOT join: they start
-        # with a digit.
+        # A tolerance and a voltage rating must NOT attach: they start with
+        # a digit.
         ("4.7 1%", "R", 4.7), ("10u 25V", "C", 10e-6),
         ("4.7 kOhm 1%", "R", 4700.0), ("1 nF 50V", "C", 1e-9),
     ]
@@ -1387,8 +1392,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     print("parser OK (%d cases)" % len(_CASES))
 
     # The (stackup ...) block of a board file. It is the source of the
-    # "KiCad's Stackup" preset of the dialog, thus a change
-    # of this parser changes what a Rogers board simulates as.
+    # "KiCad's Stackup" preset of the dialog. Thus a change of this parser
+    # changes the substrate of a Rogers board in a run.
     import tempfile
     _PCB = """(kicad_pcb (version 20241229)
       (setup
@@ -1438,12 +1443,12 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     assert [it["thickness"] for it in _sub[1:3]] == [0.2, 0.8], _sub
     assert [it["epsilon"] for it in _sub[1:3]] == [3.0, 5.0], _sub
     assert [it["loss_tangent"] for it in _sub[1:3]] == [0.01, 0.03], _sub
-    # Each layer needs a name of its own: `unsaved_stackup` names the
-    # layer of each line of its question.
+    # Each layer must have a name of its own: `unsaved_stackup` gives the
+    # name of the layer of each line of its question.
     assert [it["name"] for it in _sub[1:3]] == ["dielectric 1",
                                                 "dielectric 1 sub 2"], _sub
-    # A sub-layer with no er of its own takes the value above it, and the
-    # thickness of the node adds up to the same 1.0 mm.
+    # A sub-layer with no er of its own uses the value above it. The sum of
+    # the thicknesses of the node is the same 1.0 mm.
     _sub2 = _stackup_from_text(
         _SUB.replace("(epsilon_r 5)(loss_tangent 0.03)", ""))
     assert [it["epsilon"] for it in _sub2[1:3]] == [3.0, 3.0], _sub2
@@ -1453,9 +1458,9 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     print("sub-layers OK (a layer for each one, and the er of the one above)")
 
     # The warning of a stackup that is not saved. A board comes from a
-    # file, and then the FILE changes: the board in memory keeps the old
-    # stackup, in the same way as a change in Board Setup that the user
-    # did not save.
+    # file, and then the FILE changes. The board in memory keeps the
+    # previous stackup. This is the same as a change in Board Setup that
+    # the user did not save.
     def _write(path, text):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -1495,9 +1500,9 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         _path = os.path.join(_dir, "empty.kicad_pcb")
         _write(_path, _EMPTY)
         assert unsaved_stackup(pcbnew.LoadBoard(_path)) is None, "no stackup"
-    # A comparison that fails gives no question: it must not stop a run.
-    # Do not give None here: SWIG passes it as a NULL board, and the
-    # process stops.
+    # When the function cannot compare the stackups, it gives no question:
+    # it must not stop a run. Do not give None here: SWIG gives it to the
+    # function as a NULL board, and the process stops.
     assert unsaved_stackup("not a board") is None
     print("unsaved stackup OK (10 checks)")
 
@@ -1526,21 +1531,21 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         _ok = (_want is None and _got is None) or (
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
-    # A ray that goes exactly through a vertex must give one hit only.
+    # A ray that goes through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
-    # The copper test for a manual feed direction: the strip goes to +x
+    # The copper test for a manual feed direction. The strip goes to +x
     # from the origin, thus +x is on copper and -x is empty board.
     assert copper_along([_STRIP], 0.0, 0.0, [1, 0]), "copper_along +x"
     assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
     assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
     print("geometry OK (%d cases)" % (len(_GEO) + 4))
 
-    # (the name, the code, does it give a warning?). A name that carries
-    # the metric code is not ambiguous, also when the imperial code is
-    # 0402 or 0603. A bare "C_0603" IS ambiguous: it can be an imperial
-    # 0603 (0.35 nH) or a metric 0603, which is an imperial 0201
-    # (0.20 nH). A bare code that is not also a metric size, such as
-    # 1206, is not ambiguous.
+    # (the name, the code, does it give a warning?). A name that has the
+    # metric code is not ambiguous, also when the imperial code is 0402 or
+    # 0603. A bare "C_0603" IS ambiguous. It can be an imperial 0603
+    # (0.35 nH), or a metric 0603, which is an imperial 0201 (0.20 nH). A
+    # bare code that is not also a metric dimension, such as 1206, is not
+    # ambiguous.
     _PKGS = [("R_0402_1005Metric", "0402", False),
              ("C_0603_1608Metric", "0603", False),
              ("R_0201_0603Metric", "0201", False),

@@ -1,45 +1,47 @@
 """Measure the self-resonance of an inductor against 1 / (2 pi sqrt(LC)).
 
-An inductor row of the dialog takes the SRF of the part, and the plugin
-then models it as DCR + L in parallel with the capacitance that stands
-with the value at that frequency. The two cannot share one box: the
-engine gives the cells of a box to ONE property and the other one is
-silent, with no message. Thus `runner._epc_split` divides the land of the
-part ACROSS the current, at a line that the mesh holds already, and the
-EPC goes on the other half with `LEtype=0`.
+An inductor row of the dialog gets the SRF of the part. The plugin then
+models it as DCR + L in parallel with a capacitance. That capacitance
+resonates with the value at that frequency. The two cannot share one box.
+The engine gives the cells of a box to ONE property, and the other one has
+no effect and gives no message. Thus `runner._epc_split` divides the land
+of the part ACROSS the current, at a line of the mesh. The EPC goes on the
+other half with `LEtype=0`.
 
-**The observable is a FREQUENCY.** A parallel LC is a high impedance at
-its resonance, thus a part in series gives a deep NOTCH of |S21| there,
-and the notch stands where 1 / (2 pi sqrt(LC)) says. No scale error of
+**The observable is a FREQUENCY.** A parallel LC is a high impedance at its
+resonance. Thus a part in series gives a deep NOTCH of |S21| there. The
+notch is at the frequency that 1 / (2 pi sqrt(LC)) gives. No scale error of
 the amplitude can move it.
 
 **The board is the microstrip of `run_lumped.make` with the PADS of an
 0402 land** (0.540 mm along the current, 0.640 mm across, a gap of
-0.480 mm), because the count of the cells across the land decides this
-measurement and a real 0402 land holds 2 of them where the 2.9 mm strip
-of `run_rlc.py` holds 4. The shunt board of `run_shunt.py packages` holds
-the only other real land of this folder and it CANNOT measure this: a
-part of 10 nH stands at 188 ohm at 3 GHz, thus it is nearly an open
-already and its anti-resonance moves |S21| by 0.06 dB.
+0.480 mm). The count of the cells across the land sets the result of this
+measurement. An 0402 land on a board has 2 of them, and the 2.9 mm strip of
+`run_rlc.py` has 4.
 
-**The DCR damps the tank and it does not move the notch.** A parallel LC
-with no loss rings for hundreds of nanoseconds, thus the end criteria
-never arrives and a window that CUTS the ring gives an S-matrix with GAIN
-in it. 1 ohm gives Q = 188 at 3 GHz and the run then ends in 1.7 ns,
-where R*R*C/L moves the notch by 3e-5 of itself.
+The shunt board of `run_shunt.py packages` has the only other land of a
+package in this folder, and it CANNOT measure this. A part of 10 nH is
+188 ohm at 3 GHz, thus it is almost an open. Its anti-resonance moves
+|S21| by 0.06 dB.
+
+**The DCR decreases the Q of the tank, and it does not move the notch.** A
+parallel LC with no loss rings for hundreds of nanoseconds. Thus the run
+does not get to the end criteria. A window that CUTS the ring gives an
+S-matrix with MORE power out than in. 1 ohm gives Q = 188 at 3 GHz, and
+the run then ends in 1.7 ns. R*R*C/L then moves the notch by 3e-5 of itself.
 
 Measured on 2026-09-21, with 10 nH and an EPC of 0.28 pF (thus 3.008 GHz):
 
-    the land                        the notch     against the closed form
+    the land                        the notch     against the formula
     2 cells (an 0402 or an 0603)    3.270 GHz     +8.7%
     4 cells (a 1206, a 2512)        3.025 GHz     +0.6%
 
-The notch always stands HIGH, because the two boxes share the mesh line
-of their joint and each element scales its value over the node lines of
-its own box, the shared one included. The control, which is the same
-board with no EPC, only FALLS over the band.
+The notch is always HIGH. The two boxes share the mesh line between them.
+Each element scales its value across the node lines of its own box, and
+that includes the shared line. The control, which is the same board with no
+EPC, only DECREASES across the band.
 
-Run it with the python of KiCad. It needs pcbnew, and it starts the
+Run it with the python of KiCad. It uses pcbnew, and it starts the
 solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_epc.py [mesh]
 """
@@ -62,18 +64,18 @@ import run_lumped as rl  # noqa: E402
 
 L_NH = 10.0
 EPC_PF = 0.28           # 10 nH with 0.28 pF resonates at 3.008 GHz
-DCR = 1.0               # ohm: it damps the tank, and it cannot move the notch
+DCR = 1.0  # ohm: it decreases the Q of the tank, and it cannot move the notch
 MARGIN = 8.0
 # The KiCad land of an 0402: the pad is 0.540 mm along the current and
-# 0.640 mm across it, and the two pads leave a gap of 0.480 mm.
+# 0.640 mm across it. The gap between the two pads is 0.480 mm.
 PAD_L, PAD_W, GAP = 0.540, 0.640, 0.480
 X_MID = 20.0
-# The notch of a land of 2 cells stood +8.7% high on 2026-09-21, and a
-# land of 4 cells +0.6%. The limit holds the first one with a margin,
-# in the way that VIA_TOL holds a barrel of 5 edges.
+# The notch of a land of 2 cells was +8.7% high on 2026-09-21, and a land
+# of 4 cells was +0.6% high. The limit holds the first one with a margin,
+# as VIA_TOL holds a barrel of 5 edges.
 EPC_TOL = 0.15
-# The control must only FALL: a board with no EPC has no resonance in
-# the band, thus its deepest point stands at the end of the sweep.
+# The control must only DECREASE. A board with no EPC has no resonance in
+# the band, thus its deepest point is at the end of the sweep.
 BAND = (1.5e9, 5.0e9)
 
 
@@ -92,12 +94,13 @@ def make_board(path):
     x = X_MID - 0.5 * GAP - 0.5 * PAD_L
     rl._pad(fp, "1", x, rl.Y, PAD_L, PAD_W, nets["RF1"])
     rl._pad(fp, "2", 2 * X_MID - x, rl.Y, PAD_L, PAD_W, nets["RF2"])
-    # **The end of a track is ROUND, with the radius of half its width.**
-    # A track that stops at the edge of the pad puts that cap 1.45 mm
-    # further and the copper then BRIDGES the gap of the part: the first
-    # board of this file gave ONE polygon and |S21| of -0.2 dB over the
-    # whole sweep, with the element in a gap that no longer existed. The
-    # track stops one cap before the gap, thus the cap ends in the pad.
+    # **The end of a track is CIRCULAR, with the radius of half its
+    # width.** A track that stops at the edge of the pad puts that cap
+    # 1.45 mm farther. The copper then BRIDGES the gap of the part. The
+    # first board of this file gave ONE polygon, and |S21| of -0.2 dB at
+    # all frequencies of the sweep. The element was in a gap that was not
+    # there. The track stops one cap before the gap, thus the cap ends in
+    # the pad.
     end = X_MID - 0.5 * GAP - 0.5 * rl.TRACE_W - 0.1
     rl._track(board, 5.0, end, nets["RF1"])
     rl._track(board, 2 * X_MID - end, 35.0, nets["RF2"])
@@ -146,7 +149,7 @@ def simulate(outdir, mesh, epc):
 
 
 def cells_across(outdir):
-    """Give the mesh lines inside the land, across the current."""
+    """Give the mesh lines in the land, across the current."""
     import runner
     with open(os.path.join(outdir, "model.json")) as fh:
         model = json.load(fh)
@@ -166,7 +169,7 @@ def db(x):
 
 
 def notch(f, s21):
-    """Give the frequency of the deepest point of |S21| inside the band."""
+    """Give the frequency of the deepest point of |S21| in the band."""
     keep = (f > BAND[0]) & (f < BAND[1])
     y, x = db(s21)[keep], f[keep]
     i = int(np.argmin(y))

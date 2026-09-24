@@ -1,50 +1,54 @@
-"""Measure the inductance of one via against a closed form.
+"""Measure the inductance of one via against a closed formula.
 
-A via runs through the solver on the shunt board and on the zone board,
-and neither board measures the barrel by itself. This file does.
+A via goes through the solver on the shunt board and on the zone board. But
+the two boards do not measure the barrel without other parts. This file
+does.
 
-**The board.** The through microstrip of `run_atten.py` (2.9 mm on
-1.53 mm of er 4.5), 30 mm between the two ports, and ONE via at the
-middle of the line, from F.Cu down to the plane on B.Cu. The via is a
-shunt inductance to ground. The substrate has no loss.
+**The board.** The through microstrip of `run_atten.py` (2.9 mm on 1.53 mm
+of er 4.5), with 30 mm between the two ports. ONE via is at the middle of
+the line, from F.Cu down to the plane on B.Cu. The via is a shunt inductance to
+ground. The substrate has no loss.
 
-**The observable.** A second board with no via gives the line alone. Its
-S21 holds the phase of the 21 mm between the two measurement planes, and
-the path from one plane to the via and back is the same 21 mm. Thus the
-S-parameters of the via board, divided by that S21, are the S-parameters
-of the via at its own plane, with no length of line in them and no value
-of eps_eff. Both boards are renormalized first to the impedance that the
-port measures on the line with no via, because that line is 47 ohm and
-not 50 at the coarse preset. A shunt admittance Y between two lines of Z0
-gives
+**The observable.** A second board with no via gives only the line. Its
+S21 has the phase of the 21 mm between the two measurement planes. The path
+from one plane to the via and back is the same 21 mm. Thus the S-parameters
+of the via board, divided by that S21, are the S-parameters of the via at
+its own plane. They have no length of line in them and no value of eps_eff.
+
+First, the file renormalizes the two boards to the impedance that the port
+measures on the line with no via. The cause is that the line is 47 ohm and
+not 50 at the coarse preset. A shunt admittance Y between two lines of
+Z0 gives
 
     S21 = 2 / (2 + Y Z0)          S11 = -Y Z0 / (2 + Y Z0)
 
-thus each one of the two gives Y, and L = -1 / (w Im Y). The file takes
-the median of each over F_BAND, and the answer is the mean of the two
-medians. The two agree to about 15% on every row below.
+Thus each one of the two gives Y, and L = -1 / (w Im Y). The file gets the
+median of each in F_BAND, and the answer is the mean of the two medians.
+The two agree to about 15% on each row below.
 
-**The closed form** is Goldfarb and Pucel (1991), for the via ground of a
-microstrip:
+**The closed formula** is Goldfarb and Pucel (1991), for the via ground of
+a microstrip:
 
     L = mu0 / (2 pi) * (h ln((h + sqrt(r^2 + h^2)) / r)
                         + 1.5 (r - sqrt(r^2 + h^2)))
 
-**The mesh decides this measurement.** openEMS makes a metal cylinder into
-PEC on the edges of the Yee grid whose NODE lies in the barrel. `_mesh`
-puts a line at the centre of the via and at x - r and x + r, and the same
-on y, thus the barrel can hold 5 nodes: the centre and 4 nodes ON its
-surface. **A node on the surface counts only when the arithmetic of the
-doubles puts it there**: 20.2 - 20.0 is 0.1999999999999993, which is not
-larger than 0.2, and 20.3 - 20.0 is 0.3000000000000007, which is. Thus a
-via of r = 0.2 mm is 5 PEC edges and a via of r = 0.3 mm is ONE, the
-centre, which is a thin wire. The PEC dump of openEMS (`debug_pec=True`)
-shows exactly those counts. `_merge_close` does the same to a small via
-at the coarse preset: `tol` is 0.18 mm there, thus the lines of a via of
-r = 0.15 mm merge and the barrel keeps 1 edge.
+**The mesh sets the result of this measurement.** openEMS makes a metal
+cylinder into PEC on the edges of the Yee grid when their NODE is in the
+barrel. `_mesh` puts a line at the centre of the via and at x - r and x +
+r, and the same on y. Thus the barrel can have 5 nodes: the centre and
+4 nodes ON its surface.
+
+**A node on the surface counts only when the arithmetic of the doubles puts
+it there.** 20.2 - 20.0 is 0.1999999999999993, which is not larger than
+0.2. 20.3 - 20.0 is 0.3000000000000007, which is larger than 0.3. Thus a
+via of r = 0.2 mm is 5 PEC edges, and a via of r = 0.3 mm is ONE. That edge
+is the centre, which is a thin wire. The PEC dump of openEMS
+(`debug_pec=True`) shows the same counts. `_merge_close` does the same to a
+small via at the coarse preset. There, `tol` is 0.18 mm. Thus the lines of
+a via of r = 0.15 mm merge, and the barrel keeps 1 edge.
 
 Measured on 2026-09-14, the mean of the two estimates against the closed
-form, with the edges that the barrel holds:
+formula, with the edges of the barrel:
 
     r (mm)   coarse          medium
     0.15     +54%  1 edge    +31%  3 edges
@@ -52,15 +56,15 @@ form, with the edges that the barrel holds:
     0.30    +155%  1 edge   +158%  1 edge
     0.50     +16%  5 edges   +17%  5 edges
 
-The same runs with the four surface lines 1 ppm INSIDE the barrel give
-+19% for r = 0.30 at coarse and +20% at medium, and +8% for r = 0.15 at
-medium, each one with 5 edges. Thus a barrel of 5 edges stands +8% to
-+20% over the closed form, and a barrel of fewer edges +31% to +158%.
-VIA_TOL sits between the two. **This file FAILS today, and the failure is
-the mesh**: read the edge count of a row before its number.
+The same runs with the four surface lines 1 ppm IN the barrel give +19% for
+r = 0.30 at coarse and +20% at medium. They give +8% for r = 0.15 at
+medium. Each one has 5 edges. Thus a barrel of 5 edges is +8% to +20% above
+the closed formula, and a barrel of fewer edges is +31% to +158%. VIA_TOL
+is between the two. **This file FAILS at this time, and the cause of the
+failure is the mesh.** Read the edge count of a row before its number.
 
-Run it with the python of the solver, or with the python of KiCad (it
-needs no pcbnew, and it starts the solver itself):
+Run it with the python of the solver, or with the python of KiCad (it does
+not use pcbnew, and it starts the solver itself):
 
     C:\\openEMS\\venv\\Scripts\\python.exe run_via.py [coarse|medium]
 
@@ -86,15 +90,16 @@ import solverenv  # noqa: E402
 from run_atten import H_SUB, line_model  # noqa: E402
 
 # The radii of the barrel, in mm: the drills of 0.3, 0.4, 0.6 and 1.0 mm
-# that a board usually carries.
+# that a board usually has.
 RADII = (0.15, 0.2, 0.3, 0.5)
-D_PORTS = 30.0                  # the ports stand at x = 5 and x = 35
+D_PORTS = 30.0  # the ports are at x = 5 and x = 35
 X_VIA, Y_VIA = 20.0, -10.0      # the middle of that line
-# The band of the median. The via is 4% of a wavelength long at 5 GHz,
-# thus it is still a lumped inductance there.
+# The band of the median. The via is 4% of a wavelength long at 5 GHz, thus
+# it continues to be a lumped inductance there.
 F_BAND = (1e9, 5e9)
-# The tolerance against the closed form: over the +8% to +20% of every
-# barrel of 5 edges, and under the +31% to +158% of every barrel of fewer.
+# The tolerance against the closed formula. It is above the +8% to +20% of
+# each barrel of 5 edges. It is below the +31% to +158% of each barrel of
+# fewer edges.
 VIA_TOL = 0.25
 
 
@@ -115,11 +120,11 @@ def board(r, mesh):
 
 
 def barrel_edges(model):
-    """Give the count of grid nodes that the barrel of the via holds.
+    """Give the count of grid nodes in the barrel of the via.
 
     This is the arithmetic of the engine: the lines of `_mesh`, smoothed
-    and rounded as `build()` does it, and a node counts when its distance
-    from the axis is not larger than r. No solver runs.
+    and rounded as `build()` does it. A node counts when its distance from
+    the axis is not larger than r. No solver runs.
     """
     from CSXCAD.SmoothMeshLines import SmoothMeshLines
     s = model["settings"]
@@ -163,10 +168,10 @@ def solve(tag, model, root):
 
 
 def renormalize(s11, s21, zl, z0=50.0):
-    """Give (S11, S21) of a symmetric 2-port against the real impedance zl.
+    """Give (S11, S21) of a symmetric 2-port against the impedance zl.
 
-    The board is symmetric about the via, thus S22 = S11 and S12 = S21,
-    and one excitation gives the full matrix.
+    `zl` has no imaginary part. The board is symmetric about the via, thus
+    S22 = S11 and S12 = S21. Thus one excitation gives the full matrix.
     """
     g = (zl - z0) / (zl + z0)
     a, b = [], []

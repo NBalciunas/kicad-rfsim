@@ -1,21 +1,21 @@
-"""Draw EVERY view of the results window, with no display.
+"""Make ALL the views of the results window, with no display.
 
-The window draws 18 views or more, and until 2026-08-05 no test drew any
-of them: a change to a plot was found by the eye, or it was not found at
-all. A reviewer of 2026-08-03 read the field views as a quantity with no
-scale, and the far field as a quantity with a unit, and both readings
-came from a title and a colour bar that the code did not write.
+The window shows 18 views or more. Until 2026-08-05, no test made one of
+them. Only the eye found a change to a plot, or nothing found it. A
+reviewer on 2026-08-03 read the field views as a quantity with no scale,
+and the far field as a quantity with a unit. The two readings came from a
+title and a colour bar that the code did not write.
 
-This file builds `gui.ResultsFrame` from the output of a run that
-exists, draws each entry of its list, and reads the title and the labels
-back. It needs no display: `wx.App(False)` and the Agg canvas of
-matplotlib are enough, and `figure.savefig` always gives what the canvas
+This file builds `gui.ResultsFrame` from the output of a run that is on the
+disk. It makes each entry of its list, and it reads the title and the
+labels back. It uses no display: `wx.App(False)` and the Agg canvas of
+matplotlib are sufficient. `figure.savefig` always gives what the canvas
 holds.
 
 Run it with the python of KiCad 10:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" test_views.py
 
-It needs `validation/out_coarse`, which `run_headless.py coarse` makes.
+It uses `validation/out_coarse`, which `run_headless.py coarse` makes.
 """
 import os
 import sys
@@ -39,7 +39,7 @@ def frame():
 
 
 def texts(fig):
-    """Give every piece of text of a figure, as one lowercase string."""
+    """Give all the text of a figure, as one lowercase string."""
     out = []
     for ax in fig.get_axes():
         out += [ax.get_title(), ax.get_xlabel(), ax.get_ylabel()]
@@ -48,26 +48,62 @@ def texts(fig):
 
 
 def test_every_view_draws():
-    """Each entry of the list must draw and leave text on the figure."""
+    """Each entry of the list must make a figure with text on it."""
     f = frame()
     names = list(f.choice.GetStrings())
     assert len(names) >= 10, "only %d views: the run wrote too little" % len(names)
     for i, name in enumerate(names):
         f.choice.SetSelection(i)
         f._plot()
+        if name == gui.DECISIONS_VIEW:
+            continue             # text and no plot: the test below
         t = texts(f.figure)
         assert t, "the view %r drew no text at all" % name
     print("every view draws OK (%d views)" % len(names))
     f.Destroy()
 
 
+def test_the_decisions_are_a_view():
+    """B56: decisions.log is a view of the window, as text and no plot.
+
+    The runner writes the decisions of the run to decisions.log. A user
+    must not have to know the file. A run from before that file has no such
+    view.
+    """
+    import shutil
+    import tempfile
+    f = frame()
+    assert gui.DECISIONS_VIEW not in f.choice.GetStrings(), \
+        "a run with no decisions.log must have no such view"
+    f.Destroy()
+    log = "RFsim: the choices\n\ntimestep: the full Courant step\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(os.path.join(OUT, "results.s2p"), tmp)
+        with open(os.path.join(tmp, "decisions.log"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(log)
+        f = gui.ResultsFrame(None, os.path.join(tmp, "results.s2p"))
+        names = list(f.choice.GetStrings())
+        assert names[-1] == gui.DECISIONS_VIEW, names
+        f.choice.SetSelection(len(names) - 1)
+        f._plot()
+        assert f.text.IsShown() and not f.canvas.IsShown(), \
+            "the view must show the text in the place of the plot"
+        assert f.text.GetValue().replace("\r\n", "\n") == log
+        f.choice.SetSelection(0)
+        f._plot()
+        assert f.canvas.IsShown() and not f.text.IsShown(), \
+            "a plot must come back in the place of the text"
+        f.Destroy()
+    print("the decisions are a view OK (text, and the plot comes back)")
+
+
 def test_the_field_views_say_what_they_show():
     """The unit, the plane, the frequency, the phase and the maximum.
 
-    The title said "E-Field (f=2.4 GHz)" and nothing else: not the
-    plane, and the view had no colour bar. The numbers now sit
-    in a block of text at the left, and the colour bar carries the unit
-    alone.
+    The title was "E-Field (f=2.4 GHz)" only. It did not give the plane,
+    and the view had no colour bar. At this time, the numbers are in a
+    block of text at the left, and the colour bar shows only the unit.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings()
@@ -94,11 +130,11 @@ def test_the_field_views_say_what_they_show():
 def test_the_far_field_views_say_directivity():
     """The unit is dBi, and each view gives its numbers.
 
-    A reviewer wrote that "the far-field is not a unitless quantity".
-    The views show DIRECTIVITY, which is a ratio, thus dBi is correct.
-    A cut names the quantity in its title and its axis. The 3D balloon
-    gives the frequency, the two efficiencies and the directivity in a
-    block of text. Both views keep the style of CST.
+    A reviewer wrote that "the far-field is not a unitless quantity". The
+    views show DIRECTIVITY, which is a ratio, thus dBi is correct. A cut
+    names the quantity in its title and its axis. The 3D balloon gives the
+    frequency, the two efficiencies and the directivity in a block of text.
+    The two views keep the style of CST.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings() if n.startswith("Farfield")]
@@ -120,10 +156,10 @@ def test_the_far_field_views_say_directivity():
 
 
 def test_the_ports_are_on_the_field_views():
-    """The field views are the pictures that leave the tool.
+    """The field views are the pictures that go out of the tool.
 
-    A reviewer once assumed a lumped port at the edge of the substrate
-    on B.Cu, because no picture showed where a port is.
+    One time, a reviewer thought that a lumped port is at the edge of the
+    substrate on B.Cu. No picture showed the position of a port.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings()
@@ -147,11 +183,11 @@ def test_the_ports_are_on_the_field_views():
 def test_the_field_views_have_the_scale_of_cst():
     """The field of a matched line agrees with 0.5 W of incident power.
 
-    CST drives a port with a wave of 1 sqrt(W) peak, which is 0.5 W, and
-    the field views use the same reference. Into 50 ohm that is a voltage
-    of sqrt(2 * 50 * 0.5) = 7.07 V peak, and |Ez| * h under the strip
-    gives that voltage. The run of 2026-09-15 gave 7.04 V. An error of 2
-    or of sqrt(2) in the scale moves the voltage by 41% or more.
+    CST excites a port with a wave of 1 sqrt(W) peak, which is 0.5 W, and
+    the field views use the same reference. Into 50 ohm, that is a voltage
+    of sqrt(2 * 50 * 0.5) = 7.07 V peak. |Ez| * h below the strip gives
+    that voltage. The run of 2026-09-15 gave 7.04 V. An error of 2 or of
+    sqrt(2) in the scale moves the voltage by 41% or more.
     """
     import json
     import numpy as np
@@ -182,6 +218,7 @@ def test_the_field_views_have_the_scale_of_cst():
 if __name__ == "__main__":
     app = wx.App(False)
     test_every_view_draws()
+    test_the_decisions_are_a_view()
     test_the_field_views_say_what_they_show()
     test_the_far_field_views_say_directivity()
     test_the_ports_are_on_the_field_views()

@@ -55,7 +55,7 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog. It shows the ports, the R/L/C parts and the domain, and it follows the "Domain margin" field and the "Model" checkboxes.
 4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
-5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
+5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory. The "Decisions" view of that window lists what the run chose by itself, and `decisions.log` holds the same list.
 
 ### Ports
 
@@ -127,7 +127,8 @@ The coarse preset is for a first look. A small lumped element reads too large at
 
 ### Lumped elements
 
-Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog. **The first letter of the reference gives the type**: R, L or C. Every other 2-terminal part, for example a diode or a ferrite bead, starts at "Unknown" with its "Model" checkbox off, and it changes no simulation until you select a type and give a value.
+Any footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog.
+**The first letter of the reference gives the type**: R, L or C. Every other 2-terminal part, for example a diode or a ferrite bead, starts at "Unknown" with its "Model" checkbox off, and it changes no simulation until you select a type and give a value.
 
 **The Value field of the footprint gives the value.** One text, three readings: the same letters serve all three types, and the type of the part decides the unit. The case is important, thus `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
 
@@ -151,12 +152,21 @@ The letter can also come after the number (`4.7k` = 4.7 kohm, `22p` = 22 pF). **
 The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`) and fills the two values from its table of 8 codes, from 0201 to 2512.
 Any other name gives "Custom", thus you give the two values yourself, and "No parasitics" makes an ideal element.
 A capacitor becomes ESR + ESL + C, which is the usual model of a real part, and an inductor gets its DCR.
+The run leaves out the body of a resistor or a capacitor when the body changes |Z| of the part by 2% or less over the sweep, for example the ESL of a 1 kohm pull-up. The label under the rows names these parts.
 
-**An inductor row also holds its SRF**, the self-resonance in GHz that its datasheet prints. A real inductor has a capacitance across its winding, thus it stops being an inductor above that frequency and it starts to pass. Give the SRF and the plugin models the part as its DCR and its inductance in parallel with that capacitance: the run then shows the resonance and what the part does above it. Leave the field empty and the part keeps the model it had, with no self-resonance. The plugin puts the capacitance on the other half of the land of the part, thus the two work in parallel; the resonance stands about 1% high on a wide land and about 9% high on an 0402, where the land holds two mesh cells. A land of one cell cannot hold both, and the run says so and keeps the part alone.
+**An inductor row also holds its SRF**, the self-resonant frequency in GHz that its datasheet gives. A real inductor has a capacitance across its winding, thus it stops being an inductor above that frequency and it starts to pass.
+Give the SRF and the plugin models the part as its DCR and its inductance in parallel with that capacitance: the run then shows the resonance and what the part does above it.
+The field starts at 0. With 0, the part keeps the model it had, with no self-resonance.
+The plugin puts the capacitance on the other half of the land of the part, thus the two work in parallel; the resonance stands about 1% high on a wide land and about 9% high on an 0402, where the land holds two mesh cells.
+A land of one cell cannot hold both, and the run says so and keeps the part alone.
 
-**An inductance makes the run longer.** A lumped inductor needs a smaller timestep, thus the plugin divides the step and gives the run the same factor more steps. An inductance of 0.25 nH or less costs nothing, 1 nH takes about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well. The label under the rows of the parts says the number before you start the run.
+**An inductance makes the run longer.** A lumped inductor needs a smaller timestep, thus the plugin divides the step and gives the run the same factor more steps.
+An inductance of 0.25 nH or less costs nothing, 1 nH takes about 2 times longer, and 10 nH about 6 times. 
+The ESL of a body counts as well. The label under the rows of the parts says the number before you start the run.
 
-**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off. Its row holds three fields, R in ohm, L in nH and C in pF, and no parasitics. The solver puts the three in series in one element. Leave a field empty to leave that component out.
+**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
+Its row holds three fields, R in ohm, L in nH and C in pF, and no parasitics.
+The solver puts the three in series in one element. Each field starts at 0, and 0 leaves that component out.
 
 ## Examples
 

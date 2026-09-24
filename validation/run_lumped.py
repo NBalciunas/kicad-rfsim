@@ -1,12 +1,12 @@
 """A full test of a lumped element: a series resistor of 50 ohm in a
 microstrip of 50 ohm.
 
-For an ideal part with Z0 = 50, S21 = 2*Z0/(2*Z0+R) = -3.5 dB and
-S11 = R/(R+2*Z0) = -9.5 dB. If the simulation ignored the resistor, the
-gap would be an open circuit: S11 near 0 dB and S21 much lower. The
-asserts below tell the two conditions apart.
+For an ideal part with Z0 = 50, S21 = 2*Z0/(2*Z0+R) = -3.5 dB and S11 =
+R/(R+2*Z0) = -9.5 dB. If the simulation ignores the resistor, the gap is an
+open circuit: S11 near 0 dB and S21 much lower. The asserts below show the
+difference between the two conditions.
 
-Run this file with the python of KiCad 10. It needs pcbnew, and it starts
+Run this file with the python of KiCad 10. It uses pcbnew, and it starts
 the solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_lumped.py [coarse|medium|fine]
 """
@@ -28,8 +28,8 @@ import solverenv  # noqa: E402
 TRACE_W = 2.9   # about 50 ohm on FR4 of 1.6 mm
 Y = 10.0
 BOARD = (0.0, 0.0, 40.0, 20.0)
-# The shunt board of make_shunt(): the part is below the line at
-# SHUNT_X, and a via takes the ground side of it down to the plane.
+# The shunt board of make_shunt(): the part is below the line at SHUNT_X,
+# and a via connects the ground side of it down to the plane.
 SHUNT_X = 20.0
 SHUNT_PAD = 1.0         # the pads of the part with no package, square
 SHUNT_GAP = 0.5         # the copper gap that the part bridges
@@ -37,11 +37,12 @@ SHUNT_OVERLAP = 0.25    # pad 1 goes this far into the track
 SHUNT_DRILL = 0.6       # a small drill makes thin cells and a slow run
 SHUNT_VIA_DROP = 0.75   # the via, below the lower edge of pad 2
 # The land pattern of each package, from the libraries of KiCad 10
-# (Resistor_SMD.pretty, `R_<code>_<metric>Metric`): the length of one pad
-# ALONG the axis of the part, its width ACROSS that axis, and the gap
-# between the two pads. The gap is 2*offset - length, from the same file.
-# Item 6b needs these, because each entry of `board_reader._ESL_NH` is a
-# different package, and L_board is a different number for each one.
+# (Resistor_SMD.pretty, `R_<code>_<metric>Metric`). It has the length of
+# one pad ALONG the axis of the part, and its width ACROSS that axis. It
+# also has the gap between the two pads. The gap is 2*offset - length, from
+# the same file. Item 6b uses these, because each entry of
+# `board_reader._ESL_NH` is a different package. L_board is a different
+# number for each one.
 SHUNT_LAND = {"0201": (0.46, 0.40, 0.18),
               "0402": (0.54, 0.64, 0.48),
               "0603": (0.80, 0.95, 0.85),
@@ -87,8 +88,8 @@ def _track(board, x0, x1, net):
 def _outline_and_plane(board, gnd):
     """Cut the board to BOARD and fill the plane on B.Cu.
 
-    Call this function LAST: the zone filler must see every via, or a via
-    does not connect to the plane.
+    Call this function LAST. The zone filler must see all the vias. If not,
+    a via does not connect to the plane.
     """
     x0, y0, x1, y1 = BOARD
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
@@ -149,10 +150,10 @@ def _shunt_ground(board, gnd, rect_top, pad_bottom, pad_w):
     change the gap above it. `pad_bottom` is its lower edge, and the via
     goes SHUNT_VIA_DROP below that.
 
-    The rectangle is a filled graphic shape and not a zone, in the same
-    way as the coplanar ground of `make_test_board.make_cpw`: a zone
-    keeps a clearance of its own from the copper of another net, and a
-    validation board must always give the same geometry.
+    The rectangle is a filled graphic shape and not a zone, as the coplanar
+    ground of `make_test_board.make_cpw` is. A zone keeps a clearance of
+    its own from the copper of a different net. A validation board must
+    always give the same geometry.
     """
     via_y = pad_bottom + SHUNT_VIA_DROP
     w = max(pad_w, SHUNT_DRILL + 0.6)
@@ -197,30 +198,29 @@ def shunt_gap_center(pkg=None):
 def make_shunt(path, ref="C1", val="10p", pkg=None):
     """Make a microstrip of 50 ohm that has one part in SHUNT to ground.
 
-    The line is continuous. The part is below it: pad 1 goes
-    SHUNT_OVERLAP into the track, and pad 2 is one gap lower. The ground
-    side continues below pad 2 as a rectangle of copper, and a through
-    via at SHUNT_VIA_DROP below pad 2 takes that copper to the plane on
-    B.Cu.
+    The line is continuous. The part is below it: pad 1 goes SHUNT_OVERLAP
+    into the track, and pad 2 is one gap lower. The ground side continues
+    below pad 2 as a rectangle of copper. A through via at SHUNT_VIA_DROP
+    below pad 2 connects that copper to the plane on B.Cu.
 
     `pkg` gives the land pattern of a package (SHUNT_LAND). With no
-    package the pads are square and 1.0 mm, which is the DEFAULT land of
+    package, the pads are square and 1.0 mm, which is the DEFAULT land of
     this rig.
 
-    The part and that via then make a SERIES resonance to ground, and
-    |S21| has a deep notch at it. A frequency is immune to a scale error
-    of the amplitude; an absolute value is not. Refer to run_shunt.py,
+    The part and that via then make a SERIES resonance to ground, and |S21|
+    has a deep notch at it. A scale error of the amplitude cannot move a
+    frequency, but it can move an absolute value. Refer to run_shunt.py,
     which measures a body ESL from the notch.
 
-    **The via is not in pad 2**, and this is not a choice of style. The
+    **The via is not in pad 2**, and this is not a decision of style. The
     annular ring of a via is copper in the model
-    (`board_reader._copper_polys` flashes it on each layer). A drill of
-    0.6 mm gives a ring of 0.9 mm, which is wider than the 0.46 mm pad of
-    an 0201 land: the ring would go 0.22 mm past the pad, the gap is
-    0.18 mm, and the ring would BRIDGE the part. To make the drill follow
-    the pad in the place of this would give a drill of 0.1 mm on an 0201,
-    thus thin cells and a slow run. The via goes below the pad for every
-    package, thus one rule covers all of them and the mesh stays coarse.
+    (`board_reader._copper_polys` puts it on each layer). A drill of 0.6 mm
+    gives a ring of 0.9 mm, which is wider than the 0.46 mm pad of an 0201
+    land. The ring then goes 0.22 mm across the pad. The gap is 0.18 mm,
+    thus the ring BRIDGES the part. A drill that follows the pad is 0.1 mm
+    on an 0201, and that gives thin cells and a slow run. The via goes
+    below the pad for all packages. Thus one rule is correct for all of
+    them, and the mesh stays coarse.
     """
     pad_l, pad_w, gap = shunt_land(pkg)
     board = pcbnew.NewBoard(path)
@@ -236,8 +236,8 @@ def make_shunt(path, ref="C1", val="10p", pkg=None):
     _track(board, 5.0, 35.0, rf)
 
     # Pad 1 overlaps the edge of the track. Two polygons that only touch
-    # can leave a sliver between them, and the copper of the part must
-    # meet the line with no such doubt.
+    # can have a sliver between them. The copper of the part must touch the
+    # line with no such problem.
     yg = shunt_gap_center(pkg)[1]
     y1, y2 = yg - 0.5 * (pad_l + gap), yg + 0.5 * (pad_l + gap)
     part = _fp(board, ref, val)
@@ -260,17 +260,18 @@ def shunt2_gap_centers():
 
 
 def make_shunt2(path, refs=("C1", "L1"), vals=("4.7p", "5n")):
-    """Make a 50 ohm line with TWO parts in series, from the line to ground.
+    """Make a 50 ohm line with TWO parts in series, from the line to
+    ground.
 
-    The geometry of `make_shunt` with one more pad and one more gap: the
-    line, part 1, a middle pad, part 2, the ground pad, and the via to
-    the plane. The two element boxes are then SHUNT_PAD apart, which is
-    the first board here that puts two lumped elements near each other.
+    The geometry of `make_shunt` with one more pad and one more gap. It
+    has the line, part 1, a middle pad, part 2, the ground pad, and the via
+    to the plane. The two element boxes are then SHUNT_PAD apart. This is the
+    first board here that puts two lumped elements near each other.
 
     A C and an L in series to ground make a notch in |S21| at
     `1/(2*pi*sqrt((L + L_board)*C))`. Thus the two parts together give a
-    FREQUENCY, and the test of the pair does not depend on an amplitude.
-    Refer to run_shunt.py, mode `two`.
+    FREQUENCY, and the test of the pair does not use an amplitude. Refer to
+    run_shunt.py, mode `two`.
     """
     board = pcbnew.NewBoard(path)
     rf = pcbnew.NETINFO_ITEM(board, "RF")
@@ -285,8 +286,8 @@ def make_shunt2(path, refs=("C1", "L1"), vals=("4.7p", "5n")):
 
     # The three pads of the branch: one on the line, one between the two
     # parts, and one on ground. The middle pad is pad 2 of the first part
-    # AND pad 1 of the second: two pads at the same place, because each
-    # footprint must have exactly 2 numbered pads of its own.
+    # AND pad 1 of the second. Thus two pads are at the same position,
+    # because each footprint must have 2 numbered pads of its own.
     (_, g1), (_, g2) = shunt2_gap_centers()
     y_top = g1 - 0.5 * (SHUNT_PAD + SHUNT_GAP)
     y_mid = g1 + 0.5 * (SHUNT_PAD + SHUNT_GAP)

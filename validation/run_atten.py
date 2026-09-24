@@ -1,53 +1,52 @@
 """Measure the attenuation of a line from TWO lengths.
 
-`_line_data` gives the attenuation from ONE line, and that number is
-noise: Im(beta) goes negative under 2.2 GHz and it peaks at 79.8 dB/m at
-5.5 GHz. The cause is the conditioning of that extraction, and no
-change inside `_line_data` corrects it.
+`_line_data` gives the attenuation from ONE line, and that number is noise.
+Im(beta) is negative below 2.2 GHz, and its peak is 79.8 dB/m at 5.5 GHz.
+The cause is the numerical condition of that extraction, and no change in
+`_line_data` corrects it.
 
-**Two lines that differ in LENGTH alone give the attenuation with no
-such problem.** This is the method of `run_shunt.py` and of
-`run_feature.py`: |S21| carries the loss of the line AND the loss of the
-two ports, the ports are the same on both boards, thus the difference
-keeps the line and removes everything else:
+**Two lines that are different only in LENGTH give the attenuation with no
+such problem.** This is the procedure of `run_shunt.py` and of
+`run_feature.py`. |S21| has the loss of the line AND the loss of the two
+ports. The ports are the same on the two boards. Thus the difference keeps
+the line and removes all the other parts:
 
     alpha (dB/m) = (|S21_short| - |S21_long|) dB / (l_long - l_short)
 
-The two boards differ in ONE number: the distance between the two ports.
-The width, the stackup, the port geometry and the mesh rules are the
-same, thus every constant loss cancels.
+The two boards are different in ONE number: the distance between the two
+ports. The width, the stackup, the port geometry and the mesh rules are the
+same. Thus each constant loss cancels.
 
-**The closed form, and there are TWO of them.** The copper carries a
-conductivity and the substrate carries a loss, thus the theory has two
-terms:
+**The closed formula, and there are TWO of them.** The copper has a
+conductivity and the substrate has a loss, thus the theory has two terms:
 
-  - the conductor, alpha_c = 8.686 * Rs / (Z0 w), with the surface
-    resistance Rs = sqrt(pi f mu0 / kappa) of a sheet that is thicker
-    than the skin depth (35 um against 1.2 um at 3 GHz);
+  - the conductor, alpha_c = 8.686 * Rs / (Z0 w). Rs is the surface
+    resistance, sqrt(pi f mu0 / kappa), of a sheet that is thicker than the
+    skin depth (35 um against 1.2 um at 3 GHz);
   - the dielectric, alpha_d = 8.686 * (pi f / c) * er / sqrt(eps_eff)
     * (eps_eff - 1) / (er - 1) * tan d.
 
-**The dielectric term needs the loss that the CODE makes, and that is
-not the loss that a datasheet gives.** `build()` writes ONE fixed
+**The dielectric term must have the loss that the CODE makes, and that is
+not the loss that a datasheet gives.** `build()` writes ONE constant
 conductivity for the substrate, kappa = 2 pi f0 eps0 er tan d, at the
-CENTRE frequency of the sweep. A fixed kappa is a loss tangent that
-falls as 1/f, thus the attenuation of the model is almost FLAT with the
-frequency, where a real substrate of constant tan d rises with it. The
-two agree at f0 and nowhere else. `alpha_diel` therefore takes the
-tan d that the model really has, and `main` prints the constant-tan d
-curve beside it to show the size of the difference.
+CENTRE frequency of the sweep. A constant kappa is a loss tangent that
+decreases as 1/f. Thus the attenuation of the model is almost FLAT with the
+frequency. For a substrate with a constant tan d, it increases with the
+frequency. The two agree only at f0. Thus `alpha_diel` uses the tan d of
+the model. `main` prints the curve with a constant tan d adjacent to it, to
+show the dimension of the difference.
 
-eps_eff comes from Hammerstad and Jensen with the dispersion of
-Kirschning and Jansen, which `run_feature.py` measures against a
-frequency on this same stackup.
+eps_eff comes from Hammerstad and Jensen with the dispersion of Kirschning
+and Jansen. `run_feature.py` measures it against a frequency on this same
+stackup.
 
-**The ripple is the error of this rig.** A line that is not exactly 50
-ohm reflects at each end, thus |S21| ripples with the length, and the
-difference of two lengths keeps that ripple. The file reports the mean
-over `F_FIT` and the spread of the ratio, which is the size of it.
+**The ripple is the error of this rig.** A line that is not 50 ohm causes a
+reflection at each end. Thus |S21| ripples with the length, and the
+difference of two lengths keeps that ripple. The file reports the mean in
+`F_FIT` and the spread of the ratio, which is the dimension of the ripple.
 
-Run it with the python of the solver, or with the python of KiCad (it
-needs no pcbnew, and it starts the solver itself):
+Run it with the python of the solver, or with the python of KiCad (it does
+not use pcbnew, and it starts the solver itself):
 
     C:\\openEMS\\venv\\Scripts\\python.exe run_atten.py [coarse|medium]
 
@@ -76,19 +75,19 @@ KAPPA = 5.8e7            # the conductivity that `build()` gives the copper
 CU_T = 0.035             # mm, the thickness of the sheet
 TAND = 0.02              # the loss tangent of the substrate of validation/
 
-# The distance between the two ports, in mm. The difference is what the
-# measurement divides by, thus it must be large enough that the loss of
-# the line stands over the ripple: 80 mm gives about 0.73 dB at 3 GHz.
+# The distance between the two ports, in mm. The measurement divides by the
+# difference. Thus it must be sufficiently large, and the loss of the line
+# must be more than the ripple. 80 mm gives about 0.73 dB at 3 GHz.
 D_SHORT, D_LONG = 20.0, 100.0
 F_START, F_STOP, N_FREQ = 1e9, 6e9, 501
-# The band of the fit. Under 1.5 GHz the loss is small and the ripple is
-# a large part of it; over 5.5 GHz the sweep runs into the end of the
+# The band of the fit. Below 1.5 GHz, the loss is small and the ripple is a
+# large part of it. Above 5.5 GHz, the sweep gets to the end of the
 # excitation.
 F_FIT = (1.5e9, 5.5e9)
-# The tolerance against the closed form of the MODEL, over the band of
-# the fit. The two terms are worth about 12 dB/m together here, and the
-# spread that the file reports is the ripple of a line whose return loss
-# is only -11 to -20 dB.
+# The tolerance against the closed formula of the MODEL, in the band of the
+# fit. The two terms are about 12 dB/m together here. The spread that the
+# file reports is the ripple of a line with a return loss of only -11 to
+# -20 dB.
 ALPHA_TOL = 0.15
 
 
@@ -96,10 +95,10 @@ ALPHA_TOL = 0.15
 def alpha_diel(f, w, h, er, tand, f0=None):
     """The dielectric loss of a microstrip, in dB/m.
 
-    `f0` gives the loss that the CODE makes and not the loss of a
-    datasheet: `build()` fixes ONE conductivity at the centre frequency
-    of the sweep, thus the loss tangent of the model falls as f0/f. Give
-    f0 = None for the constant tan d of a real substrate.
+    `f0` gives the loss that the CODE makes, and not the loss of a
+    datasheet. `build()` sets ONE conductivity at the centre frequency of
+    the sweep. Thus the loss tangent of the model decreases as f0/f. Give
+    f0 = None for the constant tan d of a substrate.
     """
     e = eps_eff_f(w, h, er, f)
     if f0 is not None:
@@ -111,11 +110,11 @@ def alpha_diel(f, w, h, er, tand, f0=None):
 def alpha_cond(f, w, h, er, kappa=KAPPA, t_mm=CU_T):
     """The conductor loss of a wide microstrip, in dB/m.
 
-    Rs is the surface resistance of the sheet. Under the frequency where
-    the skin depth reaches the thickness the sheet is thin, thus this
-    takes the larger of the skin value and the DC sheet resistance. At
-    3 GHz the skin depth is 1.2 um against a sheet of 35 um, thus the
-    skin value is the one that counts over this whole sweep.
+    Rs is the surface resistance of the sheet. Below the frequency where
+    the skin depth becomes the thickness, the sheet is thin. Thus this uses
+    the larger of the skin value and the DC sheet resistance. At 3 GHz, the
+    skin depth is 1.2 um against a sheet of 35 um. Thus the skin value is
+    the one that counts in all of this sweep.
     """
     f = np.asarray(f, float)
     rs_skin = np.sqrt(np.pi * f * MU0 / kappa)
@@ -128,27 +127,27 @@ def alpha_cond(f, w, h, er, kappa=KAPPA, t_mm=CU_T):
 def line_model(d_ports, mesh):
     """A straight through microstrip with the two ports `d_ports` apart.
 
-    Everything except the length of the line is the same on both boards
-    of the pair, thus the difference of the two |S21| holds the line and
-    nothing else. The stackup and the width are those of
-    `microstrip_50ohm.kicad_pcb`, in the same way as `run_feature.py`.
+    Only the length of the line is different on the two boards of the pair.
+    Thus the difference of the two |S21| has only the line. The stackup and
+    the width are those of `microstrip_50ohm.kicad_pcb`, as in
+    `run_feature.py`.
     """
     hw = 0.5 * W_LINE
     x_p1, x_p2 = 5.0, 5.0 + d_ports
     x0, x1 = 0.0, x_p2 + 5.0
     y0, y1 = -40.0, 0.0
     yc = -10.0
-    # The line goes half a width past each port, which is the geometry
-    # of every other board of validation/.
+    # The line goes half a width across each port. That is the geometry of
+    # all the other boards of validation/.
     line = [[x_p1 - hw, yc - hw], [x_p2 + hw, yc - hw],
             [x_p2 + hw, yc + hw], [x_p1 - hw, yc + hw]]
     ground = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     margin = 4.0
-    # The region holds the clear air AND the PML band, in the same way
-    # as `board_reader.extract`. The band is 8 cells of the mesh step,
-    # thus a model that is made by hand must leave room for it: with one
-    # margin alone the absorber stood at the edge of the board and the
-    # boards of this file had no clear air at all.
+    # The region holds the clear air AND the PML band, as in
+    # `board_reader.extract`. The band is 8 cells of the mesh step. Thus a
+    # model that a person makes must keep space for it. Before, with only
+    # one margin, the absorber was at the edge of the board. The boards of
+    # this file then had no clear air.
     pml_mm = solverenv.pml_depth(solverenv.mesh_res(F_STOP, ER, mesh))
     d_reg = margin + pml_mm + 0.05
     port = dict(layer="F.Cu", ref_layer="B.Cu", ref_layer2=None, height=None,
@@ -190,10 +189,9 @@ def solve(d_ports, mesh, root):
     py = solverenv.solver_python() or sys.executable
     log = subprocess.run([py, os.path.join(PLUGINS, "runner.py"), path,
                           outdir], capture_output=True)
-    # Read the BYTES: openEMS writes characters that are not UTF-8 on
-    # this console, and `text=True` then kills the reader thread of
-    # subprocess and gives a truncated log. `run_stability.solve` does
-    # the same.
+    # Read the BYTES. openEMS writes characters that are not UTF-8 on this
+    # console. `text=True` then stops the reader thread of subprocess, and
+    # it gives a truncated log. `run_stability.solve` does the same.
     out = log.stdout.decode("utf-8", "replace")
     err = log.stderr.decode("utf-8", "replace")
     if log.returncode != 0:
@@ -233,9 +231,9 @@ def main(mesh="coarse"):
 
     s11 = np.maximum(db(out[D_SHORT][1]), db(out[D_LONG][1]))
     alpha = (db(out[D_SHORT][2]) - db(out[D_LONG][2])) / dl_m
-    # The centre frequency at which `build()` fixes the conductivity of
-    # the substrate. The loss of the MODEL follows that value, and a
-    # real substrate of constant tan d does not.
+    # The centre frequency where `build()` sets the conductivity of the
+    # substrate. The loss of the MODEL follows that value. The loss of a
+    # substrate with a constant tan d does not.
     f_mid = 0.5 * (F_START + F_STOP)
     th_c = alpha_cond(f, W_LINE, H_SUB, ER)
     th = alpha_diel(f, W_LINE, H_SUB, ER, TAND, f0=f_mid) + th_c

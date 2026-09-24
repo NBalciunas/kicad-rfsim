@@ -1,24 +1,24 @@
-"""The guard of `runner._diverged` against a run that GROWS.
+"""The guard of `runner._diverged` against a run that INCREASES.
 
-**The rule** (B42, since 2026-09-20): a run is not stable when the
-largest |u| of the last tenth of a port trace passes `GROWTH_LIMIT`
-times the TURN of its envelope, and the turn is the smallest point of
-the envelope after its largest one. The rule of before compared the end
-with the largest |u| of the FIRST HALF, and a growth that starts late
-passed it: a trace can decay by 5 orders and grow by 3 and still end
-under its own head.
+**The rule** (B42, from 2026-09-20): a run is not stable when the largest
+|u| of the last tenth of a port trace is too large. The limit is
+`GROWTH_LIMIT` times the TURN of its envelope. The turn is the smallest
+point of the envelope after its largest point. The rule of before
+compared the end with the largest |u| of the FIRST HALF. A growth that starts late did not cause an alarm with
+that rule. A trace can decrease by a factor of 1e5 and increase by a factor
+of 1e3, and its end is then below its head.
 
-This file needs no solver run. It reads the traces that are on the disk
-and it makes four traces of its own:
+This file does not run the solver. It reads the traces that are on the
+disk, and it makes four traces of its own:
 
-1. **a ring with a high Q** that still rings at the last row;
-2. **a beat** of two modes, whose envelope has a deep null in the middle
-   and rises far above it after that null;
-3. **a resonator that builds up** and ends 3 times over the peak of the
-   excitation, which the rule of before allowed on purpose;
-4. **a growth that starts late**: the trace decays and then turns.
+1. **a ring with a high Q** that continues to ring at the last row;
+2. **a beat** of two modes. Its envelope has a deep null in the middle, and
+   it increases much above that null after it;
+3. **"a resonator that builds up"**, which ends 3 times above the peak of
+   the excitation. The rule of before accepted it on purpose;
+4. **a growth that starts late**: the trace decreases and then turns.
 
-Numbers 1 to 3 must stay QUIET and number 4 must give an ALARM.
+Numbers 1 to 3 must give NO ALARM, and number 4 must give an ALARM.
 
 Run it with the python of the solver:
 
@@ -37,17 +37,18 @@ sys.path.insert(0, PLUGINS)
 
 import runner  # noqa: E402
 
-# The directory that keeps the traces of a run that grew late. No board
-# makes such a trace since B30 closed, thus it is the only measurement
+# The directory that keeps the traces of a run that grew late. After B30
+# closed, no board makes such a trace, thus it is the only measurement
 # that can fit the limit again.
 LATE = "out_rlc_growth_late_2026-09-19"
-# The harness of B30 makes traces that grow ON PURPOSE, and so does the
-# ladder of `run_stability.py`. Neither is a run that the plugin
-# accepted, thus neither is in the population of the limit.
+# The harness of B30 makes traces that increase ON PURPOSE, and the ladder
+# of `run_stability.py` also makes them. The plugin did not accept these
+# runs, thus they are not in the population of the limit.
 #
-# **A directory whose name ends in `_tmp` is the scratch of a rig**, and
-# a rig that runs at the same time as this file writes a diverging run
-# into one of them. This file once failed for that reason alone.
+# **A directory with a name that ends in `_tmp` is the scratch of a rig.**
+# A rig that runs at the same time as this file writes a run that diverges
+# into one of them. This file stopped with a failure one time only for that
+# cause.
 SKIP = ("out_growth", LATE)
 SKIP_SUFFIX = "_tmp"
 
@@ -70,13 +71,13 @@ def _carrier(n=ROWS):
 
 
 def ring(tau_ns=400.0):
-    """A resonator with a high Q: it still rings at the last row."""
+    """A resonator with a high Q: it continues to ring at the last row."""
     t = np.arange(ROWS) * DT * 1e9
     return np.exp(-t / tau_ns) * _carrier()
 
 
 def beat(null_at=0.62, depth=4e-4):
-    """Two modes that beat: a deep null, and a rise far above it."""
+    """Two modes that beat: a deep null, and an increase much above it."""
     t = np.arange(ROWS) * DT * 1e9
     env = np.exp(-t / 900.0)
     # a null at `null_at` of the window, as deep as `depth`
@@ -86,11 +87,11 @@ def beat(null_at=0.62, depth=4e-4):
 
 
 def buildup(times=3.0):
-    """A resonator that takes energy from the pulse and ends over it.
+    """A resonator that gets energy from the pulse and ends above it.
 
-    The trace ends `times` over the peak of the excitation. The rule of
-    before allowed it on purpose, and the rule of today must allow it as
-    well: the envelope has no TURN, thus it never decayed.
+    The trace ends `times` above the peak of the excitation. The rule of
+    before accepted it on purpose, and the rule of today must also accept
+    it. The envelope has no TURN, thus it did not decrease.
     """
     n = ROWS
     i = np.arange(n)
@@ -100,10 +101,10 @@ def buildup(times=3.0):
 
 
 def late(turn_at=0.15, decay=1e-5, grow=1e5):
-    """A trace that decays, turns and then grows: the case of B42.
+    """A trace that decreases, turns and then increases: the case of B42.
 
-    The decay STOPS at the turn: a trace that keeps decaying under the
-    growth has no turn at all. The end is `grow` over the turn, and the
+    The decrease STOPS at the turn. A trace that continues to decrease
+    below the growth has no turn. The end is `grow` times the turn. The
     board of `out_rlc_growth_late_2026-09-19` gives 1.4e5 there.
     """
     i = np.arange(ROWS) / float(ROWS)
@@ -113,7 +114,7 @@ def late(turn_at=0.15, decay=1e-5, grow=1e5):
 
 
 def check_made(tmp):
-    """Give the number of failures over the four traces of this file."""
+    """Give the number of failures for the four traces of this file."""
     cases = [("a ring with a high Q", ring(), False),
              ("a beat with a deep null", beat(), False),
              ("a resonator that builds up", buildup(), False),
@@ -142,7 +143,7 @@ def check_made(tmp):
 
 
 def check_disk():
-    """Give the number of failures over the traces that are on the disk."""
+    """Give the number of failures for the traces that are on the disk."""
     bad, quiet, alarm = 0, 0, []
     for d in sorted(glob.glob(os.path.join(HERE, "out_*"))):
         for sub in [d] + sorted(glob.glob(os.path.join(d, "exc*"))):

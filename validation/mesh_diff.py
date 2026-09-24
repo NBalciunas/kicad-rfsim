@@ -1,12 +1,13 @@
-"""The mesh of every board of this folder, against the mesh of a second runner.
+"""The mesh of each board of this folder, against the mesh of a second
+runner.
 
 A change to `runner._mesh` moves the mesh lines of some boards and not of
-others, and one run of the solver costs minutes for each board. This file
-costs no run: it loads two copies of `runner.py`, calls `_mesh` of each one
-on every `out_*/model.json` of this folder, and lists each board whose
-lines move, with the lines that each copy holds alone. Run it after each
-change to a mesh rule and BEFORE the rigs: a board that this file does not
-list keeps its mesh, thus its reference number cannot move.
+others. One run of the solver costs minutes for each board. This file costs
+no run. It loads two copies of `runner.py`, and it calls `_mesh` of each
+one on each `out_*/model.json` of this folder. It lists each board with
+lines that move, with the lines that only one copy has. Run it after each
+change to a mesh rule and BEFORE the rigs. A board that this file does not
+list keeps its mesh. Thus its reference number cannot move.
 
 The second runner comes from git (HEAD by default), or from a file:
 
@@ -15,14 +16,13 @@ The second runner comes from git (HEAD by default), or from a file:
     C:\\openEMS\\venv\\Scripts\\python.exe mesh_diff.py C:\\copy\\plugins\\runner.py
 
 **The one-layer rule of `_feature_lines` is the example.** Before it,
-`_mesh` pooled the copper edges of every layer, thus an F.Cu edge and a
-B.Cu edge that stand 0.775 mm apart read as one narrow feature. Against
-the commit before that rule (the second command above), this file lists
-the two boards of the 2512 land of `run_shunt.py packages` and nothing
-else: each one holds a y line at -20.3875 mm that no copper explains, and
-the rule removes it.
+`_mesh` pooled the copper edges of all layers. Thus an F.Cu edge and a B.Cu
+edge that are 0.775 mm apart read as one narrow feature. Against the commit
+before that rule (the second command above), this file lists only the two
+boards of the 2512 land of `run_shunt.py packages`. Each one has a y line
+at -20.3875 mm that no copper causes, and the rule removes it.
 
-The file needs numpy and the `model.json` files that the rigs write. It
+The file uses numpy and the `model.json` files that the rigs write. It
 imports no CSXCAD, no openEMS and no pcbnew.
 """
 import contextlib
@@ -49,7 +49,7 @@ SAME_MM = 1e-6
 
 
 def load(path, name):
-    """Import one copy of runner.py under a module name of its own."""
+    """Import one copy of runner.py with a module name of its own."""
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -73,13 +73,13 @@ def other_runner(arg, tmp):
 
 
 def mesh_of(r, model):
-    """Give the three line lists of `model` under the runner module `r`.
+    """Give the three line lists of `model` with the runner module `r`.
 
     `res` comes from the formula of `main()`, with the constants of that
-    runner. The warnings of `_mesh` go nowhere: one warning for each
-    board hides the differences, which are what this file prints.
+    runner. The warnings of `_mesh` go nowhere. One warning for each board
+    hides the differences, and this file prints the differences.
     """
-    model = json.loads(json.dumps(model))   # neither copy sees the other
+    model = json.loads(json.dumps(model))  # the copies do not share it
     s = model["settings"]
     eps = max(d["epsilon"] for d in model["dielectric_layers"])
     res = r.C0 / s["f_stop"] / np.sqrt(eps) * 1e3 / r.RES_DIV[s["mesh"]]
@@ -88,7 +88,7 @@ def mesh_of(r, model):
 
 
 def only_in(a, b):
-    """Give the lines of `a` that have no line of `b` within SAME_MM."""
+    """Give the lines of `a` that have no line of `b` nearer than SAME_MM."""
     b = np.sort(np.asarray(b, float))
     out = []
     for v in a:

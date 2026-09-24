@@ -1,49 +1,51 @@
-"""The grid nodes that stand INSIDE the barrel of every via of this folder.
+"""The grid nodes IN the barrel of each via of this folder.
 
-openEMS makes a metal cylinder into PEC on the edges of the Yee grid
-whose NODE lies in the barrel. Thus a barrel with no node inside writes
-"Unused primitive (type: Cylinder)" and conducts nothing, and a barrel
-with ONE node is a thin wire and not a barrel. `_mesh` gives each via
-three lines on each axis, the centre and the two surfaces, and the two
-surface lines go 1 ppm in (`VIA_SURFACE`). The three are ANCHORS of
-`_merge_close`: a copper edge within `tol` of a via line moves to that
-line, where the mean of the two took the node out of the barrel before,
-and the merge keeps the higher RANK when two anchors stand that near.
+openEMS makes a metal cylinder into PEC on the edges of the Yee grid when
+their NODE is in the barrel. Thus a barrel with no node in it writes
+"Unused primitive (type: Cylinder)", and no current flows in it. A barrel
+with ONE node is a thin wire and not a barrel. `_mesh` gives each via three
+lines on each axis: the centre and the two surfaces. The two surface lines
+go 1 ppm in (`VIA_SURFACE`).
 
-This file makes the mesh of every `out_*/model.json` of this folder and
+The three lines are ANCHORS of `_merge_close`. A copper edge that is nearer
+than `tol` to a via line moves to that line. Before, the mean of the two
+moved the node out of the barrel. When two anchors are that near, the merge
+keeps the higher RANK.
+
+This file makes the mesh of each `out_*/model.json` of this folder, and it
 counts two things:
 
-  - **the axis cases.** One via on one axis is one case, thus 51 vias
-    give 102. A case HOLDS its three lines when each one stands on the
-    coordinate that `_mesh` gives it. A case that lost a line tells
-    which lines remain, in units of the radius from the centre.
-  - **the nodes.** The pairs of x and y lines whose distance from the
-    centre of the via is under its radius. That count is what the engine
-    sees, and `run_via.py` measures what it costs: a barrel of 5 nodes
-    reads +8% to +20% in inductance against Goldfarb and Pucel. A barrel
-    of 1 node reads -16% when that node stands at the AXIS of the via
-    and +54% when it stands 0.106 mm off it, thus the count alone does
-    not give the error.
+  - **the axis cases.** One via on one axis is one case, thus 51 vias give
+    102. A case HOLDS its three lines when each line is on the coordinate
+    that `_mesh` gives it. A case without a line tells which lines stay, in
+    units of the radius from the centre.
+  - **the nodes.** The pairs of x and y lines that are nearer to the centre
+    of the via than its radius. The engine sees that count. `run_via.py`
+    measures its cost: a barrel of 5 nodes reads +8% to +20% in inductance
+    against Goldfarb and Pucel. A barrel of 1 node reads -16% when that
+    node is at the AXIS of the via. It reads +54% when the node is 0.106 mm
+    off the axis. Thus the count without other data does not give the
+    error.
 
-It needs numpy and the `model.json` files that the rigs write, and it
-starts no solver: run it after a change to a mesh rule, with
-`mesh_diff.py` for the lines of the whole board.
+It uses numpy and the `model.json` files that the rigs write, and it starts
+no solver. Run it after a change to a mesh rule, with `mesh_diff.py` for
+the lines of all the board.
 
-**Today** (2026-09-21, and `test_ports.py` holds the rule): 97 of the
-102 axis cases keep their three lines, and no barrel holds fewer than 3
-nodes (5 hold 3, 40 hold 5, 4 hold 6 and 2 hold 10). The mesh that
-merged a via line with a copper edge held 76 cases, and 11 barrels of 51
-held 2 nodes. The 5 cases that lose a line are the x axis of the 0402
-and the 0603 shunt boards, where a FACE of an element box stands 0.02 mm
-from a surface line of the via: a face outranks a via, thus the via
-gives up that line and keeps its centre.
+**At this time** (2026-09-21, and `test_ports.py` holds the rule), 97 of
+the 102 axis cases keep their three lines. No barrel has fewer than 3
+nodes: 5 have 3, 40 have 5, 4 have 6 and 2 have 10. The mesh that merged a
+via line with a copper edge held 76 cases, and 11 barrels of 51 had 2
+nodes. The 5 cases that do not keep a line are the x axis of the 0402 and
+the 0603 shunt boards. There, a FACE of an element box is 0.02 mm from a
+surface line of the via. A face has a higher rank than a via. Thus the via
+removes that line and keeps its centre.
 
     C:\\openEMS\\venv\\Scripts\\python.exe via_nodes.py [-v] [revision|path]
 
-The argument names a second copy of the runner, in the way of
-`mesh_diff.py`: a git revision, or the path of a `runner.py`. With no
-argument the file measures the runner of this checkout. `-v` lists every
-case that lost a line, with the board that holds it.
+The argument names a second copy of the runner, as in `mesh_diff.py`: a git
+revision, or the path of a `runner.py`. With no argument, the file measures
+the runner of this checkout. `-v` lists each case that does not keep a
+line, with the board of that case.
 """
 import glob
 import json
@@ -58,7 +60,7 @@ import mesh_diff as md  # noqa: E402  (it holds the loader and the mesh call)
 
 
 def inside(lines, centre, radius):
-    """Give the lines inside the barrel, in units of the radius."""
+    """Give the lines in the barrel, in units of the radius."""
     return sorted((v - centre) / radius for v in lines
                   if abs(v - centre) < radius)
 
@@ -74,8 +76,8 @@ def main(*argv):
         src = (md.other_runner(rest[0], tmp) if rest
                else os.path.join(md.PLUGINS, "runner.py"))
         r = md.load(src, "runner_under_test")
-    # A runner from before the nudge of 2026-09-16 has no VIA_SURFACE,
-    # and its surface lines stand ON the barrel.
+    # A runner from before the nudge of 2026-09-16 has no VIA_SURFACE, and
+    # its surface lines are ON the barrel.
     surface = getattr(r, "VIA_SURFACE", 1.0)
 
     cases, held, lost, nodes, rows = 0, 0, {}, {}, []

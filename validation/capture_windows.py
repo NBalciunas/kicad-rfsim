@@ -1,25 +1,26 @@
-"""Capture the windows of the GUI to PNG files, with no display needed.
+"""Capture the windows of the GUI to PNG files, with no display.
 
-A capture of 2026-08-04 found a defect that the eye did not: the
-sequence of the pictures showed the package choice fall back to "No
-parasitics" after an edit, and a person who clicks reads that as a thing
-that they did. That harness stayed in the scratchpad of a session, thus
-the next change to the dialog had nothing to compare against. This file
-is that harness, in `validation/`.
+A capture of 2026-08-04 found a defect that the eye did not find. The
+sequence of the pictures showed the package choice go back to "No
+parasitics" after an edit. A person who clicks thinks that they did that.
+That harness stayed in the scratchpad of a session. Thus the subsequent
+change to the dialog had nothing to compare against. This file is that
+harness, in `validation/`.
 
 It is a TOOL and not a test: it writes pictures and asserts nothing.
-`test_dialog.py` and `test_views.py` hold the assertions. Use this when
-you change the LAYOUT, which no assertion covers: capture before the
+`test_dialog.py` and `test_views.py` hold the assertions. Use this when you
+change the LAYOUT, because no assertion examines it. Capture before the
 change and after it, and look at the two sets.
 
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" capture_windows.py [outdir]
 
-**Use `PrintWindow` and not a `ScreenDC` blit.** PrintWindow takes the
-content of the window itself, thus another window cannot cover it and
-the position on the screen has no effect. Two cautions: `Show()` the
-window and do some rounds of `wx.Yield()` and `Update()` first (one
-`Yield` is not enough), and a window that a handler HID gives a blank
-picture.
+**Use `PrintWindow` and not a `ScreenDC` blit.** PrintWindow gets the
+content of the window itself. Thus a different window cannot be on top of
+it, and the position on the screen has no effect. Two warnings:
+
+- `Show()` the window and do some rounds of `wx.Yield()` and `Update()`
+  first. One `Yield` is not sufficient.
+- A window that a handler HID gives an empty picture.
 """
 import ctypes
 import os
@@ -42,12 +43,12 @@ PW_RENDERFULLCONTENT = 2
 def shot(win, path):
     """Write the content of `win` to `path` as a PNG."""
     win.Show()
-    for _ in range(6):     # one Yield is not enough: the canvas needs more
+    for _ in range(6):  # one Yield is not sufficient for the canvas
         wx.Yield()
         win.Update()
     u = ctypes.windll.user32
-    # The argtypes are necessary: a handle is larger than an int, and
-    # ctypes stops with "int too long to convert" without them.
+    # The argtypes are necessary: an HWND is larger than an int.
+    # Without them, ctypes stops with "int too long to convert".
     u.PrintWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
     size = win.GetSize()
     bmp = wx.Bitmap(size.GetWidth(), size.GetHeight())
@@ -80,7 +81,8 @@ def unknown(ref):
 
 
 def capture_dialog(out):
-    """The settings dialog, in the states that a layout change moves."""
+    """The settings dialog, in the conditions that a change of the layout
+    moves."""
     print("the settings dialog:")
     cases = [
         ("dialog-1-part", []),
@@ -91,8 +93,8 @@ def capture_dialog(out):
         d = dialog(extra)
         shot(d, os.path.join(out, name + ".png"))
         d.Destroy()
-    # The state that the capture of 2026-08-04 found that defect in:
-    # an edit of the ESL must move the row to "Custom".
+    # The condition where the capture of 2026-08-04 found that defect: an
+    # edit of the ESL must move the row to "Custom".
     d = dialog()
     _, _, ch, esl, _ = d.para_rows[0]
     ch.SetSelection(ch.GetStrings().index("0402 Package"))
@@ -111,7 +113,7 @@ def capture_dialog(out):
 
 
 def capture_results(out):
-    """Every view of the results window."""
+    """All the views of the results window."""
     if not os.path.isfile(RESULTS):
         print("the results window: SKIPPED (run `run_headless.py coarse msl`)")
         return
@@ -123,8 +125,8 @@ def capture_results(out):
         f._plot()
         wx.Yield()
         safe = "".join(c if c.isalnum() else "-" for c in name).strip("-")
-        # The figure holds the picture, thus savefig needs no window at
-        # all and it gives the same result on every machine.
+        # The figure holds the picture. Thus savefig does not use a window,
+        # and it gives the same result on all machines.
         f.figure.savefig(os.path.join(out, "view-%02d-%s.png" % (i, safe)),
                          dpi=90)
     print("   wrote %d views with figure.savefig"

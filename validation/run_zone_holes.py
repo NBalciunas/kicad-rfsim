@@ -1,26 +1,26 @@
 """Push a ground zone that has a HOLE through the SOLVER.
 
-Backlog item 5, and the gap that "What is not tested" held the longest:
-the extraction from a zone with holes is tested (the demo board with 6
-layers and 444 vias), and no such polygon ever reached openEMS.
-`Fracture` changes a hole into a slit with no width, and the value of
-that trick was an ASSUMPTION:
+Backlog item 5. Of the gaps in "What is not tested", it stayed there the
+longest. The extraction from a zone with holes has a test (the demo board
+with 6 layers and 444 vias). But no such polygon went to openEMS.
+`Fracture` changes a hole into a slit with no width. Nobody knew if that
+procedure is correct:
 
-- a slit that CLOSES joins the copper across the hole. The plane is then
-  solid, the hole does nothing, and every number looks correct;
-- a slit that OPENS too far cuts the plane in two, and the return
-  current goes around the cut.
+- a slit that CLOSES attaches the copper across the hole. The plane is then
+  solid, the hole has no effect, and all numbers look correct;
+- a slit that OPENS too far cuts the plane in two, and the return current
+  goes around the cut.
 
-**A hole at the SIDE of the line cannot tell the two apart.** It moves
-the impedance by less than the scatter of the mesh, thus a slit that
-closed and a slit that worked give the same number. This board puts a
-void of 8 x 6 mm DIRECTLY under the line, where the return current
-flows: a working slit must then raise the impedance by a large step,
-and a closed slit gives no step at all.
+**A hole at the SIDE of the line cannot show the difference.** It moves the
+impedance by less than the scatter of the mesh. Thus a slit that closed and
+a slit that is correct give the same number. This board puts a void of 8 x
+6 mm DIRECTLY below the line, where the return current flows. A slit that
+is correct must then increase the impedance by a large step. A closed slit
+gives no step.
 
-The measurement is the DIFFERENCE of two runs of the same board, in the
-same way as `run_shunt.py`: `void=True` and `void=False`. Everything
-else is identical, the three vias of the other net included.
+The measurement is the DIFFERENCE of two runs of the same board, as in
+`run_shunt.py`: `void=True` and `void=False`. All the other parts are the
+same, and that includes the three vias of the other net.
 
 Run it with the python of KiCad 10:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_zone_holes.py [mesh]
@@ -41,24 +41,26 @@ import make_test_board  # noqa: E402
 import solverenv  # noqa: E402
 
 # **The observable is the REFLECTION, and not Z0.** A de-embedded port
-# measures the line where the PORT is, and the void is in the middle of
-# the line: the probes of the port never pass over it, thus Z0 moves by
-# under 1 ohm whether the void works or not. The void is a discontinuity
-# in the middle of a matched line, and a discontinuity reflects.
+# measures the line where the PORT is, and the void is in the middle of the
+# line. The probes of the port do not go above it. Thus Z0 moves by less
+# than 1 ohm, with or without a void that is correct. The void is a
+# discontinuity in the middle of a matched line, and a discontinuity causes
+# a reflection.
 #
 # Measured on 2026-08-05 at the coarse preset: the solid pour gives S11
-# −11.5 dB and the void gives −3.3 dB. −3.3 dB is 47% of the power back.
-# A slit that CLOSED would leave the plane solid, thus S11 would not
-# move at all. 5 dB is far above the scatter of this board and far under
-# the step that the run gives.
+# −11.5 dB, and the void gives −3.3 dB. −3.3 dB is 47% of the power back. A
+# slit that CLOSED keeps the plane solid, and S11 then does not move. 5 dB
+# is much above the scatter of this board, and much below the step that the
+# run gives.
 DS11_MIN = 5.0
-# The plane must still carry the return current around the void. A slit
-# that opened too far would take the copper away and break the line: the
-# power would then go nowhere, and not into the reflection.
+# The plane must continue to have the return current around the void. A
+# slit that opened too far removes the copper and cuts the line. The power
+# then goes nowhere, and not into the reflection.
 S21_MIN = -4.0
 # The copper that the void removes, against the 8 x 6 mm of the outline.
-# This guards the size of the slit in the EXTRACTION: too little and the
-# filler kept no void, too much and the slit takes copper with it.
+# This guards the dimension of the slit in the EXTRACTION. If it is too
+# small, the filler kept no void. If it is too large, the slit removes
+# copper with it.
 AREA_MIN, AREA_MAX = 40.0, 56.0
 
 
@@ -118,22 +120,22 @@ def main(mesh="coarse"):
     void = run(mesh, True)
 
     fails = []
-    # 1. The void must be IN the extracted model, and it must be the
-    #    RIGHT size. The filler of KiCad decides this, and a board with
-    #    no void would make the whole test meaningless.
+    # 1. The void must be IN the extracted model, and it must have the
+    #    CORRECT dimensions. The filler of KiCad sets this. With no void on
+    #    the board, this test gives no data.
     lost = solid["area"] - void["area"]
     print("\n   the void removes %.1f mm2 of copper (8 x 6 mm = 48)" % lost)
     if not AREA_MIN <= lost <= AREA_MAX:
         fails.append("the pour lost %.1f mm2, outside %g to %g. The filler "
                      "kept no void, or the slit took copper with it."
                      % (lost, AREA_MIN, AREA_MAX))
-    # 2. No primitive may go unused. That is the signal of the via defect
-    #    of 2026-08-03 (10): a polygon that does not become metal.
+    # 2. No primitive can stay without a use. That is the sign of the via
+    #    defect of 2026-08-03 (10): a polygon that does not become metal.
     for r, tag in ((solid, "solid"), (void, "void")):
         if r["unused"]:
             fails.append("%s: openEMS did not use %d primitive(s): %s"
                          % (tag, len(r["unused"]), r["unused"][0]))
-    # 3. The DIFFERENCE, in the reflection. A slit that closed leaves the
+    # 3. The DIFFERENCE, in the reflection. A slit that closed keeps the
     #    plane solid, thus S11 does not move.
     ds11 = void["s11"] - solid["s11"]
     print("   S11 goes from %.1f dB to %.1f dB: a step of %+.1f dB"
@@ -148,7 +150,8 @@ def main(mesh="coarse"):
             "true void gives. The slit of the hole CLOSED: the copper "
             "joined across it and the plane is solid in the model."
             % (ds11, DS11_MIN))
-    # 4. The plane must still carry the return current AROUND the void.
+    # 4. The plane must continue to have the return current AROUND the
+    #    void.
     if void["s21"] < S21_MIN:
         fails.append("the board with the void gives S21 %.1f dB: the power "
                      "goes nowhere, thus the slit took the plane away "

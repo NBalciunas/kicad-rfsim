@@ -1,63 +1,62 @@
-"""What makes the FAST growth of a lumped inductor, on ONE variable.
+"""The cause of the FAST growth of a lumped inductor, on ONE variable.
 
-A lumped inductor on the reference board grows in two different ways, and
-an earlier measurement separated them:
+A lumped inductor on the reference board increases in two different
+procedures. An earlier measurement found the difference between them:
 
-  - a **FAST** growth with an e-fold near 0.4 ns, which the runner
-    refuses. `_feature_lines` reads the gap between the two pads of a
-    part as a narrow copper feature and puts a line at the middle of it.
-    That line falls INSIDE the box of the element, thus the element
-    covers 2 cells in series where it could cover 1;
-  - a **SLOW** mode with an e-fold near 6 ns, which no timestep corrects
-    and which stays after the fast one is gone.
+  - a **FAST** growth with an e-fold near 0.4 ns, which the runner refuses.
+    `_feature_lines` reads the gap between the two pads of a part as a
+    narrow copper feature, and it puts a line at the middle of it. That
+    line is IN the box of the element. Thus the element is on 2 cells in
+    series, and 1 cell is possible;
+  - a **SLOW** mode with an e-fold near 6 ns. No timestep corrects it, and
+    it stays after the fast mode goes away.
 
-**This file no longer separates the two counts, and that is expected
-since 2026-09-20.** The mesh moved the absorber away from the copper
-(B30) and the fast mode went with it. Five boards were tried for one
-that still carries it — the reference, a board of 3.2 mm, a board of
-6.4 mm, a box of 1.0 mm, and the thick board with the large box — and
-none of them separates 1 cell from 2 (B51). The rule stands on the
-measurement of 2026-09-16 alone.
+**This file does not show the difference between the two counts at this
+time. After 2026-09-20, that is the correct result.** The mesh moved the
+absorber away from the copper (B30), and the fast mode went away with it.
+B51 tried five boards to find one that continues to have the mode. These
+were the reference, a board of 3.2 mm, a board of 6.4 mm, a box of 1.0 mm,
+and the thick board with the large box. No board shows a difference between
+1 cell and 2 (B51). The rule is only from the measurement of 2026-09-16.
 
-**The rule is in the code since 2026-09-16**: `_feature_lines` takes
-the gap of an element, on its own layer and along its own axis, and it
-gives that gap NO line. Thus the box holds 1 cell in series, and this
-file is the regression test of that rule: the row "the mesh that ships"
-must behave as the row of 1 cell.
+**The code holds the rule from 2026-09-16.** `_feature_lines` gets the gap
+of an element, on its own layer and along its own axis. It gives that gap
+NO line. Thus the box has 1 cell in series, and this file is the regression
+test of that rule. The row "the mesh that ships" must give the same result
+as the row of 1 cell.
 
-**A box variant cannot name the rule.** A matrix that changed the BOX
-said that 4 cells in series are as good as 1, thus "more cells in series
-is worse" is not the rule. Every box variant moves more than one thing:
-the length of the box sets `tol` (`_mesh` takes 0.25 x min(box)), thus it
-moves the mesh of the WHOLE board, and it moves the physical gap as
-well.
+**A change of the box cannot find the rule.** A matrix that changed the BOX
+showed that 4 cells in series are as good as 1. Thus "more cells in series
+is worse" is not the rule. Each change of the box moves more than one
+value. The length of the box sets `tol` (`_mesh` uses 0.25 x min(box)).
+Thus it moves the mesh of ALL the board, and it also moves the physical
+gap.
 
-**This file moves ONE thing.** It holds the box, `tol` and the board, and
-it changes the count of mesh lines INSIDE the box alone:
+**This file moves ONE value.** It keeps the box, `tol` and the board. It
+changes only the count of mesh lines IN the box:
 
-    N cells in series  <->  N-1 lines inside the box, equally spaced
+    N cells in series  <->  N-1 lines in the box, with equal distances
 
-A copy of `plugins/` carries that change, thus the code that ships is not
-touched. The copy reads two variables of the environment:
+A copy of `plugins/` has that change, thus the code that ships does not
+change. The copy reads two variables of the environment:
 
-    RFSIM_LE_CELLS   force exactly N cells in series (0: leave the mesh)
+    RFSIM_LE_CELLS   N cells in series (0: no change to the mesh)
     RFSIM_LE_CAPS    "0" gives the element `caps=False`
 
-Two stages, and each one gives the growth of the trace:
+Two steps, and each one gives the growth of the trace:
 
-  1. `ladder`  - the count of cells in series: 1, 2, 3, 4 and 6, at a
-     FIXED box and `tol`. This is the measurement that names the rule.
-  2. `matrix`  - the three rows that an earlier session did not run:
-     er 2.2, er 10.2 and caps=False, each one with the line and without
-     it.
+  1. `ladder`  - the count of cells in series: 1, 2, 3, 4 and 6, with the
+     same box and `tol`. This is the measurement that finds the rule.
+  2. `matrix`  - the three rows that an earlier session did not run: er
+     2.2, er 10.2 and caps=False, each one with the line and without it.
 
 Run it with the python of KiCad 10 or with the python of the solver. It
-needs `out_rlc_L1_coarse/model.json`, thus run `run_rlc.py coarse` first:
+uses `out_rlc_L1_coarse/model.json`, thus run `run_rlc.py coarse` first:
 
     C:\\openEMS\\venv\\Scripts\\python.exe run_le_cells.py [ladder|matrix|all]
 
 Each run is short (about 4 ns of simulated time), because the fast growth
-reaches its turn inside 2 ns. The slow mode needs tens of nanoseconds and
+gets to its turn in 2 ns. The slow mode must have tens of nanoseconds, and
 this file does not measure it.
 """
 import os
@@ -72,43 +71,43 @@ sys.path.insert(0, HERE)
 import runner  # noqa: E402
 import run_stability as rs  # noqa: E402
 
-# The copy of `plugins/` that carries the hook. It goes beside the
-# output, thus a run does not touch the code that ships.
+# The copy of `plugins/` with the hook. It goes adjacent to the output,
+# thus a run does not touch the code that ships.
 COPY = os.path.join(HERE, "out_le_cells_plugins")
 
-# **The TURN of the trace names the fast mode, and the e-fold does not.**
-# A board with the fast growth turns at about 2 ns. A board without it
-# decays to the end of the window and its turn lands near that end. Thus
-# a turn under this limit is the fast mode.
+# **The TURN of the trace finds the fast mode, and the e-fold does not.** A
+# board with the fast growth turns at about 2 ns. A board without it
+# decreases to the end of the window, and its turn is near that end. Thus a
+# turn that is less than this limit is the fast mode.
 #
 # Do NOT read the growth column of an ACCEPTED row as the slow mode.
-# `envelope` fits the segments AFTER the turn, thus a turn that lands
-# near the end of the window leaves 3 or 4 segments for the fit and the
-# slope that comes out is noise. The slow mode needs a window of tens of
-# nanoseconds, which `run_stability.py slow` carries.
+# `envelope` fits the segments AFTER the turn. When a turn is near the end
+# of the window, only 3 or 4 segments stay for the fit. The slope that
+# comes out is then noise. The slow mode must have a window of tens of
+# nanoseconds, and `run_stability.py slow` has such a window.
 FAST_TURN_NS = 4.0
-# ...and the growth of that row must be FAST as well. The e-fold of the
-# fast mode is 0.3 to 0.5 ns and the e-fold of the slow mode is about
-# 6 ns, thus a slope of 1 /ns stands between them with a factor of 6 at
-# each side. **The turn alone is not enough**: a row that only DECAYS
-# turns where its trace reaches the floor, and that point moves with the
-# timestep. At the factor of a 10 nH inductor with `LE_STAB_MARGIN` =
-# 0.5 the row of 3 cells turns at 3.34 ns with an e-fold of 8.2 ns, thus
-# it decays and the runner accepts it.
+# ...and the growth of that row must also be FAST. The e-fold of the fast
+# mode is 0.3 to 0.5 ns, and the e-fold of the slow mode is about 6 ns.
+# Thus a slope of 1 /ns is between them, with a factor of 6 at each side.
+# **The turn without the slope is not sufficient.** A row that only
+# DECREASES turns where its trace touches the floor, and that point moves
+# with the timestep. At the factor of a 10 nH inductor with
+# `LE_STAB_MARGIN` = 0.5, the row of 3 cells turns at 3.34 ns with an
+# e-fold of 8.2 ns. Thus it decreases, and the runner accepts it.
 FAST_SLOPE = 1.0
 
-# The steps of one run, in the units of `run_stability.STEPS`: `build()`
-# raises the count by 1/factor, thus this is the SIMULATED time and not
-# the work. **6000 is too few, and the reason is not the physics.**
-# openEMS writes the port trace every quarter of the Nyquist rate, thus
-# 6000 steps at the factor of a 10 nH inductor gives 193 rows and
-# `envelope` asks for 200. 12000 gives about 8 ns and 385 rows: the fast
-# growth turns at about 2 ns, thus the window holds the turn and 6
-# e-folds of it, and a board with no fast growth still only DECAYS over
-# that window, because the slow mode turns at about 8 ns.
+# The steps of one run, in the units of `run_stability.STEPS`. `build()`
+# multiplies the count by 1/factor. Thus this is the SIMULATED time and not
+# the work. **6000 is too small, and the cause is not the physics.**
+# openEMS writes the port trace at each quarter of the Nyquist rate. Thus
+# 6000 steps at the factor of a 10 nH inductor give 193 rows, and
+# `envelope` must have 200. 12000 gives about 8 ns and 385 rows. The fast
+# growth turns at about 2 ns, thus the window has the turn and 6 e-folds of
+# it. A board with no fast growth only DECREASES in that window, because
+# the slow mode turns at about 8 ns.
 STEPS = 12000
 
-# The hook. `build()` looks up `_mesh` as a global at the moment of the
+# The hook. `build()` finds `_mesh` as a global at the moment of the
 # call, thus a new global of that name replaces it.
 HOOK = '''
 
@@ -139,7 +138,7 @@ if _LE_CELLS:
 
 
 def make_copy():
-    """Give a copy of `plugins/` that carries the hook."""
+    """Give a copy of `plugins/` with the hook."""
     src = os.path.join(os.path.dirname(HERE), "plugins")
     shutil.rmtree(COPY, ignore_errors=True)
     shutil.copytree(src, COPY,
@@ -147,20 +146,20 @@ def make_copy():
     path = os.path.join(COPY, "runner.py")
     with open(path, "r", newline="") as fh:
         text = fh.read()
-    # `caps=True` stands at the two `AddLumpedElement` calls of
-    # `build()`: the series RLC part and every other type. The hook
-    # takes both, thus a board of either kind obeys RFSIM_LE_CAPS.
+    # `caps=True` is at the two `AddLumpedElement` calls of `build()`: the
+    # series RLC part and all the other types. The hook changes the two.
+    # Thus a board of the two types obeys RFSIM_LE_CAPS.
     if text.count("caps=True") != 2:
         raise SystemExit("runner.py holds %d 'caps=True', expected 2"
                          % text.count("caps=True"))
     text = text.replace(
         "caps=True",
         'caps=(os.environ.get("RFSIM_LE_CAPS", "1") != "0")')
-    # **The hook goes BEFORE the `__main__` block and not at the end of
-    # the file.** `runner.py` calls `main()` from that block, thus a hook
-    # under it replaces `_mesh` after the whole run is over and every row
-    # of the matrix then gives the SAME number. That failure is silent:
-    # the rows look like a result.
+    # **The hook goes BEFORE the `__main__` block and not at the end of the
+    # file.** `runner.py` calls `main()` from that block. Thus a hook below
+    # it replaces `_mesh` after all the run is complete. All rows of the
+    # matrix then give the SAME number. That failure gives no message: the
+    # rows look like a result.
     mark = '\nif __name__ == "__main__":'
     if text.count(mark) != 1:
         raise SystemExit("runner.py holds %d '__main__' blocks, expected 1"
@@ -173,10 +172,10 @@ def make_copy():
 
 
 def selftest():
-    """Stop unless the hook really moves the mesh. No solver run.
+    """Stop if the hook does not move the mesh. No solver run.
 
     A hook that does nothing gives a full matrix of equal rows, and such
-    a matrix reads as a measurement. Thus the file proves the hook first.
+    a matrix reads as a measurement. Thus the file checks the hook first.
     """
     code = (
         "import json,os,sys;import numpy as np;import runner as R\n"
@@ -223,7 +222,7 @@ def measure(src, lnh, cells=0, caps=True, er=None, steps=None, tmp=None):
 
 
 def efold(slope):
-    """Give the e-fold time of a growth, or give None for a decay."""
+    """Give the e-fold time of a growth, or give None for a decrease."""
     return (1.0 / slope) if slope and slope > 0 else None
 
 
@@ -277,12 +276,12 @@ def matrix_stage(src, tmp, lnh=10):
 
 
 def verdict(ladder):
-    """Say whether the count of cells in series names the fast growth.
+    """Tell if the count of cells in series causes the fast growth.
 
-    A row carries the fast mode when the runner refused it for a growth,
-    or when its trace turns early AND grows fast after the turn. The
-    verdict itself keys on three rows: 2 cells carry the mode, and 1 cell
-    and the mesh that ships do not.
+    A row has the fast mode when the runner refused it for a growth. It
+    also has the fast mode when its trace turns at a short time AND
+    increases fast after the turn. The decision uses three rows: 2 cells
+    have the mode, and 1 cell and the mesh that ships do not.
     """
     fast = [n for n, cause, turn, slope in ladder
             if cause == "growth"

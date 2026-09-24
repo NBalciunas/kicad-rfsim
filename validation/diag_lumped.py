@@ -1,12 +1,11 @@
 """Why does the simulation not include my R/L/C part as a lumped element?
 
-For each R*/L*/C* footprint, this tool obeys the tests of
-_lumped_elements in sequence. It shows the first test that refuses the
-part. Several tests are quiet in usual operation, thus this tool is the
-way to see them.
+For each R*/L*/C* footprint, this tool obeys the tests of _lumped_elements
+in sequence. It shows the first test that refuses the part. Some tests give
+no message in usual operation. This tool shows them.
 
-To examine the LIVE board, together with the changes that you did not
-save, put these lines into Tools > Scripting Console of pcbnew:
+To examine the LIVE board, together with the changes that you did not save,
+put these lines into Tools > Scripting Console of pcbnew:
 
     import sys; sys.path.insert(0, r"<this folder>")
     import diag_lumped; diag_lumped.report()
@@ -29,12 +28,12 @@ _ATTR = {getattr(pcbnew, n): n for n in dir(pcbnew)
 
 
 def report(board=None, margin_mm=4.0, f_stop=6e9, mesh="coarse"):
-    """Show the result of each test for every R*/L*/C* footprint.
+    """Show the result of each test for all R*/L*/C* footprints.
 
     The domain is the board plus `margin_mm` of clear air plus the PML
-    band, and the band is 8 cells of the mesh step. Thus `f_stop` and
-    `mesh` move the region as well, and the default values are the
-    default values of the dialog.
+    band. The band is 8 cells of the mesh step. Thus `f_stop` and `mesh`
+    also move the region. The default values are the default values of the
+    dialog.
     """
     board = board or pcbnew.GetBoard()
     out = print

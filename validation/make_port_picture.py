@@ -1,24 +1,24 @@
-"""Draw the geometry of a lumped port for the README.
+"""Make a picture of the geometry of a lumped port for the README.
 
-The documents did not show WHERE a port is, and a reviewer of
-2026-08-03 assumed a lumped port at the EDGE of the substrate on B.Cu.
-It is at a PAD that the user selects, and it drives that pad against the
-adjacent copper layer.
+The documents did not show WHERE a port is. Thus a reviewer on 2026-08-03
+thought that a lumped port is at the EDGE of the substrate on B.Cu. It is
+at a PAD that the user selects. It excites that pad against the adjacent
+copper layer.
 
-The numbers come from `runner._port_geometry` (the `else` branch) and
-from `openEMS.ports.LumpedPort`, and NOT from memory:
+The numbers come from `runner._port_geometry` (the `else` branch) and from
+`openEMS.ports.LumpedPort`, and NOT from memory:
 
     start = [x - length/2, y - width/2, z_ref]
     stop  = [x + length/2, y + width/2, z_top]
 
-- In x and y the box is the FULL pad, from `pad.GetBoundingBox()`.
-- In z it goes through the whole substrate, from the plane of the
-  reference layer up to the plane of the layer of the pad.
-- The feed resistor and the excitation fill the WHOLE box; the voltage
-  probe is one line at the centre; the current probe is a horizontal
-  plane at the mid-height.
+- In x and y, the box is the FULL pad, from `pad.GetBoundingBox()`.
+- In z, it goes through all the substrate, from the plane of the reference
+  layer up to the plane of the layer of the pad.
+- The feed resistor and the excitation fill ALL the box. The voltage probe
+  is one line at the centre. The current probe is a horizontal plane at the
+  middle height.
 
-Run it with the python of KiCad 10 (it needs matplotlib only):
+Run it with the python of KiCad 10 (it uses only matplotlib):
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" make_port_picture.py
 """
 import os
@@ -43,7 +43,7 @@ SUB = "#dfe6b0"     # the substrate
 
 
 def side_view(ax):
-    """The z of the port: the WHOLE substrate, under the pad."""
+    """The z of the port: ALL the substrate, below the pad."""
     ax.add_patch(Rectangle((-4.4, 0), 13.4, H_SUB, facecolor=SUB,
                            edgecolor="#9aa668", zorder=0))
     ax.text(8.8, H_SUB / 2, "substrate", fontsize=8, ha="right",
@@ -55,10 +55,10 @@ def side_view(ax):
     ax.add_patch(Rectangle((PAD, H_SUB), 6.9, 0.11, facecolor=CU_PALE,
                            edgecolor="none"))
 
-    # The port box fills the substrate under the pad.
+    # The port box fills the substrate below the pad.
     ax.add_patch(Rectangle((0, 0), PAD, H_SUB, facecolor="lime", alpha=0.32,
                            edgecolor="green", lw=1.8, zorder=3))
-    # The excitation and the 50 ohm feed resistor fill the whole box.
+    # The excitation and the 50 ohm feed resistor fill all the box.
     for k in range(3):
         ax.add_patch(FancyArrow(0.5 + k * 0.5, H_SUB - 0.18, 0,
                                 -(H_SUB - 0.42), width=0.012,

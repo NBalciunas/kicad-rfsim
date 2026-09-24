@@ -2,46 +2,46 @@
 geometry.
 
 `runner._time_step_factor` gives `LE_STAB_MARGIN / sqrt(L[nH])`. The law
-comes from ONE geometry (the board of `run_rlc.py` at the coarse preset),
-and the question that this file answers is what its MARGIN is on a board
-that is not that one.
+comes from ONE geometry (the board of `run_rlc.py` at the coarse preset).
+This file finds its MARGIN on a board that is not that one.
 
 Run it with the python of KiCad 10, which starts the venv of the solver
 itself:
 
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_stability.py
 
-**The file measures two different failures, and it says which.**
+**The file measures two different failures, and it tells which one.**
 
-1. **The ladder** (`boundary`) finds the largest factor at which the run
-   does not blow up FAST. Each run is short (`STEPS` timesteps, with the
-   end criteria off), and the matrix takes about 15 minutes.
-2. **The slow stage** (`survival`) answers the question that the ladder
-   cannot: a board whose mesh holds a column of REFINED cells also
-   carries a mode that grows with an e-fold of some nanoseconds and that
-   **no timestep corrects**. The element does not make that mode and the
-   break in the copper does not make it either: the PML that stands near
-   the copper in z gives the energy, and the fine cells that a gap, a
-   narrow track or an element box puts into the grid let it stand. The
-   same board with NO element grows with an e-fold of 6.9 ns against
-   14.1 ns at 1 nH, and the same board with no fine cell there decays
-   for 120 ns. The mode needs tens of nanoseconds to appear, thus a
-   ladder of 6000 steps calls such a board STABLE. The slow stage runs
-   the model at the factor that the RULE gives, long enough to pass the
-   turn of the trace, and it compares the time of that turn with the
-   time at which a NORMAL run meets its end criteria. That ratio is the
-   margin that a user really has.
+1. **The ladder** (`boundary`) finds the largest factor where the run does
+   not diverge FAST. Each run is short (`STEPS` timesteps, with the end
+   criteria off), and the matrix is about 15 minutes long.
+2. **The slow step** (`survival`) gives the answer that the ladder cannot
+   give. Some boards have a mesh with a column of REFINED cells. Such a
+   board also has a mode that increases with an e-fold of some nanoseconds,
+   and **no timestep corrects it**. The element does not make that mode,
+   and the break in the copper also does not make it. The PML near the
+   copper in z gives the energy. The small cells of a gap, a narrow track
+   or an element box let the mode stay.
 
-This is not a test for every change. Run it again when you change
-`LE_STAB_MARGIN`, `_time_step_factor`, or a mesh rule that moves the
-cells at a lumped element.
+   The same board with NO element increases with an e-fold of 6.9 ns,
+   against 14.1 ns at 1 nH. The same board with no small cell there
+   decreases for 120 ns. The mode comes into view only after tens of
+   nanoseconds. Thus a ladder of 6000 steps calls such a board STABLE.
+   The slow step runs the model at the factor that the RULE gives, and
+   it runs it after the turn of the trace. It compares the time of that
+   turn with the time when a USUAL run gets to its end criteria. That
+   ratio is the margin of a user.
 
-**What the matrix varies, and why.** The mesh preset alone is not
-enough: the two faces of an element box are anchored mesh lines with
-nothing between them, thus the BOX sets the smallest cell of the board
-as soon as the preset becomes coarse, and the coarse preset and the
-medium one then give the same Courant step. The box and the thickness of
-the board are the two things that do move it.
+This is not a test for each change. Run it again when you change
+`LE_STAB_MARGIN`, `_time_step_factor`, or a mesh rule that moves the cells
+at a lumped element.
+
+**What the matrix changes, and why.** The mesh preset without other changes
+is not sufficient. The two faces of an element box are anchors of the mesh
+with no lines between them. Thus the BOX sets the smallest cell of the
+board when the preset becomes coarse. The coarse preset and the medium
+preset then give the same Courant step. The box and the thickness of the
+board are the two values that move it.
 """
 import glob
 import json
@@ -59,50 +59,51 @@ sys.path.insert(0, PLUGINS)
 import runner  # noqa: E402
 import solverenv  # noqa: E402
 
-# The steps of ONE run of the ladder. `build()` raises the count by
-# 1/factor, thus every rung covers the same SIMULATED time: 6000 steps
-# is about 4 ns on the reference board. That is enough for the FAST
-# divergence, which reaches NaN in some hundreds of steps, and it is far
-# too short for the slow mode. The slow stage below carries that one.
+# The steps of ONE run of the ladder. `build()` multiplies the count by
+# 1/factor. Thus each rung has the same SIMULATED time: 6000 steps is about
+# 4 ns on the reference board. That is sufficient for the FAST divergence,
+# which gets to NaN in some hundreds of steps. It is much too short for the
+# slow mode. The slow step below measures that mode.
 STEPS = 6000
-# The ladder of the bisection. Each step is about 1.4 times the next
-# one, thus a boundary is exact to one step and no further.
+# The ladder of the bisection. Each step is about 1.4 times the next one.
+# Thus a boundary is accurate to one step, and not more.
 LADDER = (1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.12, 0.09, 0.06, 0.04)
 L_NH = (1, 10, 100)
-# The margin that the rule must keep on EVERY geometry of the matrix.
-# The bare law 1/sqrt(L) gives about 0.9 on the thickest board, thus no
-# margin at all; with LE_STAB_MARGIN = 0.5 that geometry keeps 1.8x. One
-# ladder step is 1.4, thus this limit is the resolution of the
-# measurement.
+# The margin that the rule must keep on EACH geometry of the matrix. The
+# bare law 1/sqrt(L) gives about 0.9 on the thickest board, thus no margin.
+# With LE_STAB_MARGIN = 0.5, that geometry keeps 1.8x. One ladder step is
+# 1.4, thus this limit is the resolution of the measurement.
 MARGIN_MIN = 1.35
 
-# ---------------------------------------------------------- the slow stage
-# The steps of a run of the slow stage, in the same units as STEPS: the
+# ----------------------------------------------------------- the slow step
+#
+# The steps of a run of the slow step, in the same units as STEPS. The
 # simulated time is STEPS_SLOW times the Courant step of the board.
-# 45000 steps is about 30 ns on the reference board, and the slow mode
-# turns at about 5 ns there and grows with an e-fold near 5 ns. Thus the
-# window holds the turn and about 5 e-folds after it, which is enough to
-# separate a growth from the noise of the decay.
+# 45000 steps is about 30 ns on the reference board. There, the slow mode
+# turns at about 5 ns, and it increases with an e-fold near 5 ns. Thus the
+# window has the turn and about 5 e-folds after it. That is sufficient to
+# find the difference between a growth and the noise of the decrease.
 STEPS_SLOW = 45000
-# The inductances of the slow stage. 100 nH is not here: its factor is
-# 0.07, thus `build()` gives it 14 times more steps than 1 nH for the
-# same simulated time, which is about 20 minutes for ONE run. Give
-# "slow100" on the command line to add it.
+# The inductances of the slow step. 100 nH is not here, because its factor
+# is 0.07. Thus `build()` gives it 14 times more steps than 1 nH for the
+# same simulated time. That is about 20 minutes for ONE run. Give "slow100"
+# on the command line to add it.
 L_NH_SLOW = (1, 10)
 # The envelope of the trace goes into this many segments, and the
 # smallest of them is the turn.
 SEGMENTS = 200
-# A run of the slow stage must reach its end criteria at least this many
-# times BEFORE the turn of the trace. A user run stops at the end
-# criteria, thus this ratio is the margin that a real run keeps against
-# the growth. The 8 repeats of the 0603 board stopped between
-# 5.8 ns and 49 ns against a turn at about 45 ns: a ratio near 1, and
-# one run in three then ended inside the growth.
+# A run of the slow step must get to its end criteria this many times
+# BEFORE the turn of the trace, or more. A user run stops at the end
+# criteria. Thus this ratio is the margin that a user run keeps against the
+# growth. The 8 runs of the 0603 board stopped between 5.8 ns and 49 ns,
+# against a turn at about 45 ns. That is a ratio near 1, and one run in
+# three then ended in the growth.
 SURVIVAL_MIN = 2.0
 
 
 def thicken(model, k):
-    """Scale the board in z by `k`, thus the cells at the element grow."""
+    """Scale the board in z by `k`, thus the cells at the element become
+    larger."""
     for c in model["copper_layers"]:
         c["z"] *= k
     for d in model["dielectric_layers"]:
@@ -120,15 +121,15 @@ def thicken(model, k):
 def set_epsilon(model, er):
     """Give the substrate a different permittivity.
 
-    This moves the mesh as well as the physics: `res` follows
-    1/sqrt(er), thus a large er gives a finer mesh and a smaller Courant
-    step, and the cells of the dielectric rule follow it.
+    This moves the mesh and also the physics. `res` follows 1/sqrt(er).
+    Thus a large er gives a smaller mesh and a smaller Courant step. The
+    cells of the dielectric rule follow it.
 
-    **The domain follows it too.** The PML band is 8 cells of `res`
-    since 2026-09-20, thus a model whose er changes needs a new depth
-    and a new region: `extract` would have made them together. With the
-    region of the old er the band no longer matches the mesh that it
-    stands in, and the board is not the board that a user gets.
+    **The domain also follows it.** From 2026-09-20, the PML band is 8
+    cells of `res`. Thus a model with a new er must have a new depth and a
+    new region, and `extract` makes them together. With the region of the
+    previous er, the band does not agree with its mesh. The board is then
+    not the board that a user gets.
     """
     old_pml = model.get("pml_mm")
     for d in model["dielectric_layers"]:
@@ -178,10 +179,9 @@ def solve(model, factor, tmp):
     """
     model["settings"]["time_step_factor"] = factor
     shutil.rmtree(tmp, ignore_errors=True)
-    # **Say why the directory stays**, and do not give a traceback for
-    # it. A run that somebody stopped leaves its solver behind, that
-    # process holds the port files open, and Windows then refuses to
-    # remove them.
+    # **Tell why the directory stays**, and do not give a traceback for it.
+    # A run that somebody stopped keeps its solver process. That process
+    # holds the port files open, and Windows then refuses to remove them.
     if os.path.isdir(tmp):
         raise SystemExit(
             "cannot remove %s. A run that was stopped leaves its solver "
@@ -200,14 +200,14 @@ def solve(model, factor, tmp):
     txt = (p.stdout + p.stderr).decode("utf-8", "replace").lower()
     if p.returncode == 0:
         return None, txt
-    # `_diverged` gives the two causes different advice, thus this file
-    # keeps them apart as well. **A growth was invisible here before
-    # 2026-09-01**: the test looked for "diverged" and for "nan", and the
-    # message of a growth holds neither, thus such a run read as STABLE.
+    # `_diverged` gives the two causes different advice. Thus this file
+    # also keeps them apart. **Before 2026-09-01, this file did not see a
+    # growth.** The test looked for "diverged" and for "nan". The message of
+    # a growth has no such text. Thus such a run read as STABLE.
     if "not stable" in txt or "grew and did not decay" in txt:
         return "growth", txt
-    # Match the words of the message and not the bare "nan": the
-    # warning of a step limit holds "resonance", which carries it.
+    # Match the words of the message, and not only "nan". The warning of a
+    # step limit has "resonance", which contains "nan".
     if "diverged" in txt:
         return "nan", txt
     return "failed", txt
@@ -223,11 +223,11 @@ def stable(model, factor, tmp):
 def envelope(tmp):
     """Give (the turn in ns, the growth in 1/ns, the last time in ns).
 
-    The envelope goes into `SEGMENTS` segments and the smallest of them
-    is the turn of the trace. The slope of a line through the log of the
-    segments after the turn is the growth. The port file takes '%' as
-    its comment mark and it is SUBSAMPLED, thus column 0 is the only
-    correct x axis.
+    The envelope goes into `SEGMENTS` segments, and the smallest of them is
+    the turn of the trace. The slope of a line through the log of the
+    segments after the turn is the growth. The port file uses '%' as its
+    comment mark, and it is SUBSAMPLED. Thus column 0 is the only correct x
+    axis.
     """
     names = sorted(glob.glob(os.path.join(tmp, "exc*", "port_ut_*")))
     if not names:
@@ -237,10 +237,10 @@ def envelope(tmp):
     except (ValueError, OSError):
         return None                      # a NaN run holds no table
     if a.ndim != 2 or len(a) < 200:
-        return None                      # too few rows to judge
+        return None  # not sufficient rows for a decision
     t, u = a[:, 0] * 1e9, np.abs(a[:, 1])
-    # Each segment needs some rows of its own, thus a short trace
-    # takes fewer segments and not thinner ones.
+    # Each segment must have some rows of its own. Thus a short trace gets
+    # fewer segments, and not thinner segments.
     nseg = min(SEGMENTS, len(u) // 10)
     idx = [i for i in np.array_split(np.arange(len(u)), nseg) if len(i)]
     seg_t = np.array([t[i].mean() for i in idx])
@@ -249,7 +249,7 @@ def envelope(tmp):
     seg_t, seg_u = seg_t[ok], seg_u[ok]
     j = int(np.argmin(seg_u))
     if j >= len(seg_t) - 3:
-        return seg_t[j], 0.0, t[-1]      # the trace still decays at the end
+        return seg_t[j], 0.0, t[-1]  # the trace decreases at the end
     slope = float(np.polyfit(seg_t[j:], np.log(seg_u[j:]), 1)[0])
     return seg_t[j], slope, t[-1]
 
@@ -257,8 +257,9 @@ def envelope(tmp):
 def last_time_ns(tmp):
     """Give the time of the last row of the port data, in ns.
 
-    A run that meets its end criteria early writes some tens of rows,
-    which is too few for `envelope`, thus this reads the end alone.
+    A run that gets to its end criteria at a short time writes some tens of
+    rows. That is not sufficient for `envelope`. Thus this reads only the
+    end.
     """
     names = sorted(glob.glob(os.path.join(tmp, "exc*", "port_ut_*")))
     if not names:
@@ -273,14 +274,14 @@ def last_time_ns(tmp):
 
 
 def survival(src, kw, lnh, tmp):
-    """Give (the turn in ns, the end of a normal run in ns, the growth).
+    """Give (the turn in ns, the end of a usual run in ns, the growth).
 
     Two runs of the SAME model at the factor that the rule gives:
 
-    - one with an end criteria that no run can meet, thus it goes to
-      `STEPS_SLOW` and its trace shows the turn;
-    - one with the end criteria of a real run, thus it stops where a
-      user run stops.
+    - one with an end criteria that no run can get to. Thus it goes to
+      `STEPS_SLOW`, and its trace shows the turn;
+    - one with the end criteria of a user run. Thus it stops where a user
+      run stops.
 
     The ratio of the two times is the margin that a user keeps.
     """
@@ -311,12 +312,12 @@ def boundary(model, tmp):
 
 
 def slow_stage(rows, tmp, l_values):
-    """The second stage: how long may a run be before the mode takes over.
+    """The second step: the longest run before the mode controls it.
 
-    The ladder cannot answer this. It gives every rung the same short
-    window, and the slow mode needs tens of nanoseconds; and no factor
-    of the ladder corrects that mode, because its rate does not follow
-    the timestep.
+    The ladder cannot give this answer. It gives each rung the same short
+    window, and the slow mode must have tens of nanoseconds. Also, no
+    factor of the ladder corrects that mode, because its rate does not
+    follow the timestep.
     """
     print("\nthe slow mode: the turn of the trace against the end of a "
           "normal run, at the factor that the rule gives, over a window of "
@@ -373,11 +374,11 @@ def slow_stage(rows, tmp, l_values):
 
 
 def ladder_stage(src, med, tmp):
-    """The first stage: the largest factor at which a run stays finite.
+    """The first step: the largest factor where a run stays finite.
 
-    This measures the FAST divergence alone. A run of `STEPS` steps is
-    about 4 ns, thus a mode that needs tens of nanoseconds is invisible
-    here whatever the factor: the slow stage carries that one.
+    This measures only the FAST divergence. A run of `STEPS` steps is about
+    4 ns. Thus a mode that must have tens of nanoseconds does not show
+    here, for all factors. The slow step measures that mode.
     """
     rows = [
         ("the reference (coarse)", src, {}),
@@ -409,9 +410,9 @@ def ladder_stage(src, med, tmp):
                 cells.append("%14s" % "<0.04")
                 margins.append((0.0, False))
             else:
-                # The ladder starts at 1.0 and openEMS takes no larger
-                # factor. Thus a boundary AT 1.0 is a lower limit, and
-                # its margin is a lower limit too: mark it with ">=".
+                # The ladder starts at 1.0, and openEMS accepts no larger
+                # factor. Thus a boundary AT 1.0 is a lower limit, and its
+                # margin is also a lower limit: mark it with ">=".
                 lim = f >= LADDER[0]
                 capped = capped or lim
                 cells.append("%14s" % ("%s%g (%s%.1fx)"
@@ -458,9 +459,9 @@ def main(stage="all"):
         ok = ladder_stage(src, med, tmp)
     if stage in ("all", "slow", "slow100"):
         l_values = L_NH_SLOW + ((100,) if stage == "slow100" else ())
-        # The slow mode belongs to the ELEMENT and not to the board, thus
-        # the reference geometry answers for the family. A geometry of
-        # its own would cost one long run for each row.
+        # The slow mode comes from the ELEMENT and not from the board. Thus
+        # the reference geometry gives the answer for the family. A
+        # geometry of its own costs one long run for each row.
         ok = slow_stage([("the reference (coarse)", src, {})], tmp,
                         l_values) and ok
     if not ok:

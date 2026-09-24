@@ -1,44 +1,44 @@
-"""Measure `runner.POLY_FEATURE_CELLS` against a closed form.
+"""Measure `runner.POLY_FEATURE_CELLS` against a closed formula.
 
-The rule gives N cells across a copper feature that is narrower than
-`res` and that no port covers. **No board of `validation/` could see it
-before this file.** Every line of every other board carries a port, and
-`_feature_lines` skips a feature that holds a mesh line already, thus the
-port rule (`MSL_STRIP_CELLS`) made those cells and not this one.
+The rule gives N cells across a copper feature that is narrower than `res`
+and that is not in a port. **Before this file, no board of `validation/`
+could see it.** Each line of all the other boards has a port.
+`_feature_lines` does not divide a feature that has a mesh line. Thus the
+port rule (`MSL_STRIP_CELLS`) made those cells, and not this rule.
 
-**The board.** A through microstrip of 2.9 mm along x, with a port at
-each end, and ONE open stub of `W_STUB` that goes in y from the middle
-of that line. The stub is narrower than `res` at every preset, and its
-width lies on the x axis, where the two ports put their lines at their
-own ends only. Thus `_feature_lines` alone meshes the stub, and the
-number of cells across it is the value under test.
+**The board.** A through microstrip of 2.9 mm along x, with a port at each
+end. ONE open stub of `W_STUB` goes in y from the middle of that line. The
+stub is narrower than `res` at each preset. Its width is on the x axis,
+where the two ports put their lines only at their own ends. Thus only
+`_feature_lines` makes the mesh of the stub. The number of cells across the
+stub is the value that the test examines.
 
-**The measurement is a FREQUENCY, and a DIFFERENCE of two of them.** An
+**The measurement is a FREQUENCY, and a DIFFERENCE of two frequencies.** An
 open stub is a quarter-wave resonator, thus |S21| has a notch at
 
     f = c / (4 * (l + dl) * sqrt(eps_eff))
 
-`dl` is the open end of the stub, and the plane of the T junction is not
-the edge of the through line either. Both are UNKNOWN, and both are the
-same for two stubs that differ in LENGTH alone. Thus two lengths give
+`dl` is the open end of the stub. The plane of the T junction is also not
+the edge of the through line. The two are UNKNOWN. They are the same for
+two stubs that are different only in LENGTH. Thus two lengths give
 
     sqrt(eps_eff) = c * (1/f1 - 1/f2) / (4 * (l1 - l2))
 
-and every constant end effect cancels. This is the method of
-`run_shunt.py`: a frequency carries no scale error, and a difference
-carries no offset.
+and each constant end effect cancels. This is the procedure of
+`run_shunt.py`: a frequency has no scale error, and a difference has no
+offset.
 
-The closed form is Hammerstad and Jensen for the static value, with the
-dispersion of Kirschning and Jansen at the frequency of the notch. A
-STATIC closed form cannot decide a narrow line, because the eps_eff of a
-run stands over the static value, thus this file does not use one.
+The closed formula is Hammerstad and Jensen for the static value, with the
+dispersion of Kirschning and Jansen at the frequency of the notch. A STATIC
+closed formula cannot examine a narrow line, because the eps_eff of a run
+is above the static value. Thus this file does not use one.
 
-Run it with the python of the solver, or with the python of KiCad (it
-needs no pcbnew, and it starts the solver itself):
+Run it with the python of the solver, or with the python of KiCad (it does
+not use pcbnew, and it starts the solver itself):
 
     C:\\openEMS\\venv\\Scripts\\python.exe run_feature.py [coarse|medium]
 
-Each run takes about a minute, and the file makes 2 runs for each value
+Each run is about one minute long, and the file makes 2 runs for each value
 of the ladder.
 """
 import json
@@ -49,10 +49,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# RFSIM_PLUGINS names the plugins directory to measure, thus this file
-# can run against a copy of the code that holds a different rule: copy
-# `plugins/` outside the repository, change the one rule, and compare
-# the two answers on the same board.
+# RFSIM_PLUGINS names the plugins directory to measure. Thus this file can
+# run against a copy of the code that has a different rule. Copy `plugins/`
+# out of the repository, change the one rule, and compare the two answers
+# on the same board.
 PLUGINS = os.environ.get("RFSIM_PLUGINS") or os.path.join(
     os.path.dirname(HERE), "plugins")
 sys.path.insert(0, PLUGINS)
@@ -63,33 +63,33 @@ import numpy as np  # noqa: E402
 import solverenv  # noqa: E402
 
 C0 = 299792458.0
-ER = 4.5                 # the substrate of every board of validation/
+ER = 4.5  # the substrate of all the boards of validation/
 H_SUB = 1.53             # mm
 W_LINE = 2.9             # the through line, 50 ohm on this stackup
-W_STUB = 0.4             # the feature under test: narrower than res
-# Two lengths, measured from the lower edge of the through line to the
-# open end. Both notches must stay inside the sweep with a margin, and
-# the third harmonic of the longer one must stay OUT of it.
+W_STUB = 0.4  # the feature that the test examines: narrower than res
+# Two lengths, measured from the lower edge of the through line to the open
+# end. The two notches must stay in the sweep with a margin. The third
+# harmonic of the longer one must stay OUT of it.
 L1, L2 = 10.0, 18.0
 F_START, F_STOP, N_FREQ = 1e9, 6e9, 601
-NOTCH_MIN_DB = -10.0     # a dip that is not deeper than this is no notch
+NOTCH_MIN_DB = -10.0  # a minimum that is not deeper than this is no notch
 FIT_HALF_WIDTH = 8       # bins at each side of the minimum, for the fit
-# The ladder of the value under test. 1 means NO line inside the
-# feature, which is the state that the rule exists to correct.
+# The ladder of the value that the test examines. 1 means NO line in the
+# feature. The rule must correct that condition.
 #
 # **The merge tolerance caps this ladder, and the cap is not the same on
-# every board.** `_feature_lines` gives NO line when the cells that it
-# would make are smaller than `tol` of `_mesh`, because `_merge_close`
-# removes such a line again. A stub of 0.4 mm at the coarse preset has
-# tol = 0.181 mm, thus 3 cells (0.133 mm) fall under it and the feature
-# goes back to ONE cell with a warning. `realizable()` asks the mesh
-# itself which values of the ladder a board can carry, thus the file
-# measures those and does not run the solver for the others.
+# all boards.** `_feature_lines` gives NO line when its cells are smaller
+# than `tol` of `_mesh`, because `_merge_close` removes such a line again.
+# A stub of 0.4 mm at the coarse preset has tol = 0.181 mm. Thus 3 cells
+# (0.133 mm) are less than that, and the feature goes back to ONE cell with
+# a warning. `realizable()` gets from the mesh itself the values of the
+# ladder that a board can have. The file measures those values, and it does
+# not run the solver for the others.
 CELLS = (1, 2, 3, 4, 6)
-# The tolerance on eps_eff against the closed form. Kirschning and Jansen
-# give about 1% on this geometry, and the FDTD adds the cells across the
-# strip and the two ends of the stub. A rule that stands 10% away from
-# the theory does not model this line.
+# The tolerance on eps_eff against the closed formula. Kirschning and
+# Jansen give about 1% on this geometry. The FDTD adds the cells across the
+# strip and the two ends of the stub. A rule that is 10% away from the
+# theory does not model this line.
 EPS_TOL = 0.10
 
 
@@ -114,9 +114,9 @@ def z0_static(w, h, er):
 def eps_eff_f(w, h, er, f_hz):
     """Kirschning and Jansen: eps_eff at a frequency, not at DC.
 
-    A static closed form cannot decide a narrow line, because the
-    eps_eff of a run stands over the static value. This correction is
-    the part of that gap which the THEORY explains.
+    A static closed formula cannot examine a narrow line, because the
+    eps_eff of a run is above the static value. This correction is the part
+    of that gap that the THEORY gives.
     """
     u = w / h
     fn = f_hz / 1e9 * h                      # GHz*mm
@@ -133,8 +133,8 @@ def eps_eff_f(w, h, er, f_hz):
 def open_end_mm(w, h, er):
     """The extra length of an open end (Hammerstad and Bekkadal).
 
-    The difference of two lengths removes it. This file reports it to
-    show its size, and it does not use it in the result.
+    The difference of two lengths removes it. This file reports it to show
+    its dimension, and it does not use it in the result.
     """
     u = w / h
     e = eps_eff_static(w, h, er)
@@ -154,15 +154,14 @@ def board_model(l_stub, mesh, w_stub=W_STUB):
     yc = -10.0                       # the axis of the through line
     hw = 0.5 * W_LINE
     line = [[3.55, yc - hw], [36.45, yc - hw], [36.45, yc + hw], [3.55, yc + hw]]
-    # The stub goes UP to the far edge of the through line, thus the two
-    # sheets meet over an area and not on one line, and the edge where
-    # they meet lies exactly on an edge that the line already has. An
-    # overlap that ends INSIDE the line would leave an edge of its own,
-    # and `_feature_lines` would read the copper between that edge and
-    # the edge of the line as a narrow feature that no board has.
-    # `l_stub` stays the length from the lower edge of the through line,
-    # and the part inside the line is the same in both runs: the
-    # difference removes it with the other end effects.
+    # The stub goes UP to the far edge of the through line. Thus the two
+    # sheets touch on an area and not on one line. The edge where they
+    # touch is on an edge of the line. An overlap that ends IN the line
+    # gives an edge of its own. `_feature_lines` then reads the copper
+    # between that edge and the edge of the line as a narrow feature that
+    # no board has. `l_stub` stays the length from the lower edge of the
+    # through line. The part in the line is the same in the two runs, and
+    # the difference removes it with the other end effects.
     xc = 20.0
     top = yc + hw
     bot = yc - hw - l_stub
@@ -170,8 +169,8 @@ def board_model(l_stub, mesh, w_stub=W_STUB):
             [xc + 0.5 * w_stub, top], [xc - 0.5 * w_stub, top]]
     ground = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     margin = 4.0
-    # The region holds the clear air AND the PML band, in the same way
-    # as `board_reader.extract`: the band is 8 cells of the mesh step.
+    # The region holds the clear air AND the PML band, as in
+    # `board_reader.extract`: the band is 8 cells of the mesh step.
     pml_mm = solverenv.pml_depth(solverenv.mesh_res(F_STOP, ER, mesh))
     d_reg = margin + pml_mm + 0.05
     port = dict(layer="F.Cu", ref_layer="B.Cu", ref_layer2=None, height=None,
@@ -204,17 +203,18 @@ def board_model(l_stub, mesh, w_stub=W_STUB):
 
 # ------------------------------------------------------------------ solve
 def runner_with(cells, root):
-    """Give the path of a runner.py whose POLY_FEATURE_CELLS is `cells`.
+    """Give the path of a runner.py with the value `cells` in
+    POLY_FEATURE_CELLS.
 
-    The value is a constant of the module, thus a run cannot change it
-    from the model. This copies `plugins/` beside the work and rewrites
-    that ONE line, thus the rig measures a different rule on the same
+    The value is a constant of the module, thus a run cannot change it from
+    the model. This copies `plugins/` adjacent to the work, and it writes
+    that ONE line again. Thus the rig measures a different rule on the same
     board.
     """
     dst = os.path.join(root, "plugins_%d" % cells)
-    # Copy every time. A copy that stays behind measures the code of
-    # the run that made it, thus a change to `plugins/` would go
-    # unseen and the rig would give the old answer with no message.
+    # Copy each time. A copy that stays measures the code of the run that
+    # made it. Thus the rig does not see a change to `plugins/`, and it
+    # gives the previous answer with no message.
     shutil.rmtree(dst, ignore_errors=True)
     os.makedirs(dst)
     for fn in os.listdir(PLUGINS):
@@ -233,11 +233,11 @@ def runner_with(cells, root):
 
 
 def realizable(cells, l_stub, mesh, w_stub, root):
-    """Tell how many cells the mesh really puts across the stub.
+    """Tell how many cells the mesh puts across the stub.
 
-    The rule and the merge tolerance argue with each other, thus the
-    only reliable answer comes from `_mesh` itself. This costs no solver
-    run: the mesh rules alone give the answer in seconds.
+    The rule and the merge tolerance work against each other. Thus only
+    `_mesh` itself gives a reliable answer. This costs no solver run: the
+    mesh rules give the answer in seconds.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -277,11 +277,11 @@ def solve(cells, l_stub, mesh, w_stub, root):
 
 
 def notch(f, s21):
-    """Give (the frequency of the deepest dip, its depth in dB).
+    """Give (the frequency of the deepest minimum, its depth in dB).
 
     A parabola through the bins at each side of the minimum gives the
-    frequency between two bins. The step of the sweep is 8.3 MHz, thus
-    the fit is worth about one part in 500 of the result.
+    frequency between two bins. The step of the sweep is 8.3 MHz, thus the
+    fit is correct to about one part in 500 of the result.
     """
     db = 20.0 * np.log10(np.abs(s21) + 1e-15)
     i = int(np.argmin(db))
@@ -299,8 +299,8 @@ def notch(f, s21):
 # ------------------------------------------------------------------- main
 def main(mesh="coarse", w_stub=W_STUB):
     w_stub = float(w_stub)
-    # A run against another plugins directory keeps its own output, thus
-    # the copies of `runner_with()` of the two do not mix.
+    # A run against a different plugins directory keeps its own output.
+    # Thus the copies of `runner_with()` of the two runs do not mix.
     tag = "" if PLUGINS.endswith("plugins") else "_" + os.path.basename(PLUGINS)
     root = os.path.join(HERE, "out_feature_%s_w%g%s" % (mesh, w_stub, tag))
     os.makedirs(root, exist_ok=True)
@@ -312,8 +312,8 @@ def main(mesh="coarse", w_stub=W_STUB):
              open_end_mm(w_stub, H_SUB, ER)))
     print("the two stubs are %.1f mm and %.1f mm" % (L1, L2))
 
-    # Ask the mesh which values of the ladder this board can carry,
-    # before any solver runs.
+    # Get from the mesh the values of the ladder that this board can have,
+    # before the solver runs.
     ladder, skipped = [], []
     for cells in CELLS:
         got, res = realizable(cells, L1, mesh, w_stub, root)
@@ -347,12 +347,12 @@ def main(mesh="coarse", w_stub=W_STUB):
                     % (l_stub, depth, f0 / 1e9))
             fs.append(f0)
             ds.append(depth)
-        # Every constant end effect cancels in the difference.
+        # Each constant end effect cancels in the difference.
         root_eps = C0 * (1.0 / fs[0] - 1.0 / fs[1]) / (4.0 * (L1 - L2) * 1e-3)
         eps = root_eps ** 2
-        # The theory at the MEAN of the two notches: the two resonances
-        # sit at different frequencies, thus the dispersion is not the
-        # same for them. The line below the table gives that residual.
+        # The theory at the MEAN of the two notches. The two resonances are
+        # at different frequencies, thus the dispersion is not the same for
+        # them. The line below the table gives that residual.
         f_mid = 0.5 * (fs[0] + fs[1])
         th = eps_eff_f(w_stub, H_SUB, ER, f_mid)
         rows.append((cells, fs[0], fs[1], eps, th, ds))

@@ -1,4 +1,5 @@
-"""A full test without the GUI of KiCad: board -> model.json -> openEMS -> .s2p.
+"""A full test without the GUI of KiCad: board -> model.json -> openEMS ->
+.s2p.
 
 Run this file with the python of KiCad 10. This is the path of a per-user
 installation. A machine-wide installation is in
@@ -7,7 +8,7 @@ installation. A machine-wide installation is in
 
 A microstrip through line of about 50 ohm must give a good match and a low
 insertion loss. The limits in the asserts are wide, because FDTD and FR4
-both have large tolerances.
+have large tolerances.
 """
 import json
 import os
