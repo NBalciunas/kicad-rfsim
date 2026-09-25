@@ -1,4 +1,4 @@
-"""The RFsim action plugin: it simulates the S-parameters of the selected
+"""The RFsim plugin of KiCad: it simulates the S-parameters of the selected
 pads with openEMS."""
 import importlib.util
 import json
@@ -28,10 +28,11 @@ def _kicad_python():
 
 
 def _solver_missing(exe):
-    """Give the modules that runner.py needs but that `exe` does not have.
+    """Give the modules that are necessary for runner.py and that `exe`
+    does not have.
 
     The subprocess uses find_spec, which does not import the extensions.
-    Thus an absent openEMS DLL does not look like an absent package.
+    Thus a missing openEMS DLL does not look like a missing package.
     """
     code = ("import importlib.util as u\n"
             "print(','.join(m for m in ('numpy', 'h5py', 'CSXCAD', 'openEMS')\n"
@@ -51,7 +52,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         self.name = "RFsim"
         self.category = "RF tools"
         self.description = ("Simulate S-parameters of the selected pad(s) "
-                            "with openEMS")
+                            "with openEMS.")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__),
                                            "assets", "icon.png")
@@ -63,13 +64,13 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(str(e), "RFsim", wx.ICON_ERROR)
         except Exception:
             import traceback
-            wx.MessageBox(traceback.format_exc(), "RFsim error", wx.ICON_ERROR)
+            wx.MessageBox(traceback.format_exc(), "RFsim", wx.ICON_ERROR)
 
     def _run(self):
         # The results window runs in the Python of KiCad. The solver runs
-        # in its own interpreter, because openEMS v0.37 and later have no
-        # cp311 wheel. Thus the code examines the two sets of packages
-        # one after the other.
+        # in its own interpreter, because openEMS v0.37 and after have no
+        # cp311 wheel. Thus the code examines the two sets of packages one
+        # after the other.
         solver_py = solverenv.solver_python() or _kicad_python()
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
@@ -95,9 +96,26 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 "RFsim", wx.ICON_INFORMATION)
             return
 
+        # The stackup comes from the saved file or from the board in
+        # memory. When the two are different, the user selects one before
+        # the dialog opens. The dialog does not keep its settings, thus the
+        # values stay the same when a user stops here to save.
+        live = False
+        stale = board_reader.unsaved_stackup(board)
+        if stale:
+            ask = wx.MessageDialog(None, stale, "RFsim",
+                                   wx.YES_NO | wx.CANCEL | wx.ICON_WARNING)
+            ask.SetYesNoCancelLabels("Use the new values",
+                                     "Use the saved values", "Cancel")
+            answer = ask.ShowModal()
+            ask.Destroy()
+            if answer == wx.ID_CANCEL:
+                return
+            live = answer == wx.ID_YES
+
         # Get the port data for the preview in the dialog. The margin has
         # no effect on this data.
-        preview = board_reader.extract(board, pads, 1.0)
+        preview = board_reader.extract(board, pads, 1.0, live_stackup=live)
         default_out = os.path.join(
             os.path.dirname(board.GetFileName()) or os.getcwd(), "rfsim_results")
         dlg = gui.SettingsDialog(None, preview["ports"], default_out,
@@ -113,8 +131,8 @@ class RFSimPlugin(pcbnew.ActionPlugin):
 
         port_types = settings.pop("port_types")
         port_feed = settings.pop("port_feed")
-        # the numbers from the dialog: pad i becomes port order[i], and
-        # the types and the manual feeds move with the pads
+        # the numbers from the dialog: pad i becomes port order[i], and the
+        # types and the manual feeds move with the pads
         order = settings.pop("order")
         pads = [p for _, p in sorted(zip(order, pads), key=lambda t: t[0])]
         port_types = [t for _, t in
@@ -123,42 +141,64 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                      sorted(zip(order, port_feed), key=lambda t: t[0])]
         outdir = settings.pop("outdir")
         substrate = {k: settings.pop(k) for k in ("er", "tand", "h", "cu_t")}
+        # **None is the "KiCad's Stackup" preset of the dialog.** The
+        # substrate goes to extract() as None. Thus the (stackup ...) block
+        # of the board gives each layer its own er, tan d and thickness. It
+        # is the block of the saved file, or of the board in memory if the
+        # user selected the new values above. model["stackup_source"]
+        # becomes "file" or "memory".
+        if any(v is None for v in substrate.values()):
+            substrate = None
         # The parasitics of each R/L/C part, from the rows of the dialog.
         # They go into the elements below, and not into the settings:
         # model.json must hold the values that the solver uses.
         para = settings.pop("lumped_parasitics", None) or {}
 
+        # `f_stop` and `mesh` set the dimension of the PML band. Thus the
+        # domain holds the clear air AND the absorber: refer to
+        # `solverenv.pml_depth`.
         model = board_reader.extract(board, pads, settings["margin_mm"],
-                                     substrate)
+                                     substrate, live_stackup=live,
+                                     f_stop=settings["f_stop"],
+                                     mesh=settings["mesh"])
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
-                e.update(package=v["package"], esl=v["esl"], esr=v["esr"])
-                # A part whose refdes does not give the type comes back
-                # from extract() with type None and value None. The user
-                # selected them in the dialog, thus they go in here. A
-                # part that the board describes keeps its own values,
-                # and the dialog gives None for both.
+                e.update(package=v["package"], esl=v["esl"], esr=v["esr"],
+                         epc=v.get("epc"))
+                # When the refdes of a part does not give the type, the
+                # part comes back from extract() with type None and value
+                # None. The user selected them in the dialog, thus they go
+                # in here. A part that the board gives keeps its own
+                # values, and the dialog gives None for the two.
                 if v.get("type"):
                     e["type"] = v["type"]
                 if v.get("value") is not None:
                     e["value"] = v["value"]
-        # A part whose Model checkbox is off does not go into the model at
-        # all. Its pads stay in the copper, thus the gap between them stays
-        # open. This is the same result as the old checkbox for all the
-        # parts, and the runner needs no test of its own.
+                # A series RLC part gives R, L and C and no single value.
+                # The three are only in the model: the board file does not
+                # change, and `board_reader` reads no new data.
+                if e["type"] == "RLC":
+                    e.update(value=None, r=v.get("r"), l=v.get("l"),
+                             c=v.get("c"))
+        # When the Model checkbox of a part is off, the part does not go
+        # into the model. Its pads stay in the copper, thus the gap between
+        # them stays open. This is the same result as the checkbox of
+        # before for all the parts. The runner does not have a test of its
+        # own for it.
         model["lumped_elements"] = [
             e for e in model["lumped_elements"]
             if para.get(e["ref"], {}).get("model", True)
-            and e.get("type") and e.get("value") is not None]
+            and e.get("type")
+            and (e.get("value") is not None or e["type"] == "RLC")]
         for p, t, f in zip(model["ports"], port_types, port_feed):
             p["type"] = t
             if f and not p["direction"]:
-                # The manual feed of the dialog: the pad has no track,
-                # and the user gave the direction and the width of a
-                # line that the board draws as a shape or as a polygon.
-                # The gap of that direction comes from extract(), thus a
-                # drawn CPW keeps its measured gap.
+                # The manual feed of the dialog: the pad has no track. The
+                # user gave the direction and the width of a line that the
+                # board shows as a shape or as a polygon. The gap of that
+                # direction comes from extract(). Thus a CPW that the user
+                # drew keeps its measured gap.
                 p["direction"], p["track_width"] = f
                 key = {(1, 0): "+x", (-1, 0): "-x", (0, 1): "+y",
                        (0, -1): "-y"}[tuple(p["direction"])]
@@ -166,7 +206,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                 # `extract()` measured the copper run for the direction
                 # of a TRACK, and this pad had none. Measure it for the
                 # direction that the user gave, or the runner cannot cap
-                # the length of the port (problem 13).
+                # the length of the port.
                 p["copper_run"] = board_reader.copper_run(
                     model["polygons"].get(p["layer"], []),
                     p["x"], p["y"], p["direction"])
@@ -175,10 +215,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                             model["polygons"].get(p["layer"], []),
                             p["x"], p["y"], p["direction"])):
                     model["warnings"].append(
-                        "Port %d: no copper along the manual feed "
-                        "direction. The %s port adds its own strip there, "
-                        "so the simulated board differs from the real "
-                        "one. Check the direction, or draw the feed line."
+                        "Port %d: there is no copper along the manual "
+                        "feed direction. The %s port adds its own strip "
+                        "there, thus the simulated board is different "
+                        "from the board in KiCad. Examine the direction, "
+                        "or add the feed line to the board."
                         % (p["number"], t))
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
@@ -192,7 +233,10 @@ class RFSimPlugin(pcbnew.ActionPlugin):
 
         runner = os.path.join(os.path.dirname(__file__), "runner.py")
         cmd = [solver_py, runner, model_path, outdir]
-        run = gui.RunDialog(None, cmd)
+        # run.log keeps all the text that the window shows, because the
+        # window closes immediately when a run succeeds.
+        run = gui.RunDialog(None, cmd,
+                            log_path=os.path.join(outdir, "run.log"))
         ok = run.ShowModal() == wx.ID_OK
         run.Destroy()
         if ok:

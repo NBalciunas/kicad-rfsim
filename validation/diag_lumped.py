@@ -1,12 +1,11 @@
 """Why does the simulation not include my R/L/C part as a lumped element?
 
-For each R*/L*/C* footprint, this tool obeys the tests of
-_lumped_elements in sequence. It shows the first test that refuses the
-part. Several tests are quiet in usual operation, thus this tool is the
-way to see them.
+For each R*/L*/C* footprint, this tool obeys the tests of _lumped_elements
+in sequence. It shows the first test that refuses the part. Some tests give
+no message in usual operation. This tool shows them.
 
-To examine the LIVE board, together with the changes that you did not
-save, put these lines into Tools > Scripting Console of pcbnew:
+To examine the LIVE board, together with the changes that you did not save,
+put these lines into Tools > Scripting Console of pcbnew:
 
     import sys; sys.path.insert(0, r"<this folder>")
     import diag_lumped; diag_lumped.report()
@@ -28,19 +27,28 @@ _ATTR = {getattr(pcbnew, n): n for n in dir(pcbnew)
          if n.startswith("PAD_ATTRIB_")}
 
 
-def report(board=None, margin_mm=4.0):
-    """Show the result of each test for every R*/L*/C* footprint."""
+def report(board=None, margin_mm=4.0, f_stop=6e9, mesh="coarse"):
+    """Show the result of each test for all R*/L*/C* footprints.
+
+    The domain is the board plus `margin_mm` of clear air plus the PML
+    band. The band is 8 cells of the mesh step. Thus `f_stop` and `mesh`
+    also move the region. The default values are the default values of the
+    dialog.
+    """
     board = board or pcbnew.GetBoard()
     out = print
-    copper, _, _ = br._stackup(board)
+    copper, diel, _ = br._stackup(board)
     z_of = {c["name"]: c["z"] for c in copper}
     out("stackup copper: %s" % list(z_of))
 
+    pml_mm = br.solverenv.pml_depth(br.solverenv.mesh_res(
+        f_stop, max(d["epsilon"] for d in diel), mesh))
     brd = board.GetBoardEdgesBoundingBox()
     region = pcbnew.BOX2I(brd.GetPosition(), brd.GetSize())
-    region.Inflate(pcbnew.FromMM(2.0 * margin_mm))
-    out("region (margin %g mm): x %.2f..%.2f  y %.2f..%.2f mm"
-        % (margin_mm, pcbnew.ToMM(region.GetLeft()),
+    region.Inflate(pcbnew.FromMM(margin_mm + pml_mm))
+    out("region (margin %g mm, PML %.2f mm at %s): x %.2f..%.2f  "
+        "y %.2f..%.2f mm"
+        % (margin_mm, pml_mm, mesh, pcbnew.ToMM(region.GetLeft()),
            pcbnew.ToMM(region.GetRight()), pcbnew.ToMM(region.GetTop()),
            pcbnew.ToMM(region.GetBottom())))
 
@@ -125,7 +133,8 @@ def report(board=None, margin_mm=4.0):
         out("    ACCEPTED -> modelled as %s = %g" % (kind, val))
 
     out("\n%d R*/L*/C* footprint(s) examined" % n)
-    els, warns = br._lumped_elements(board, region, copper, ports)
+    els, warns, notes = br._lumped_elements(board, region, copper, ports)
+    warns += notes
     out("_lumped_elements -> %d element(s): %s"
         % (len(els), [(e["ref"], e["type"], e["value"]) for e in els]))
     for w in warns:

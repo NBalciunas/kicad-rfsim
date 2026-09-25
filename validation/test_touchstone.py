@@ -1,9 +1,8 @@
-"""Round-trip test: write_touchstone writes, then skrf reads the same
-S-matrix.
+"""Test that skrf reads the same S-matrix that write_touchstone writes.
 
-The test guards the sequence of the columns of a 2-port file
-(S11 S21 S12 S22) and the row-major layout of a file with N ports. Run it
-with any python that has numpy and skrf:  python test_touchstone.py
+The test guards the sequence of the columns of a 2-port file (S11 S21 S12
+S22). It also guards the sequence of the rows of a file with N ports. Run
+it with a python that has numpy and skrf: python test_touchstone.py
 """
 import os
 import sys

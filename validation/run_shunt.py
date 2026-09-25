@@ -1,8 +1,8 @@
 """Measure a body ESL from the FREQUENCY of a notch, not from an amplitude.
 
-The board is a microstrip of 50 ohm with one capacitor in SHUNT to
-ground (`run_lumped.make_shunt`). The capacitor, its pads and the via to
-the plane make a SERIES resonance, thus |S21| has a deep notch at
+The board is a microstrip of 50 ohm with one capacitor in SHUNT to ground
+(`run_lumped.make_shunt`). The capacitor, its pads and the via to the plane
+make a SERIES resonance, thus |S21| has a deep notch at
 
     f0 = 1 / (2*pi*sqrt(L_total*C))
 
@@ -10,32 +10,32 @@ and the notch gives the inductance back:
 
     L_total = 1 / ((2*pi*f0)**2 * C)
 
-L_total is the body ESL of the part PLUS the loop of the board (the
-pads, the gap and the via). The board part of it is the same in every
-run. Thus the ESL of the body comes from a DIFFERENCE of two runs:
+L_total is the body ESL of the part PLUS the loop of the board (the pads,
+the gap and the via). The board part of it is the same in all runs. Thus
+the ESL of the body comes from a DIFFERENCE of two runs:
 
     ESL(measured) = L_total(with the ESL) - L_total(with no ESL)
 
-**Why a difference of frequencies, and not one absolute value.** The log
-of 2026-08-04 (6) measured the extraction of an absolute value on the
-series board: it carries 10 to 20 ohm of systematic error which the mesh
-does not remove, against 3.1 ohm for an 0402 ESL at 2 GHz. That
-systematic is a scale error of the amplitude, and no scale error can
-move a frequency. This file is the method that remains.
+**Why a difference of frequencies, and not one absolute value.** The log of
+2026-08-04 (6) measured the extraction of an absolute value on the series
+board. It has 10 to 20 ohm of systematic error that the mesh does not
+remove, against 3.1 ohm for an 0402 ESL at 2 GHz. That systematic error is
+a scale error of the amplitude, and no scale error can move a frequency.
+This file uses the procedure that stays.
 
 The tool asserts three things:
 
-1. Each run gives a deep notch (the resonance exists).
-2. The board inductance is the same for two DIFFERENT capacitors. It is
-   a property of the board, thus it must not follow the value of the
-   part. This is the control of the method.
-3. The measured ESL agrees with the value that went in, for 0.25 nH and
-   for 1.0 nH.
+1. Each run gives a deep notch (the resonance is there).
+2. The board inductance is the same for two DIFFERENT capacitors. It is a
+   property of the board, thus it must not follow the value of the part.
+   This is the control of the procedure.
+3. The measured ESL agrees with the value that went in, for 0.25 nH and for
+   1.0 nH.
 
 `run_shunt.py <mesh> packages` does item 6b: it measures each entry of
 `board_reader._ESL_NH` on the land pattern of its own package.
 
-Run this file with the python of KiCad 10. It needs pcbnew, and it
+Run this file with the python of KiCad 10. It uses pcbnew, and it
 starts the solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_shunt.py [coarse|medium|fine] [packages]
 """
@@ -57,42 +57,60 @@ import run_lumped  # noqa: E402  (this file uses its board builder)
 
 Z0 = 50.0
 C_NOM = 10e-12          # the notch of this board is then near 1.5 GHz
-C_CONTROL = 4.7e-12     # the control: the same board, another capacitor
+C_CONTROL = 4.7e-12  # the control: the same board, a different capacitor
 ESL_CASES = (0.25e-9, 1.0e-9)   # the two bodies that the tool must measure
-# The sweep holds the notch of every case with a wide margin at each end.
-# A parabola needs points at the two sides of the minimum.
+# The sweep holds the notch of each case with a wide margin at each end. A
+# parabola must have points at the two sides of the minimum.
 F_START, F_STOP, N_FREQ = 0.5e9, 5e9, 601
 FIT_HALF_WIDTH = 8      # the bins at each side of the minimum, for the fit
 NOTCH_MIN_DB = -10.0    # a notch that is not deeper than this is not a notch
+# The depth window where two minimums are EQUAL. The deepest bin does NOT
+# always give the series resonance. The 2512 land with its ESL has a
+# minimum at 0.8525 GHz and a second minimum at 1.3325 GHz. The mesh that
+# puts a line on each straight edge of the copper put them 0.016 dB apart.
+# The selection moved to the higher one. Thus L_total came out SMALLER than
+# the board without the part, and the run gave an ESL of -1.1646 nH.
+# `notch` gets the LOWEST minimum in this margin from the deepest one. The
+# series resonance of C with L_total is the FIRST resonance of the branch.
+# A minimum above it comes from the board or from the line.
+#
+# **A measurement gives the margin, and not a choice.** The 33 runs on disk
+# of 2026-08-18 give these values. The true notch of the 2512 land is
+# 0.02 dB above the deepest minimum. The nearest FALSE minimum below a true
+# notch (the 1210 land, 0.83 GHz) is 21.94 dB above it. Thus the window
+# must be larger than 0.02 dB and smaller than 21.94 dB. 6 dB is a factor
+# of 2 in magnitude, and it keeps a margin of 3.7 times against the false
+# minimum.
+NOTCH_TIE_DB = 6.0
 L_BOARD_RANGE = (0.2e-9, 5e-9)  # the pads, the gap and a via of 1.6 mm
-# The tolerances come from the runs of 2026-08-04, at the coarse preset
-# and at the medium one. The control gave 1.0% at each preset, and the
-# largest error of an ESL was 2.3% (0.006 nH on 0.25 nH). Thus each
-# tolerance below keeps a margin of 5 times or more against a
-# measurement, and a real failure is much larger than that: an ESL that
-# the solver drops gives 100%.
-# The multithreaded engine is not bit-exact, thus two runs of the same
-# model give notches that differ by as much as 0.2%, and an ESL that
-# differs by about 0.01 nH. Read no more than that from the result.
+# The tolerances come from the runs of 2026-08-04, at the coarse preset and
+# at the medium preset. The control gave 1.0% at each preset. The largest
+# error of an ESL was 2.3% (0.006 nH on 0.25 nH). Thus each tolerance below
+# keeps a margin of 5 times or more against a measurement. A true failure
+# is much larger than that: an ESL that the solver removes gives 100%. The
+# multithreaded engine does not give the same bits each time. Thus two runs
+# of the same model give notches that are up to 0.2% different, and an ESL
+# that is about 0.01 nH different. Do not read more than that from the
+# result.
 CONTROL_TOL = 0.10      # L_board must not follow the value of the capacitor
 ESL_TOL = 0.15          # of the nominal value
-ESL_FLOOR_H = 0.03e-9   # ...but never a tolerance smaller than this
+ESL_FLOOR_H = 0.03e-9  # ...but not a tolerance smaller than this
 # The two-part board of `two()`: a lumped inductor that is an element of
-# its own reads about 5% high, thus its tolerance is not the tolerance of
-# an ESL. Refer to the log of 2026-08-04 (10).
+# its own reads about 5% high. Thus its tolerance is not the tolerance of
+# an ESL. `two()` below measures that error.
 L_PART_TOL = 0.15
 # |S11|^2 + |S21|^2 at the notch. The branch has no resistance in these
-# runs, thus the power that does not go through must come back, and only
-# the copper, the dielectric and the radiation take a little. A run that
-# gives less than this is not a measurement: an inductor of 5 nH gave
+# runs. Thus the power that does not go through must come back. Only the
+# copper, the dielectric and the radiation remove a small part. A run
+# that gives less than this is not a measurement. An inductor of 5 nH gave
 # 0.951 at coarse and 0.917 at medium, and its value then moved from
 # +5.1% to +16.2%. An inductor of 2 nH gives 0.975 and reads +5% at each
-# preset. This guard is what tells the two conditions apart.
+# preset. This guard shows the difference between the two conditions.
 POWER_MIN = 0.95
 
 
 def _in_poly(polys, x, y):
-    """Tell if (x, y) is inside any polygon of `polys` (the ray rule)."""
+    """Tell if (x, y) is in one of the polygons of `polys` (the ray rule)."""
     for poly in polys:
         inside = False
         n = len(poly)
@@ -109,13 +127,12 @@ def _in_poly(polys, x, y):
 
 
 def _check_gaps_open(model, centers):
-    """Test that no copper bridges any gap of `centers`.
+    """Test that no copper bridges a gap of `centers`.
 
-    The lesson of the log of 2026-08-04 (5): a round track end went past a
-    pad and into the gap, and the board then measured the copper and not
-    the part. Test the board BEFORE you read a number from it. The ring
-    of a via can do the same on a small land: refer to
-    `run_lumped.make_shunt`.
+    One time, a circular track end went across a pad and into the gap. The
+    board then measured the copper and not the part. Test the board BEFORE
+    you read a number from it. The ring of a via can do the same on a small
+    land: refer to `run_lumped.make_shunt`.
     """
     polys = model["polygons"].get("F.Cu", [])
     assert polys, "the model holds no copper on F.Cu"
@@ -132,18 +149,33 @@ def _check_gap_is_open(model, pkg=None):
 def notch(f, s21):
     """Give (the frequency of the notch, its depth in dB).
 
-    The minimum bin is not exact enough: the notch of this board moves by
-    about 10% for an ESL of 0.25 nH, and the bins are 7.5 MHz. Thus the
-    tool fits a parabola to the LINEAR magnitude around the minimum,
-    which is smooth there, and takes the vertex of it. It does not fit
-    the dB values: a deep notch is a cusp in dB.
+    The minimum bin is not sufficiently accurate. The notch of this board
+    moves by about 10% for an ESL of 0.25 nH, and the bins are 7.5 MHz.
+    Thus the tool fits a parabola to the LINEAR magnitude near the minimum,
+    which is smooth there. It then gets the vertex of the parabola. It does
+    not fit the dB values, because a deep notch is a cusp in dB.
 
-    Magnitudes only, and no phase: the reference plane of each port is
-    about 15 mm from the part, and that line rotates the phase. A matched
+    **The deepest bin is not always the correct minimum.** Thus the tool
+    gets the lowest minimum in NOTCH_TIE_DB from the deepest one. A second
+    resonance of the board then cannot replace the series resonance of the
+    part.
+
+    Magnitudes only, and no phase. The reference plane of each port is
+    about 15 mm from the part, and that line turns the phase. A matched
     line with no loss cannot change |S21|, thus it cannot move the notch.
     """
     mag = np.abs(s21)
-    i = int(np.argmin(mag))
+    deepest = int(np.argmin(mag))
+    limit = mag[deepest] * 10 ** (NOTCH_TIE_DB / 20.0)
+    # All local minimums that are sufficiently deep, and then the FIRST of
+    # them. The frequency increases along the array, thus the first one is
+    # the lowest. `deepest` itself is such a minimum. Thus the code always
+    # finds one. A minimum at an end of the sweep goes to the assertion
+    # below.
+    here = mag[1:-1]
+    deep = np.flatnonzero(
+        (here <= mag[:-2]) & (here < mag[2:]) & (here <= limit))
+    i = int(deep[0]) + 1 if len(deep) else deepest
     lo, hi = i - FIT_HALF_WIDTH, i + FIT_HALF_WIDTH + 1
     assert lo >= 0 and hi <= len(f), \
         "the notch is at the edge of the sweep (%.3f GHz)" % (f[i] / 1e9)
@@ -165,14 +197,15 @@ def simulate(tag, cval, esl, mesh, pkg=None):
         os.path.join(outdir, "shunt_c.kicad_pcb"), pkg=pkg)
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=F_STOP, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     les = model["lumped_elements"]
     assert len(les) == 1 and les[0]["type"] == "C" and les[0]["ny"] == "y", les
     _check_gap_is_open(model, pkg)
-    # The value and the body come from this file, and not from the board:
-    # the runs must differ in the ESL ALONE. The ESR stays 0, thus the
+    # The value and the body come from this file, and not from the board.
+    # The runs must be different ONLY in the ESL. The ESR stays 0, thus the
     # depth of the notch also stays a property of the board only.
     les[0]["value"] = cval
     les[0]["esl"] = esl
@@ -182,7 +215,7 @@ def simulate(tag, cval, esl, mesh, pkg=None):
         "f_start": F_START, "f_stop": F_STOP, "z0": Z0, "margin_mm": margin,
         "mesh": mesh, "n_freq": N_FREQ, "max_timesteps": 300000,
         "end_criteria": 1e-4, "lumped": True, "parasitics": True,
-        "excite": [1],   # port 1 only: this test needs S11 and S21 only
+        "excite": [1],  # port 1 only: this test uses only S11 and S21
     }
     return _solve(outdir, model, tag)
 
@@ -212,8 +245,13 @@ def _solve(outdir, model, tag):
         print(log.stdout[-3000:])
         print(log.stderr[-2000:])
         raise SystemExit("solver failed for %s" % tag)
+    # "timesteps" keeps the line that tells HOW the run ended. Before, the
+    # log gave the numbers of a run. It did not show if the run met its end
+    # criteria or stopped at the limit. A run that stops at the limit
+    # measures a notch that is not at its full depth.
     for line in log.stdout.splitlines():
-        if "lumped" in line or "ERROR" in line or "WARNING" in line:
+        if ("lumped" in line or "ERROR" in line or "WARNING" in line
+                or "timesteps" in line):
             print("  " + line.strip())
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))
     return (rows[:, 0], rows[:, 1] + 1j * rows[:, 2],
@@ -223,34 +261,33 @@ def _solve(outdir, model, tag):
 def two(mesh="coarse"):
     """Measure TWO parts that have an effect on each other.
 
-    Item 7 of the roadmap. Every other board here holds ONE element, thus
-    two boxes near each other, and the series topology under interaction,
-    had no test at all.
+    Item 7 of the roadmap. All other boards here have ONE element. Thus two
+    boxes near each other, and the series topology with an interaction, had
+    no test.
 
     The board (`run_lumped.make_shunt2`) puts a C and an L in SERIES from
-    the line to ground. The pair resonates at
-    `1/(2*pi*sqrt((L + L_board)*C))`, thus the two parts together give a
-    FREQUENCY. This is on purpose. A matching network is the circuit that
-    the roadmap names, but its observable is a return loss - an
-    AMPLITUDE - and the log of 2026-08-04 (6) measured what an amplitude
-    is worth on this path: 10 to 20 ohm of systematic error. A resonance
-    of the pair tests the same interaction with the observable that the
-    log of (8) showed to be reliable.
+    the line to ground. The pair resonates at `1/(2*pi*sqrt((L +
+    L_board)*C))`. Thus the two parts together give a FREQUENCY, and this
+    is on purpose. The roadmap names a matching network. But the observable
+    of a matching network is a return loss, which is an AMPLITUDE. An
+    amplitude has a small value on this path, because the systematic error
+    of the series extraction is 10 to 20 ohm. A resonance of the pair tests
+    the same interaction with a FREQUENCY, and a frequency has no such
+    error.
 
-    The control is the same difference as everywhere here: the second run
-    makes the inductor a 0 ohm RESISTOR, which `runner.build` puts into
-    the model as a box of METAL. Thus the geometry does not change at
-    all, the branch keeps the same loop, and the difference of the two
-    notches is the inductor alone. That run also tests the 0 ohm path,
-    which no other test reaches.
+    The control is the same difference as in all the other tests here. The
+    second run makes the inductor a 0 ohm RESISTOR, which `runner.build`
+    puts into the model as a box of METAL. Thus the geometry does not
+    change, and the branch keeps the same loop. The difference of the two
+    notches is then only the inductor. That run also tests the 0 ohm path,
+    and no other test does.
     """
     cval = 4.7e-12
-    # TWO values of the inductor, and not one. A lumped inductor of its
-    # own reads about 8% HIGH on this mesh (the log of 2026-08-04 (10)),
-    # and one value alone cannot say whether an error is proportional to
-    # the inductor or a constant of the geometry. Two values can.
-    # 2 nH and 1 nH. An inductor of 5 nH is OUT of the regime where this
-    # board measures: refer to POWER_MIN.
+    # TWO values of the inductor, and not one. A lumped inductor of its own
+    # reads about 8% HIGH on this mesh. One value cannot tell if an error
+    # is in proportion to the inductor or a constant of the geometry. Two
+    # values can. 2 nH and 1 nH. An inductor of 5 nH is OUT of the range
+    # where this board measures: refer to POWER_MIN.
     cases = [("short", "R", 0.0), ("l2", "L", 2e-9), ("l1", "L", 1e-9)]
     out = {}
     for tag, kind, value in cases:
@@ -263,7 +300,8 @@ def two(mesh="coarse"):
         board, pads = run_lumped.make_shunt2(
             os.path.join(outdir, "shunt2.kicad_pcb"))
         margin = 4.0
-        model = board_reader.extract(board, pads, margin_mm=margin)
+        model = board_reader.extract(board, pads, margin_mm=margin,
+                                     f_stop=F_STOP, mesh=mesh)
         for p in model["ports"]:
             p["type"] = "msl"
         les = {e["ref"]: e for e in model["lumped_elements"]}
@@ -318,20 +356,20 @@ def two(mesh="coarse"):
         if abs(got - lval) > max(L_PART_TOL * lval, ESL_FLOOR_H):
             fails.append("the pair gives %.4f nH for an inductor of %.4f nH"
                          % (got * 1e9, lval * 1e9))
-    # Each value reads HIGH, and the excess is PROPORTIONAL to the
+    # Each value reads HIGH, and the error is IN PROPORTION to the
     # inductor: it is a percentage and not a constant of the geometry.
-    # Measured on 2026-08-05 with 4 values at the coarse preset, of which
-    # 3 are inside the power guard: +4.2%, +5.2% and +4.2% on 0.5, 1 and
-    # 2 nH. A straight line through the excess gives a slope of
-    # +0.041 nH/nH and an intercept of +0.005 nH, and the intercept is
-    # under the scatter of this rig (0.01 nH). An additive term of the
-    # geometry would give the opposite: an intercept and no slope. Two
-    # probes of 2026-08-04 (10) had already excluded the timestep and a
-    # branch inductance that follows the frequency. Thus the excess
-    # belongs to the lumped inductor itself. The numbers that the log of
-    # (10) used for this conclusion came from a 5 nH run OUTSIDE the
-    # guard; these come from inside it. The test holds the SIGN, because
-    # a value that reads LOW would be a different defect.
+    # Measured on 2026-08-05 with 4 values at the coarse preset, and 3 of
+    # them are in the power guard: +4.2%, +5.2% and +4.2% on 0.5, 1 and
+    # 2 nH. A straight line through the error gives a slope of
+    # +0.041 nH/nH and an intercept of +0.005 nH. The intercept is less
+    # than the scatter of this rig (0.01 nH). An additive term of the
+    # geometry gives the opposite: an intercept and no slope. Two earlier
+    # probes showed that the timestep is not the cause. They also showed
+    # that a branch inductance that follows the frequency is not the cause.
+    # Thus the error comes from the lumped inductor itself. The first
+    # numbers for this result came from a 5 nH run OUT OF the power guard.
+    # These numbers come from runs in it. The test holds the SIGN, because
+    # a value that reads LOW is a different defect.
     print("\n   the excess is %+.4f nH and %+.4f nH: a lumped inductor of "
           "its own reads high" % (excess[0] * 1e9, excess[1] * 1e9))
     if min(excess) < -ESL_FLOOR_H:
@@ -350,18 +388,19 @@ def two(mesh="coarse"):
 def packages(mesh="coarse"):
     """Measure the ESL table of `board_reader`, one package at a time.
 
-    Item 6b of the roadmap. Each entry of the table is a different
-    package, thus each one has a different land pattern AND a different
-    L_board. The tool runs each package two times, with no ESL and with
-    the ESL of the table, and takes the difference.
+    Item 6b of the roadmap. Each entry of the table is a different package.
+    Thus each one has a different land pattern AND a different L_board. The
+    tool runs each package two times, with no ESL and with the ESL of the
+    table. It then calculates the difference.
 
-    **What this gives, and what it does not.** It gives L_board for each
-    land pattern, which any comparison against a real part needs first,
-    and it holds the full path (the extraction, the mesh and the solver)
-    against the table for 8 geometries, from a gap of 0.18 mm to one of
-    4.70 mm. It does NOT say that the values of the table are the
-    correct values for a real part: that needs the S-parameters of a
-    manufacturer, and this file has no such data.
+    **What this gives, and what it does not give.** It gives L_board for
+    each land pattern. You must know that value before you compare against
+    a part on a board. It also holds the full path (the extraction, the
+    mesh and the solver) against the table for 8 geometries. The gap goes
+    from 0.18 mm to 4.70 mm. It does NOT show that the values of the
+    table are the correct values for an actual part. For that, you must
+    have the S-parameters of a manufacturer, and this file has no such
+    data.
     """
     table = board_reader.package_presets()
     order = sorted(table, key=lambda p: run_lumped.shunt_land(p)[2])
@@ -369,9 +408,9 @@ def packages(mesh="coarse"):
     for pkg in order:
         pad_l, pad_w, gap = run_lumped.shunt_land(pkg)
         esl = table[pkg]
-        # One package that fails must not discard the 14 runs before it.
-        # The usual cause is a notch that goes out of the sweep: a large
-        # land has a large L_board, thus a lower notch.
+        # One package that stops with an error must not discard the 14 runs
+        # before it. The usual cause is a notch that goes out of the sweep.
+        # A large land has a large L_board, thus a lower notch.
         try:
             f_a, d_a, l_board = measure("pkg%s_0" % pkg, C_NOM, 0.0, mesh, pkg)
             f_b, d_b, l_tot = measure("pkg%s_esl" % pkg, C_NOM, esl, mesh, pkg)
@@ -385,6 +424,15 @@ def packages(mesh="coarse"):
             if d > NOTCH_MIN_DB:
                 fails.append("%s (%s): the notch is only %.1f dB deep"
                              % (pkg, tag, d))
+        # An ESL adds to L_total, thus L_total cannot decrease. A decrease
+        # shows that one of the two runs measured the incorrect minimum.
+        if got <= 0:
+            fails.append("%s: L_total FELL from %.4f nH to %.4f nH when "
+                         "the ESL went in. No ESL can do that, thus one "
+                         "run measured the wrong dip: refer to "
+                         "NOTCH_TIE_DB"
+                         % (pkg, l_board * 1e9, l_tot * 1e9))
+            continue
         if abs(got - esl) > max(ESL_TOL * esl, ESL_FLOOR_H):
             fails.append("%s: the table says %.2f nH and the run gives "
                          "%.4f nH" % (pkg, esl * 1e9, got * 1e9))
@@ -424,9 +472,9 @@ def main(mesh="coarse", mode="method"):
         fails.append("the board inductance %.3f nH is outside %.2f..%.2f nH"
                      % (l_board * 1e9, L_BOARD_RANGE[0] * 1e9,
                         L_BOARD_RANGE[1] * 1e9))
-    # The control: the same board with another capacitor must give the
+    # The control: the same board with a different capacitor must give the
     # same board inductance. If it does not, the number is not an
-    # inductance of the board and nothing below it means anything.
+    # inductance of the board, and the results below it are not correct.
     l_ctrl = out["control"][4]
     d_ctrl = abs(l_ctrl - l_board) / l_board
     print("\ncontrol: L_board %.4f nH at %.3g pF against %.4f nH at %.3g pF "
@@ -447,6 +495,13 @@ def main(mesh="coarse", mode="method"):
         print("   %9.2f     %7.4f     %8.4f   %13.4f   %+.1f%%"
               % (esl * 1e9, f0 / 1e9, ltot * 1e9, got * 1e9,
                  100 * (got - esl) / esl))
+        if got <= 0:
+            fails.append("the ESL of %.2f nH made L_total FALL from "
+                         "%.4f nH to %.4f nH. No ESL can do that, thus "
+                         "one run measured the wrong dip: refer to "
+                         "NOTCH_TIE_DB"
+                         % (esl * 1e9, l_board * 1e9, ltot * 1e9))
+            continue
         if abs(got - esl) > tol:
             fails.append("ESL %.2f nH measured as %.4f nH (tolerance %.3f nH)"
                          % (esl * 1e9, got * 1e9, tol * 1e9))

@@ -1,4 +1,5 @@
-"""A full test without the GUI of KiCad: board -> model.json -> openEMS -> .s2p.
+"""A full test without the GUI of KiCad: board -> model.json -> openEMS ->
+.s2p.
 
 Run this file with the python of KiCad 10. This is the path of a per-user
 installation. A machine-wide installation is in
@@ -7,7 +8,7 @@ installation. A machine-wide installation is in
 
 A microstrip through line of about 50 ohm must give a good match and a low
 insertion loss. The limits in the asserts are wide, because FDTD and FR4
-both have large tolerances.
+have large tolerances.
 """
 import json
 import os
@@ -30,7 +31,8 @@ def main(mesh="medium", port_type="msl"):
         os.path.join(outdir, "microstrip_50ohm.kicad_pcb"))
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = port_type
     model["settings"] = {

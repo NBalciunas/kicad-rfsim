@@ -1,7 +1,7 @@
-"""Test the three types of lumped element against closed-form theory.
+"""Test the three types of lumped element against a closed formula.
 
-One series R, L or C bridges a gap of 0.5 mm in a microstrip of 50 ohm.
-For a series impedance Z between two lines of Z0:
+One series R, L or C bridges a gap of 0.5 mm in a microstrip of 50 ohm. For
+a series impedance Z between two lines of Z0:
 
     S21 = 2*Z0 / (2*Z0 + Z)        S11 = Z / (Z + 2*Z0)
 
@@ -12,20 +12,20 @@ Thus each type has a different and clear signature from 1 to 5 GHz:
     C = 1 pF   : |S21| INCREASES  -5.5 ->  -0.4 dB  (Z = 1/jwC decreases with f)
 
 The opposite slopes are the important result. An element that the
-simulation ignores cannot make them: it is an open circuit, thus |S21| is
+simulation ignores cannot make them. It is an open circuit, thus |S21| is
 much lower and its slope goes in the other direction. You also cannot
 confuse L and C. The mesh has only a small effect on the slope, but it has
-a large effect on the absolute magnitude. At the coarse preset the track
-of 2.9 mm is only about 1 cell wide, and the parasitic series inductance
-then increases |Z| more and more with the frequency. Thus the test asserts
-the analytic magnitude only at the low end of the sweep. It prints the
-other points for examination.
+a large effect on the absolute magnitude. At the coarse preset, the track
+of 2.9 mm is only about 1 cell wide. The parasitic series inductance then
+increases |Z| more and more with the frequency. Thus the test asserts the
+analytic magnitude only at the low end of the sweep. It prints the other
+points for you to examine.
 
-An inductor needs openEMS v0.37 or later. Refer to the README,
+An inductor must have openEMS v0.37 or after. Refer to the README,
 "Installation".
 
-Run this file with the python of KiCad 10. It needs pcbnew, and it starts
-the solver itself:
+Run this file with the python of KiCad 10. It uses pcbnew, and it
+starts the solver itself:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_rlc.py [coarse|medium|fine]
 """
 import json
@@ -45,7 +45,7 @@ import solverenv  # noqa: E402
 import run_lumped  # noqa: E402  (this file uses its board builder again)
 
 Z0 = 50.0
-# ref, value text, kind, SI value
+# ref, value text, type, SI value
 CASES = [("R1", "50", "R", 50.0),
          ("L1", "10n", "L", 10e-9),
          ("C1", "1p", "C", 1e-12)]
@@ -71,19 +71,18 @@ def ideal(kind, value, f):
 def series_z_mag(kind, s21):
     """Give |Z| of an ideal series element from |S21| only.
 
-    |S21| = 2*Z0/|2*Z0 + Z|. To invert this equation you must know the
-    phase of Z, and the type of the element gives it. A resistor is real,
-    thus |2*Z0 + R| = 2*Z0 + R. L and C are imaginary, thus
-    |2*Z0 + jX| = sqrt(4*Z0^2 + X^2).
+    |S21| = 2*Z0/|2*Z0 + Z|. To invert this equation, you must know the
+    phase of Z, and the type of the element gives it. A resistor has no
+    imaginary part, thus |2*Z0 + R| = 2*Z0 + R. L and C have only an
+    imaginary part, thus |2*Z0 + jX| = sqrt(4*Z0^2 + X^2).
 
-    Magnitudes only make this calculation immune to the 50-ohm line
-    between the de-embedding plane of the port and the part. A matched
-    line with no loss changes the phase only, and it cannot change
+    Because this formula uses only magnitudes, the 50-ohm line between the
+    de-embedding plane of the port and the part has no effect on it. A
+    matched line with no loss changes only the phase, and it cannot change
     |S21|. Do NOT use the extraction from the phase,
     Z = 2*Z0*(1-S21)/S21. The reference planes of the MSL ports are about
-    10 mm from the part, which is some tenths of a wavelength. That
-    equation then gives incorrect values, for example a negative
-    resistance.
+    10 mm from the part, which is some tenths of a wavelength. That equation
+    then gives incorrect values, for example a negative resistance.
     """
     m = np.abs(s21)
     if kind == "R":
@@ -94,7 +93,7 @@ def series_z_mag(kind, s21):
 def implied(kind, zmag, f):
     """Give the value of the component from |Z|.
 
-    The calculation is correct only if the element is ideal.
+    The result is correct only if the element is ideal.
     """
     w = 2 * np.pi * f
     if kind == "R":
@@ -119,7 +118,8 @@ def simulate(ref, val, mesh):
         os.path.join(outdir, "series_%s.kicad_pcb" % ref), ref, val)
 
     margin = 4.0
-    model = board_reader.extract(board, pads, margin_mm=margin)
+    model = board_reader.extract(board, pads, margin_mm=margin,
+                                 f_stop=6e9, mesh=mesh)
     for p in model["ports"]:
         p["type"] = "msl"
     les = model["lumped_elements"]
@@ -130,7 +130,7 @@ def simulate(ref, val, mesh):
         "f_start": 1e9, "f_stop": 6e9, "z0": Z0, "margin_mm": margin,
         "mesh": mesh, "n_freq": 201, "max_timesteps": 300000,
         "end_criteria": 1e-4, "lumped": True,
-        "excite": [1],   # port 1 only: this test needs S11 and S21 only
+        "excite": [1],  # port 1 only: this test uses only S11 and S21
     }
     model_path = os.path.join(outdir, "model.json")
     with open(model_path, "w") as fh:
@@ -144,8 +144,13 @@ def simulate(ref, val, mesh):
         print(log.stdout[-3000:])
         print(log.stderr[-2000:])
         raise SystemExit("solver failed for %s" % ref)
+    # "timesteps" keeps the line that tells HOW the run ended. Before, the
+    # log gave the numbers of a run. It did not show if the run met its
+    # end criteria or stopped at the limit. A run that stops at the limit
+    # measures a notch that is not at its full depth.
     for line in log.stdout.splitlines():
-        if "lumped" in line or "ERROR" in line or "WARNING" in line:
+        if ("lumped" in line or "ERROR" in line or "WARNING" in line
+                or "timesteps" in line):
             print("  " + line.strip())
 
     rows = np.loadtxt(os.path.join(outdir, "results.s2p"), comments=("!", "#"))
@@ -178,7 +183,7 @@ def check(ref, val, kind, nominal, mesh):
             fails.append("|S21| at %.2f GHz: %.2f dB vs ideal %.2f (>%.1f dB off)"
                          % (f[i] / 1e9, got, want, MAG_TOL_DB))
 
-    # The most important test: in which direction does |S21| slope?
+    # The most important test: the direction of the slope of |S21|.
     lo = int(np.argmin(np.abs(f - SLOPE_F[0])))
     hi = int(np.argmin(np.abs(f - SLOPE_F[1])))
     slope = db(s21[hi]) - db(s21[lo])
@@ -190,7 +195,7 @@ def check(ref, val, kind, nominal, mesh):
     if kind == "R" and abs(slope) > MAG_TOL_DB:
         fails.append("resistor should be flat: slope %+.2f dB" % slope)
 
-    # a test of the value, at the low frequency for the same reason
+    # a test of the value, at the low frequency for the same cause
     i = int(np.argmin(np.abs(f - MAG_CHECK_F)))
     v = implied(kind, zmag[i], f[i])
     if not (0.5 * nominal < v < 2.0 * nominal):
