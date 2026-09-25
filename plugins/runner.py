@@ -407,10 +407,11 @@ def _time_step_choice(model):
                    % (f, "%.4g, %s" % (rule, why) if rule
                       else "the full Courant step"))
     if not s.get("lumped", True):
-        return None, "the full Courant step: no lumped element is modelled"
+        return None, ("the full Courant step, because no lumped element "
+                      "is modelled")
     f, why = _time_step_rule(model)
     return (f, "%.4g, %s" % (f, why)) if f else (
-        None, "the full Courant step: %s" % why)
+        None, "the full Courant step, because %s" % why)
 
 
 def _time_step_rule(model):
@@ -497,14 +498,17 @@ def _decisions(model, res, rlc=True):
     ports = _port_geometry(model, res, quiet=True)
     for g in ports:
         if g.get("fallback"):
-            out.append("port %d: a lumped port, and not a %s" % (
+            out.append("Port %d is a lumped port, and not a %s" % (
                 g["number"], g["fallback"]))
+    # **Each line is a sentence**, with its subject first, and not
+    # "category: text". The log puts "[rfsim] optimization: " in front of
+    # it, and two labels in one line read badly.
     mesh = []
     _mesh(model, ports, res, mesh)
-    out += ["mesh: " + line for line in mesh]
+    out += mesh
     if not s.get("lumped", True):
-        out.append("lumped elements: no element is modelled (all Model "
-                   "boxes are clear), thus all gaps stay open")
+        out.append("No lumped element is modelled (all Model boxes are "
+                   "clear), thus all gaps stay open")
     else:
         para = s.get("parasitics", True) and rlc
         ported = _ported_refs(model)
@@ -512,16 +516,17 @@ def _decisions(model, res, rlc=True):
         for e in model.get("lumped_elements", []):
             ref = e.get("ref", "?")
             if ref in ported:
-                out.append("%s: a port is in its box (lumped_ports), and "
+                out.append("%s has a port in its box (lumped_ports), and "
                            "its value goes into the S-matrix after the "
                            "run" % ref)
                 continue
             if e.get("type") == "R" and e.get("value") == 0:
-                out.append("%s: 0 ohm, thus a box of metal (a short)" % ref)
+                out.append("%s is 0 ohm, thus a box of metal (a short)"
+                           % ref)
                 continue
             comp = _components(e, para, s)
             if not comp:
-                out.append("%s: not modelled, because it has no type or "
+                out.append("%s is not modelled, because it has no type or "
                            "no value. Its gap stays open." % ref)
                 continue
             # The value of the part first, and then what its body adds.
@@ -554,7 +559,7 @@ def _decisions(model, res, rlc=True):
             if ref in opens:
                 epc = (e.get("epc") or 0.0) if para else 0.0
                 out.append(
-                    "%s (%s%s): an open circuit from %s, because its smallest "
+                    "%s (%s%s) is an open circuit from %s, because its smallest "
                     "|Z| is %s, %.0f times z0 (the limit is %g times). "
                     "Thus it is not in the grid, %s, and it costs no "
                     "timestep"
@@ -575,7 +580,7 @@ def _decisions(model, res, rlc=True):
             else:
                 path = ("the classic path (LEtype 0), because it is one R "
                         "or one C")
-            out.append("%s (%s%s): in the grid, on %s. Its smallest |Z| "
+            out.append("%s (%s%s) is in the grid, on %s. Its smallest |Z| "
                        "from %s is %s (%.2g times z0), thus it is not an "
                        "open"
                        % (ref, parts, body, path, band, _si(z, "ohm"),
@@ -583,11 +588,11 @@ def _decisions(model, res, rlc=True):
             # The position of its EPC comes from the MESH. Thus `main`
             # tells it after the first build: `_epc_decisions`.
     f, why = _time_step_choice(model)
-    out.append("timestep: " + why)
+    out.append("The timestep is " + why)
     if f and f < 1.0:
-        out.append("step limit: %d, which is the %d of Max steps divided "
-                   "by the factor, for the same simulated time. A run "
-                   "usually stops before it, when its field becomes "
+        out.append("The step limit is %d, which is the %d of Max steps "
+                   "divided by the factor, for the same simulated time. A "
+                   "run usually stops before it, when its field becomes "
                    "stable."
                    % (_max_timesteps(model), s["max_timesteps"]))
     return out
@@ -610,14 +615,15 @@ def _epc_decisions(model, grid, rlc=True):
         if epc <= 0 or e.get("type") != "L" or e.get("ref") in skip:
             continue
         split = _epc_split(grid, e)
-        out.append("%s: its EPC of %s %s" % (
+        out.append("The EPC of %s (%s) %s" % (
             e.get("ref", "?"), _si(epc, "F"),
-            "is adjacent to it, on the other half of its land (the mesh "
-            "line at %.4f mm divides the land)" % split if split is not None
-            else "is removed, because its land has only one cell across "
-                 "the current, and two elements cannot share a box. Thus "
-                 "the part has no self-resonance. A finer mesh preset "
-                 "gives the land more cells."))
+            "is adjacent to the part, on the other half of its land (the "
+            "mesh line at %.4f mm divides the land)" % split
+            if split is not None
+            else "is removed, because the land of the part has only one "
+                 "cell across the current, and two elements cannot share a "
+                 "box. Thus the part has no self-resonance. A finer mesh "
+                 "preset gives the land more cells."))
     return out
 
 
@@ -1114,7 +1120,7 @@ def _port_geometry(model, res, quiet=False):
                        "it has no plane above and below the strip")
                 # The cause stays with the port. Thus `_decisions` can tell
                 # it without a second copy of this test.
-                g["fallback"] = "%s: %s" % (p["type"], why)
+                g["fallback"] = "%s, because %s" % (p["type"], why)
                 if not quiet:
                     print("[rfsim] WARNING: port %d (%s): %s, thus it "
                           "changes to a lumped port"
@@ -2165,7 +2171,7 @@ def main(model_path, outdir):
             threads = _threads(s, cells)
             print("[rfsim] engine: multithreaded, %d thread(s)" % threads,
                   flush=True)
-            keep("engine: %d thread(s), %s" % (
+            keep("The engine uses %d thread(s), %s" % (
                 threads, "from the CPU threads of the settings"
                 if s.get("threads")
                 else "from the rule for %d cells (4 below 150 k cells, 8 "
@@ -2179,12 +2185,12 @@ def main(model_path, outdir):
         end = _report_end(sim_path, _max_timesteps(model),
                           s["end_criteria"])
         if end:
-            keep("excitation of port %d: %s" % (k + 1, end))
+            keep("The excitation of port %d %s" % (k + 1, end))
         bad = _diverged(sim_path)
         if bad:
             name, cause = bad
-            keep("excitation of port %d: stopped, %s" % (
-                k + 1, "NaN in %s" % name if cause == "nan"
+            keep("The excitation of port %d stopped, because %s" % (
+                k + 1, "%s has NaN values" % name if cause == "nan"
                 else "the field grew again in %s" % name))
             tsf = _time_step_factor(model) or 1.0
             if cause == "nan":

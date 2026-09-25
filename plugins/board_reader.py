@@ -1078,11 +1078,11 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                                 "model it" % ref)
             continue
         if kind and min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
-            notes.append("%s: at an angle, thus RFsim models it as an "
+            notes.append("%s is at an angle, thus RFsim models it as an "
                          "element on the %s axis" % (ref, ny))
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
-            notes.append("%s: %s" % (ref, pkg_warn))
+            notes.append("For %s, %s" % (ref, pkg_warn))
         # **The EPC is None until the user gives it**, and no table gives
         # it. The dimension of the package does not give the
         # self-capacitance of a winding. Only the S-parameters of the part

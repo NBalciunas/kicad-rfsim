@@ -800,19 +800,19 @@ def test_the_run_says_what_it_chose():
         f, why = runner._time_step_choice(m)
         assert f == runner._time_step_factor(m), \
             "the reason and the number must come from one place"
-        assert "timestep: " + why in got, got
+        assert "The timestep is " + why in got, got
         return got
 
     got = lines(dict(type="L", value=90e-6))
     assert "an open circuit from 1 to 6 GHz" in got[0] and "565 kohm" in got[0] \
         and "its gap stays open" in got[0], got
-    assert got[-1] == ("timestep: the full Courant step: no element must "
-                       "have a smaller step"), got
+    assert got[-1] == ("The timestep is the full Courant step, because no "
+                       "element must have a smaller step"), got
     got = lines(dict(type="L", value=10e-9))
     assert "the series path (LEtype 1), because it has an inductance" \
         in got[0], got
     assert "set by the inductance of X1, 10 nH (0.5/sqrt(L[nH]))" in got[1], got
-    assert got[2].startswith("step limit: 1897366"), got
+    assert got[2].startswith("The step limit is 1897366"), got
     # A resistor on the series path is there for the ESL of its body, and
     # its resistance sets the factor. The log must tell the two. 90 ohm
     # keeps the 0603 body, because that body moves |Z| by 2.2% at 6 GHz.
@@ -829,8 +829,8 @@ def test_the_run_says_what_it_chose():
                              "0603 body, which changes |Z| by 0.018% or "
                              "less from 1 to 6 GHz (the limit is 2%))"), got
     assert "the classic path (LEtype 0)" in got[0], got
-    assert got[-1] == ("timestep: the full Courant step: no element must "
-                       "have a smaller step"), got
+    assert got[-1] == ("The timestep is the full Courant step, because no "
+                       "element must have a smaller step"), got
     got = lines(dict(type="R", value=1000.0, esl=0.5e-9, package="0603"),
                 keep_idle_body=True)
     assert "the series path (LEtype 1)" in got[0], \
@@ -843,10 +843,10 @@ def test_the_run_says_what_it_chose():
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
     assert "only its EPC of 2.81 pF stays, on the classic path" in got[0], got
     got = lines(dict(type="L", value=10e-9), port={"direction": None})
-    assert got[0].startswith("port 1: a lumped port, and not a msl: it has "
+    assert got[0].startswith("Port 1 is a lumped port, and not a msl, because it has "
                              "no track"), got
     got = lines(dict(type="R", value=None))
-    assert "not modelled" in got[0], got
+    assert "X1 is not modelled" in got[0], got
 
     # **The position of an EPC comes from the MESH.** Thus `main` gets it
     # after the first build. The land of the EPC test: 2.9 mm divides, and
@@ -864,7 +864,7 @@ def test_the_run_says_what_it_chose():
         return runner._epc_decisions(m, fdtd.GetCSX().GetGrid())
 
     got = epc_lines(2.9, -10.0)
-    assert len(got) == 1 and "is adjacent to it" in got[0] \
+    assert len(got) == 1 and "is adjacent to the part" in got[0] \
         and "280 fF" in got[0], got
     got = epc_lines(0.13, -10.14)
     assert len(got) == 1 and "is removed" in got[0], got
@@ -874,7 +874,7 @@ def test_the_run_says_what_it_chose():
     m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9, z0=50.0,
                          mesh="coarse", max_timesteps=300000,
                          end_criteria=1e-4, lumped=False)
-    m["notes"] = ["R3: at an angle, thus RFsim models it as an element on "
+    m["notes"] = ["R3 is at an angle, thus RFsim models it as an element on "
                   "the x axis"]
     got = runner._decisions(m, RES)
     assert got[0] == m["notes"][0], got
@@ -970,7 +970,7 @@ def test_the_mesh_says_what_it_chose():
     assert len(notes) == 1 and notes[0].startswith(
         "1 via(s) have a radius less than"), notes
     got = runner._decisions(m, RES)
-    assert got[0] == "mesh: " + notes[0], got
+    assert got[0] == notes[0], got
     with contextlib.redirect_stdout(out):
         runner._mesh(m, runner._port_geometry(m, RES, quiet=True), RES)
     assert "WARNING: 1 via(s) have a radius less than" in out.getvalue()
