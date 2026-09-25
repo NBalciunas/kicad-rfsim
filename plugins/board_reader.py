@@ -135,6 +135,12 @@ def _parse_value(text, kind):
     # also starts with a digit ("25V"). Thus the code does not attach them.
     if len(words) > 1 and words[1][:1] in _PREFIX + "rRfFhHoO":
         tok += words[1]
+    # A rating can also attach with a slash: "10uF/16V", or "10uF/" when
+    # the rating field is empty. Remove all the text after the slash.
+    tok = tok.split("/", 1)[0]
+    # "meg" is the mega of SPICE: "1meg" and "1Meg". Without this line the
+    # 'm' is milli, and "1.eg" is not a number, thus the part had no value.
+    tok = re.sub("meg", "M", tok, flags=re.IGNORECASE)
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -1418,6 +1424,12 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # a digit.
         ("4.7 1%", "R", 4.7), ("10u 25V", "C", 10e-6),
         ("4.7 kOhm 1%", "R", 4700.0), ("1 nF 50V", "C", 1e-9),
+        # A rating after a slash, and the mega of SPICE. Each one of these
+        # gave None before.
+        ("10uF/", "C", 10e-6), ("10uF/16V", "C", 10e-6),
+        ("1uF/25V X7R", "C", 1e-6), ("10 uF/16V", "C", 10e-6),
+        ("1meg", "R", 1e6), ("1Meg", "R", 1e6), ("2.2MEG", "R", 2.2e6),
+        ("1Megohm", "R", 1e6),
     ]
     for _t, _k, _want in _CASES:
         _got = _parse_value(_t, _k)

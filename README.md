@@ -231,7 +231,7 @@ The guard that refuses a run whose field grew. Three good traces must pass, and 
 * **`make_test_board.py`**  
 Makes the boards of `run_headless.py` and `run_cpw.py`.
 
-`%KIPY% plugins\board_reader.py` is the self-test of the value parser (67 cases).
+`%KIPY% plugins\board_reader.py` is the self-test of the value parser (75 cases).
 
 ## License
 
