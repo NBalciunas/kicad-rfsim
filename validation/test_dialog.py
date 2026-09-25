@@ -285,14 +285,14 @@ def test_unknown_part_without_a_value_cannot_run():
         r["kind"].SetSelection(gui.KIND_ORDER.index("C"))
         fire(r["kind"], wx.EVT_CHOICE)
         d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
-        assert "needs a value in pF" in stopped[-1], stopped
+        assert "must have a value in pF" in stopped[-1], stopped
         # A C of 0 is no part, thus the dialog refuses it. A resistor of
         # 0 ohm is a short (a 0R link), and the dialog accepts it. Its body
         # sets no timestep, because the runner makes it a box of metal.
         r["value"].SetValue("0")
         del stopped[:]
         d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
-        assert stopped and "needs a value in pF" in stopped[-1], stopped
+        assert stopped and "must have a value in pF" in stopped[-1], stopped
         r["kind"].SetSelection(gui.KIND_ORDER.index("R"))
         fire(r["kind"], wx.EVT_CHOICE)
         r["value"].SetValue("0")
@@ -410,7 +410,7 @@ def test_the_inductor_warning_follows_the_value():
     # inductor of 0.4 nH" before 2026-09-21, and the board holds NO
     # inductor: 0.40 nH is the body of an unknown package on R1.
     first = d.lumped_warn.GetLabel()
-    assert first.startswith("The body of R1 "),         "the label must name the body and its part: %r" % first
+    assert "because of the 0.4 nH of R1." in first,         "the label must name the body and its part: %r" % first
     # With no parasitics the board holds no inductance at all.
     ch = d.para_rows[0][2]
     ch.SetSelection(ch.GetStrings().index(gui.NO_PARASITICS))
@@ -430,9 +430,8 @@ def test_the_inductor_warning_follows_the_value():
     r["value"].SetValue("0.9")          # the body of a 2512: 1.9 times
     got = d.lumped_warn.GetLabel()
     assert "1.9 times longer" in got, got
-    # The same number from a part of type L reads differently: the
-    # words follow the SOURCE.
-    assert got.startswith("The inductor "),         "a part of type L must be named as an inductor: %r" % got
+    # The label names the value and the part that set the step.
+    assert "because of the 0.9 nH of L9." in got,         "a part of type L must be named as an inductor: %r" % got
     r["value"].SetValue("100")          # 100 nH: 20 times more steps
     text = d.lumped_warn.GetLabel()
     assert "20.0 times longer" in text, text
@@ -463,21 +462,22 @@ def test_the_label_follows_a_resistance_as_well():
     # 0.40 nH body without the resistance. The resistance sets the minimum.
     # The body moves |Z| of 70 ohm by 2.3% at 6 GHz, thus it stays.
     assert "1.4 times longer" in got, got
-    assert got.startswith("The resistor R1 (70 ohm)"), \
+    assert "because of the 70 ohm of R1." in got, \
         "the label must name the resistor and its value: %r" % got
     # **P21**: at 1000 ohm, the same body moves |Z| by 0.011%. Thus the run
     # removes it, and the resistor uses the classic path. The label tells
     # that, and it gives no cost.
     r["value"].SetValue("1000")
     got = d.lumped_warn.GetLabel()
-    assert got == ("R1: the run leaves out the parasitics of the body, "
-                   "which move |Z| by 2% or less over this sweep."), got
+    # The run leaves the body out, and the Optimizations list tells it.
+    # The label tells only a cost, and this part has none.
+    assert got == "", got
     # The SWEEP sets the result. At 100 GHz, the body is 251 ohm, 3.1% of
     # |Z|, and it comes back with the cost of the series path.
     # 5.8/sqrt(1000) = 0.183, thus 5.5 times.
     d.f_stop.SetValue("100")
     got = d.lumped_warn.GetLabel()
-    assert got.startswith("The resistor R1 (1000 ohm)") \
+    assert "because of the 1000 ohm of R1." in got \
         and "5.5 times longer" in got, got
     d.f_stop.SetValue("6")
     # With no parasitics the branch holds ONE component, thus no series
@@ -520,9 +520,9 @@ def test_an_open_part_leaves_the_grid():
             c.SetValue({"R": "50", "L": "90000", "C": "100"}[k])
         d._on_lumped(None)
         text = d.lumped_warn.GetLabel()
-        assert "D1 is an open circuit over this sweep (565 kohm)" in text, \
-            text
-        assert "leaves its gap open" in text and "no run time" in text, text
+        # The label tells that the run leaves the part out.
+        assert ("D1 (565 kohm) is not in the run, because it is an open "
+                "circuit over this sweep.") in text.replace("\n", " "), text
         # The cost of the part is gone: what stays is the body of R1.
         assert "600" not in text, \
             "an open part must not cost the timestep: %r" % text
@@ -537,11 +537,14 @@ def test_an_open_part_leaves_the_grid():
         r["srf"].SetValue("0.01")           # 10 MHz, which gives 2.81 pF
         d._on_lumped(None)
         text = d.lumped_warn.GetLabel()
-        assert "keeps its EPC of 2.81 pF alone" in text, text
+        # A choke that is open keeps only its EPC: it costs nothing, and
+        # the label tells that it is not in the run.
+        assert "D1 (" in text and "is not in the run" in text \
+            and "nH of D1" not in text, text
     finally:
         wx.MessageBox = old_box
     d.Destroy()
-    print("an open part leaves the grid OK (%s)" % text.splitlines()[-1])
+    print("an open part leaves the grid OK (%s)" % text)
 
 
 def test_the_dialog_refuses_a_run_that_cannot_finish():
@@ -573,17 +576,17 @@ def test_the_dialog_refuses_a_run_that_cannot_finish():
             c.SetValue({"R": "50", "L": "10000", "C": "100"}[k])
         d._on_lumped(None)
         text = d.lumped_warn.GetLabel()
-        assert "200.0 times longer: at most 60 million timesteps" in text, \
+        assert "200.0 times longer (up to 60 million timesteps)" in text, \
             "the label must give the count as a LIMIT: %r" % text
-        assert "open circuit" not in text, \
-            "126 times z0 is not an open: %r" % text
+        assert "because of the 10000 nH of D1." in text, \
+            "126 times z0 is not an open, thus its L costs: %r" % text
         del stopped[:]
         ok_evt()
         assert stopped, "a limit of 60 million steps must not start"
         msg = stopped[0]
-        assert "up to 60 million" in msg and "limit is not the length" in msg, \
+        assert "up to 60 million" in msg and "stops before the limit" in msg, \
             msg
-        assert '"Max steps" 250000 or less' in msg, \
+        assert '"Max steps" to 250000 or less' in msg, \
             "the message must give the Max steps that fits: %r" % msg
         assert "Timestep factor" not in msg, \
             "the message must not send the user to a factor that " \
@@ -621,7 +624,7 @@ def test_the_run_window_keeps_its_log():
     """
     import tempfile
     tmp = tempfile.mkdtemp()
-    for code, rc in (("print('[rfsim] decision: X1 on the CLASSIC path')",
+    for code, rc in (("print('[rfsim] optimization: X1 on the CLASSIC path')",
                       0),
                      ("import sys; print('[rfsim] ERROR: NaN'); sys.exit(3)",
                       3)):
@@ -916,10 +919,12 @@ def test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics():
         "a series RLC has no single value"
     assert not any(c.IsShown() for c in r["para_ctrls"]), \
         "a series RLC shows no package, no ESR and no ESL"
-    # The row of R1 keeps its value and its parasitics.
+    # The row of R1 keeps its value and its package and ESL. A resistor
+    # has no ESR field: its value IS its resistance.
     r0 = d.part_rows[0]
-    assert r0["value"].IsShown() and all(c.IsShown()
-                                         for c in r0["para_ctrls"])
+    _, _, ch0, esl0, esr0 = d.para_rows[0]
+    assert r0["value"].IsShown() and ch0.IsShown() and esl0.IsShown() \
+        and not esr0.IsShown()
     r["rlc"]["R"].SetValue("1.5")
     r["rlc"]["L"].SetValue("0.6")
     s = d.get_settings()
@@ -979,9 +984,7 @@ def test_a_series_rlc_part_needs_a_positive_component():
     text = d.lumped_warn.GetLabel()
     assert "20.0 times longer" in text, text
     # **The third source of the label** (B49): the L of a Series RLC.
-    # A part of type L reads "The inductor ..." and a package body
-    # reads "The body of ...".
-    assert text.startswith("The L of "),         "the L of a Series RLC must be named as such: %r" % text
+    assert "because of the 100 nH of D1." in text,         "the L of a Series RLC must be named as such: %r" % text
     d.Destroy()
     print("a series RLC part needs a component OK (0 leaves one out, and "
           "its L warns)")
@@ -1051,6 +1054,66 @@ def test_the_srf_field_belongs_to_an_inductor():
           "and the refusals)")
 
 
+def test_open_parts_have_one_line():
+    """The parts that are open over the sweep share one line: their names
+    up to 3 parts, and "Multiple components (N)" above 3, with the names
+    in the tooltip."""
+    d = dialog([unknown("D%d" % k) for k in range(1, 5)])
+    for n in range(1, 5):
+        r = rlc_row(d, n)
+        for k, c in r["rlc"].items():
+            c.SetValue({"R": "50", "L": "90000", "C": "100"}[k])
+        text = d.lumped_warn.GetLabel().replace("\n", " ")
+        names = ", ".join("D%d (565 kohm)" % k for k in range(1, n + 1))
+        want = ("D1 (565 kohm) is not in the run, because it is an open "
+                "circuit over this sweep." if n == 1 else
+                "%s are not in the run, because they are open circuits "
+                "over this sweep." % (names if n <= 3
+                                      else "Multiple components (4)"))
+        assert want in text, (n, text)
+        tip = d.lumped_warn.GetToolTipText()
+        assert tip == ("Open circuits over this sweep: " + names
+                       if n == 4 else ""), (n, tip)
+    d.Destroy()
+    print("open parts have one line OK (1 to 3 names, and Multiple "
+          "components above 3)")
+
+
+def test_a_row_shows_only_the_fields_that_its_type_uses():
+    """The runner gives the ESL only to an R and a C, and the ESR only to
+    a C and an L (`runner._parasitic_components`). A field that the run
+    does not read is hidden, and the fields that show move to the left.
+    Each field has one width, thus the first and the second field of
+    each row stay in two columns."""
+    d = dialog([unknown("D1")])
+    d.Show()
+    r = d.part_rows[1]
+    _, cb, _, esl, esr = d.para_rows[1]
+    cb.SetValue(True)
+    fire(cb, wx.EVT_CHECKBOX)
+    esl_r1 = d.para_rows[0][3]     # R1 is a resistor: no ESR field
+    for kind, want in (("R", {"ESL"}), ("C", {"ESR", "ESL"}),
+                       ("L", {"ESR", "SRF"})):
+        r["kind"].SetSelection(gui.KIND_ORDER.index(kind))
+        fire(r["kind"], wx.EVT_CHOICE)
+        d.Layout()
+        for _ in range(3):
+            wx.Yield()
+        got = {n for n, c in (("ESR", esr), ("ESL", esl),
+                              ("SRF", r["srf"])) if c.IsShown()}
+        assert got == want, (kind, got)
+        xs = sorted(c.GetPosition().x for c in (esr, esl, r["srf"])
+                    if c.IsShown())
+        # The first field is where the ESL of the resistor R1 is.
+        assert xs[0] == esl_r1.GetPosition().x, (kind, xs)
+        if kind == "C":
+            second = xs[1]
+        elif len(xs) > 1:   # the SRF of an inductor is where the ESL was
+            assert xs[1] == second, (kind, xs, second)
+    d.Destroy()
+    print("a row shows only the fields that its type uses OK (R, C, L)")
+
+
 def test_an_inductor_row_keeps_its_model_box_in_view():
     """A row that becomes an inductor keeps the Model checkbox in view.
 
@@ -1083,8 +1146,62 @@ def test_an_inductor_row_keeps_its_model_box_in_view():
               if c.IsWindow() and isinstance(c.GetWindow(), wx.StaticText)]
     for want in ("Resistance:", "Inductance:", "Capacitance:"):
         assert want in labels, labels
+    # **A change of the type does not change the width of the unit.** The
+    # window of the rows gets its width when the dialog opens. "nH" is
+    # wider than "pF" and than the empty unit of "Unknown". Thus a board
+    # with no "ohm" row got a row wider than that window when a part
+    # became an inductor.
+    for kind in (None, "C", "L", gui.RLC_KIND, "R"):
+        r["kind"].SetSelection(gui.KIND_ORDER.index(kind))
+        fire(r["kind"], wx.EVT_CHOICE)
+        width = r["unit"].GetEffectiveMinSize().width
+        if kind is None:
+            first = width
+        assert width == first, "%s: the unit went from %d px to %d px" \
+            % (kind, first, width)
     d.Destroy()
     print("an inductor row keeps its Model box in view OK (R, L, Series RLC)")
+
+
+def test_each_refusal_names_its_field():
+    """A value that is not correct gives a message that names ITS field.
+
+    Before, one message ("Check frequency / impedance / substrate
+    values.") came for all the fields. It did not tell the user which
+    field to correct.
+    """
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        for attr, text, want in (
+                ("f_start", "0", '"Start" must be a number more than 0.'),
+                ("f_stop", "0.5", '"Stop" must be a number more than '
+                                  '"Start".'),
+                ("f_field", "9", '"Define at" must be a number from '
+                                 '"Start" to "Stop".'),
+                ("z0", "abc", '"Port impedance" must be a number more '
+                              'than 0.'),
+                ("er", "0.5", '"er" must be a number of 1 or more.'),
+                ("h", "0", '"Substrate thickness" must be a number more '
+                           'than 0.')):
+            d = dialog()
+            d.preset.SetSelection(1)  # FR-4: the fields are open
+            d._apply_preset()
+            getattr(d, attr).ChangeValue(text)
+            del stopped[:]
+            d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+            assert stopped == [want], (attr, stopped)
+            d.Destroy()
+        d = dialog()
+        d.para_rows[0][4].ChangeValue("-1")
+        del stopped[:]
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert stopped == ['Element "%s": "ESR" must be a number of 0 or '
+                           'more.' % d.para_rows[0][0]], stopped
+        d.Destroy()
+    finally:
+        wx.MessageBox = old_box
+    print("each refusal names its field OK (7 fields)")
 
 
 if __name__ == "__main__":
@@ -1112,4 +1229,7 @@ if __name__ == "__main__":
     test_a_series_rlc_part_needs_a_positive_component()
     test_the_srf_field_belongs_to_an_inductor()
     test_an_inductor_row_keeps_its_model_box_in_view()
+    test_a_row_shows_only_the_fields_that_its_type_uses()
+    test_open_parts_have_one_line()
+    test_each_refusal_names_its_field()
     print("PASS")

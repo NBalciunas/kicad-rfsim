@@ -932,8 +932,9 @@ def _package(name):
     return pkg, ("the footprint \"%s\" gives the code %s with no metric "
                  "code adjacent to it, thus the dimension can be "
                  "imperial or metric. The model uses the imperial %s "
-                 "(ESL %.2f nH). A METRIC %s is %s. If the part is "
-                 "metric, give its values in the dialog."
+                 "(ESL %.2f nH). A metric %s is %s. If the part is "
+                 "metric, set its package or its ESL in the dialog, and "
+                 "run again."
                  % (name, pkg, pkg, _ESL_NH[pkg], pkg, other))
 
 
@@ -957,7 +958,10 @@ def _parasitics(fp, kind):
 def _lumped_elements(board, region, copper_layers, skip_refs):
     """Find each part with 2 terminals in `region`.
 
-    The result is (elements, warnings). Each element is a box that bridges
+    The result is (elements, warnings, notes). A warning is a problem
+    that the user must see before the run. A note is a decision that the
+    run made by itself, and it goes to the Optimizations list of the run
+    and not into a message box. Each element is a box that bridges
     the gap between the two pads of the part. The box is parallel to the
     nearest Cartesian axis, because openEMS lets current flow along one
     axis only. The function changes the values to SI units. It ignores the
@@ -973,7 +977,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     until the user gives it a type and a value.
     """
     z_of = {c["name"]: c["z"] for c in copper_layers}
-    elements, warnings = [], []
+    elements, warnings, notes = [], [], []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         kind = ref[:1].upper()
@@ -1074,11 +1078,11 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                                 "model it" % ref)
             continue
         if kind and min(dx, dy) > 0.25 * max(dx, dy, 1e-9):
-            warnings.append("%s is at an angle, thus RFsim models it as "
-                            "an element on the %s axis" % (ref, ny))
+            notes.append("%s: at an angle, thus RFsim models it as an "
+                         "element on the %s axis" % (ref, ny))
         pkg, esl, esr, pkg_warn = _parasitics(fp, kind)
         if pkg_warn:
-            warnings.append("%s: %s" % (ref, pkg_warn))
+            notes.append("%s: %s" % (ref, pkg_warn))
         # **The EPC is None until the user gives it**, and no table gives
         # it. The dimension of the package does not give the
         # self-capacitance of a winding. Only the S-parameters of the part
@@ -1090,7 +1094,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                          "pads": [list(c1), list(c2)],
                          "package": pkg, "esl": esl, "esr": esr,
                          "epc": None})
-    return elements, warnings
+    return elements, warnings, notes
 
 
 def _port(board, pad, number, copper_layers):
@@ -1244,7 +1248,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 and it.GetBoundingBox().Intersects(region)):
             warnings.append(
                 "the text \"%s\" on %s is in the simulated area, but "
-                "RFsim does NOT model it as copper"
+                "RFsim does not model it as copper"
                 % (it.GetShownText(True), _lname(it.GetLayer())))
 
     z_of = {c["name"]: c["z"] for c in copper_layers}
@@ -1340,7 +1344,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # port pad is the port, not a different element. Thus ignore its
     # footprint.
     port_refs = {pad.GetParentFootprint().GetReference() for pad in pads}
-    lumped, le_warn = _lumped_elements(board, region, copper_layers, port_refs)
+    lumped, le_warn, notes = _lumped_elements(board, region, copper_layers,
+                                              port_refs)
     warnings += le_warn
 
     for c in copper_layers:
@@ -1361,6 +1366,9 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         "ports": ports,
         "lumped_elements": lumped,
         "warnings": warnings,
+        # The decisions of the reader. The runner puts them into the
+        # Optimizations list: they are not problems.
+        "notes": notes,
     }
 
 

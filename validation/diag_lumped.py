@@ -133,7 +133,8 @@ def report(board=None, margin_mm=4.0, f_stop=6e9, mesh="coarse"):
         out("    ACCEPTED -> modelled as %s = %g" % (kind, val))
 
     out("\n%d R*/L*/C* footprint(s) examined" % n)
-    els, warns = br._lumped_elements(board, region, copper, ports)
+    els, warns, notes = br._lumped_elements(board, region, copper, ports)
+    warns += notes
     out("_lumped_elements -> %d element(s): %s"
         % (len(els), [(e["ref"], e["type"], e["value"]) for e in els]))
     for w in warns:

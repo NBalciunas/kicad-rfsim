@@ -64,9 +64,9 @@ def test_every_view_draws():
 
 
 def test_the_decisions_are_a_view():
-    """B56: decisions.log is a view of the window, as text and no plot.
+    """B56: optimizations.log is a view of the window, as text and no plot.
 
-    The runner writes the decisions of the run to decisions.log. A user
+    The runner writes the decisions of the run to optimizations.log. A user
     must not have to know the file. A run from before that file has no such
     view.
     """
@@ -74,12 +74,12 @@ def test_the_decisions_are_a_view():
     import tempfile
     f = frame()
     assert gui.DECISIONS_VIEW not in f.choice.GetStrings(), \
-        "a run with no decisions.log must have no such view"
+        "a run with no optimizations.log must have no such view"
     f.Destroy()
     log = "RFsim: the choices\n\ntimestep: the full Courant step\n"
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(os.path.join(OUT, "results.s2p"), tmp)
-        with open(os.path.join(tmp, "decisions.log"), "w",
+        with open(os.path.join(tmp, "optimizations.log"), "w",
                   encoding="utf-8") as fh:
             fh.write(log)
         f = gui.ResultsFrame(None, os.path.join(tmp, "results.s2p"))

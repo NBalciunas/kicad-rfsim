@@ -804,12 +804,12 @@ def test_the_run_says_what_it_chose():
         return got
 
     got = lines(dict(type="L", value=90e-6))
-    assert "an OPEN from 1 to 6 GHz" in got[0] and "565 kohm" in got[0] \
+    assert "an open circuit from 1 to 6 GHz" in got[0] and "565 kohm" in got[0] \
         and "its gap stays open" in got[0], got
     assert got[-1] == ("timestep: the full Courant step: no element must "
                        "have a smaller step"), got
     got = lines(dict(type="L", value=10e-9))
-    assert "the SERIES path (LEtype 1), because it has an inductance" \
+    assert "the series path (LEtype 1), because it has an inductance" \
         in got[0], got
     assert "set by the inductance of X1, 10 nH (0.5/sqrt(L[nH]))" in got[1], got
     assert got[2].startswith("step limit: 1897366"), got
@@ -825,28 +825,28 @@ def test_the_run_says_what_it_chose():
     # **P21**: 1 kohm with the same body removes the body, tells why, and
     # uses the classic path at the full step.
     got = lines(dict(type="R", value=1000.0, esl=0.5e-9, package="0603"))
-    assert got[0].startswith("X1 (R 1 kohm, WITHOUT the ESL 500 pH of its "
+    assert got[0].startswith("X1 (R 1 kohm, without the ESL 500 pH of its "
                              "0603 body, which changes |Z| by 0.018% or "
                              "less from 1 to 6 GHz (the limit is 2%))"), got
-    assert "the CLASSIC path (LEtype 0)" in got[0], got
+    assert "the classic path (LEtype 0)" in got[0], got
     assert got[-1] == ("timestep: the full Courant step: no element must "
                        "have a smaller step"), got
     got = lines(dict(type="R", value=1000.0, esl=0.5e-9, package="0603"),
                 keep_idle_body=True)
-    assert "the SERIES path (LEtype 1)" in got[0], \
+    assert "the series path (LEtype 1)" in got[0], \
         "keep_idle_body keeps the body for a rig: %s" % got
     got = lines(dict(type="R", value=1000.0), parasitics=False)
-    assert "the CLASSIC path (LEtype 0)" in got[0], got
+    assert "the classic path (LEtype 0)" in got[0], got
     got = lines(dict(type="L", value=10e-9), time_step_factor=0.3)
-    assert ("0.3, from the Timestep factor of the settings, which is more "
+    assert ("0.3, from the Timestep field of the settings, which is more "
             "important than the rule (the rule gives 0.1581") in got[1], got
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
     assert "only its EPC of 2.81 pF stays, on the classic path" in got[0], got
     got = lines(dict(type="L", value=10e-9), port={"direction": None})
-    assert got[0].startswith("port 1: a LUMPED port, and not a msl: it has "
+    assert got[0].startswith("port 1: a lumped port, and not a msl: it has "
                              "no track"), got
     got = lines(dict(type="R", value=None))
-    assert "NOT modelled" in got[0], got
+    assert "not modelled" in got[0], got
 
     # **The position of an EPC comes from the MESH.** Thus `main` gets it
     # after the first build. The land of the EPC test: 2.9 mm divides, and
@@ -864,12 +864,23 @@ def test_the_run_says_what_it_chose():
         return runner._epc_decisions(m, fdtd.GetCSX().GetGrid())
 
     got = epc_lines(2.9, -10.0)
-    assert len(got) == 1 and "is ADJACENT to it" in got[0] \
+    assert len(got) == 1 and "is adjacent to it" in got[0] \
         and "280 fF" in got[0], got
     got = epc_lines(0.13, -10.14)
-    assert len(got) == 1 and "is REMOVED" in got[0], got
+    assert len(got) == 1 and "is removed" in got[0], got
+    # The notes of `board_reader` (a part at an angle, a package that can
+    # be metric) come FIRST, and not in the warning box before the run.
+    m = model("msl")
+    m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9, z0=50.0,
+                         mesh="coarse", max_timesteps=300000,
+                         end_criteria=1e-4, lumped=False)
+    m["notes"] = ["R3: at an angle, thus RFsim models it as an element on "
+                  "the x axis"]
+    got = runner._decisions(m, RES)
+    assert got[0] == m["notes"][0], got
     print("the run says what it chose OK (the path, the open, the source "
-          "of the timestep, a port that falls back, where the EPC went)")
+          "of the timestep, a port that falls back, where the EPC went, "
+          "the notes of the reader)")
 
 
 def test_a_body_that_changes_nothing_stays_out():

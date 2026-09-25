@@ -52,7 +52,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         self.name = "RFsim"
         self.category = "RF tools"
         self.description = ("Simulate S-parameters of the selected pad(s) "
-                            "with openEMS")
+                            "with openEMS.")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__),
                                            "assets", "icon.png")
@@ -64,7 +64,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(str(e), "RFsim", wx.ICON_ERROR)
         except Exception:
             import traceback
-            wx.MessageBox(traceback.format_exc(), "RFsim error", wx.ICON_ERROR)
+            wx.MessageBox(traceback.format_exc(), "RFsim", wx.ICON_ERROR)
 
     def _run(self):
         # The results window runs in the Python of KiCad. The solver runs

@@ -42,12 +42,12 @@ MAX_PART_ROWS = 6
 # hours, thus a user can let a choke run during the night. The value of
 # 90000 nH that started this rule causes 180 million steps. That is about
 # 135 hours on the SMALL board of the rigs, and more on the board of a
-# user. A user who wants such a run gives a "Timestep factor" of their own,
+# user. A user who wants such a run gives a "Timestep" of their own,
 # which this rule reads.
 MAX_DERIVED_STEPS = 50e6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
-DECISIONS_VIEW = "Decisions"      # the view of decisions.log: text, no plot
+DECISIONS_VIEW = "Optimizations"  # the view of optimizations.log: text, no plot
 # "Series RLC" is a type of its own, for a part that no single R, L or C
 # can model. A PIN diode that is off is C_T in series with L_s and R_s. Its
 # row has three fields and not one value, and it has no parasitics: its R
@@ -75,6 +75,14 @@ RLC_FIELDS = (("R", "r"), ("L", "l"), ("C", "c"))
 # frequency: C = 1 / ((2 pi f)^2 L). An empty field keeps the part as it
 # was. Thus this field changes no board that does not fill it in.
 SRF_LABEL, SRF_UNIT = "SRF:", "GHz"
+# The parasitic fields that each type USES. `runner._parasitic_components`
+# gives the ESL only to an R and a C, and the ESR only to a C and an L. An
+# inductor IS an inductance, and a resistor IS a resistance, thus the
+# runner does not read those fields. The SRF gives the EPC of an inductor
+# only. The dialog hides a field that the run does not read. "Unknown"
+# (None) shows the ESR and the ESL, as before a type is selected.
+PARA_FIELDS = {"R": ("ESL",), "C": ("ESR", "ESL"), "L": ("ESR", "SRF"),
+               None: ("ESR", "ESL")}
 
 
 def _board_substrate_text(model):
@@ -540,8 +548,9 @@ class SettingsDialog(wx.Dialog):
             #   Element "D1"  [Series RLC v]  Resistance: [0] ohm
             #       ... Inductance: [0] nH  Capacitance: [0] pF      [x] Model
             #
-            # Column 3 is an empty column that becomes WIDER. Thus the part
-            # stays at the left, and the parasitics stay at the right end.
+            # Column 2 holds the value and the parasitics, and it becomes
+            # WIDER. A space in it that becomes wider keeps the part at the
+            # left and the parasitics at the right end.
             #
             # The rows go into a SCROLLED window, and their parent is that
             # window and not the dialog. Each row is about 29 px tall. Thus
@@ -557,8 +566,8 @@ class SettingsDialog(wx.Dialog):
             self.part_area = wx.ScrolledWindow(lbox.GetStaticBox(),
                                                style=wx.VSCROLL)
             self.part_area.SetScrollRate(0, 10)
-            lg = wx.FlexGridSizer(cols=16, vgap=6, hgap=8)
-            lg.AddGrowableCol(3, 1)
+            lg = wx.FlexGridSizer(cols=4, vgap=6, hgap=8)
+            lg.AddGrowableCol(2, 1)
             self.part_area.SetSizer(lg)
             lbox.Add(self.part_area, 0, wx.ALL | wx.EXPAND, 6)
             pane = self.part_area
@@ -596,8 +605,8 @@ class SettingsDialog(wx.Dialog):
                 srf = wx.TextCtrl(pane, value="%g" % (1e-9 * (e.get("srf")
                                                               or 0.0)),
                                   size=(55, -1))
-                srf.SetToolTip("Self-resonant frequency of the inductor, "
-                               "from its datasheet. 0 = no self-resonance.")
+                srf.SetToolTip("Self-resonant frequency of the inductor. "
+                               "0 = no self-resonance.")
                 # The refdes gives the type and the Value field gives the
                 # number, and the row SHOWS what the parser read. But the
                 # two controls stay open. The user knows the part, and the
@@ -629,6 +638,12 @@ class SettingsDialog(wx.Dialog):
                 # from row to row.
                 qty.SetMinSize((max(pane.GetTextExtent(_qty_label(k))[0]
                                     for k in KIND_ORDER), -1))
+                # **The unit also keeps ONE width** for all the types. An
+                # "Unknown" row has no unit. When it became an inductor,
+                # "nH" made the row 20 px wider than the window of the
+                # rows, and the Model checkboxes moved out of view.
+                uni.SetMinSize((max(pane.GetTextExtent(u)[0]
+                                    for u in ENTRY_UNITS.values()), -1))
                 single = wx.BoxSizer(wx.HORIZONTAL)
                 single.Add(qty, 0, mid)
                 single.Add(value, 0, mid | wx.LEFT, 8)
@@ -636,54 +651,84 @@ class SettingsDialog(wx.Dialog):
                 triple = wx.BoxSizer(wx.HORIZONTAL)
                 rlc = {}
                 for k, _ in RLC_FIELDS:
-                    field = wx.TextCtrl(pane, value="0", size=(55, -1))
+                    field = wx.TextCtrl(pane, value="0", size=(90, -1))
                     field.SetToolTip("0 leaves the %s out of the part."
                                      % KIND_QUANTITY[k].lower())
+                    lbl = wx.StaticText(pane, label="%s:" % KIND_QUANTITY[k])
                     if rlc:
                         triple.AddSpacer(10)
-                    triple.Add(wx.StaticText(pane, label="%s:"
-                                             % KIND_QUANTITY[k]), 0, mid)
-                    triple.Add(field, 0, mid | wx.LEFT, 4)
+                    else:
+                        # The first field starts where the value field of
+                        # the other rows starts: the same label width.
+                        lbl.SetMinSize(qty.GetMinSize())
+                    # The gaps are those of the value of the other rows.
+                    triple.Add(lbl, 0, mid)
+                    triple.Add(field, 0, mid | wx.LEFT, 8)
                     triple.Add(wx.StaticText(pane, label=ENTRY_UNITS[k]), 0,
-                               mid | wx.LEFT, 4)
+                               mid | wx.LEFT, 8)
                     rlc[k] = field
-                area = wx.BoxSizer(wx.HORIZONTAL)
-                area.Add(single, 0, mid)
-                area.Add(triple, 0, mid)
-                # The cell keeps ONE width for the two sets, thus a change
-                # of the type does not change the width of the rows.
-                area.SetMinSize((max(single.CalcMin()[0],
-                                     triple.CalcMin()[0]), -1))
-                area.Show(triple, False)
-                lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
-                       0, mid)
-                lg.Add(kinds, 0, mid)
-                lg.Add(area, 0, mid | wx.LEFT, 6)
-                lg.Add((0, 0))  # the empty column that becomes wider
                 para_lbl = wx.StaticText(pane, label="Parasitics:")
-                lg.Add(para_lbl, 0, mid)
-                lg.Add(ch, 0, mid)
+                para = wx.BoxSizer(wx.HORIZONTAL)
+                para.Add(para_lbl, 0, mid)
+                para.Add(ch, 0, mid | wx.LEFT, 8)
                 # The controls that a series RLC row hides.
                 para_ctrls = [para_lbl, ch]
                 # R before L, in the sequence of "RLC". There is no third
                 # field: a series capacitance is not a parasitic of
                 # these parts.
                 srf_ctrls = []
-                for label, ctrl, unit in (("ESR:", esr, "ohm"),
-                                          ("ESL:", esl, "nH"),
-                                          (SRF_LABEL, srf, SRF_UNIT)):
-                    p_lbl = wx.StaticText(pane, label=label)
+                # **Each field shows only for a type that uses it**
+                # (`PARA_FIELDS`), and the fields that show sit next to
+                # each other from the left: a resistor has its ESL where
+                # the other types have the ESR. Each field has the SAME
+                # width (one label width and one unit width for the
+                # three), thus the fields of all rows stay in columns.
+                label_w = max(pane.GetTextExtent(t)[0]
+                              for t in ("ESR:", "ESL:", "SRF:"))
+                unit_w = max(pane.GetTextExtent(t)[0]
+                             for t in ("ohm", "nH", SRF_UNIT))
+                fields = {}
+                for name, ctrl, unit in (("ESR", esr, "ohm"),
+                                         ("ESL", esl, "nH"),
+                                         ("SRF", srf, SRF_UNIT)):
+                    p_lbl = wx.StaticText(pane, label=name + ":")
                     p_uni = wx.StaticText(pane, label=unit)
-                    lg.Add(p_lbl, 0, mid | wx.LEFT, 6)
-                    lg.Add(ctrl, 0, mid)
-                    lg.Add(p_uni, 0, mid)
+                    p_lbl.SetMinSize((label_w, -1))
+                    p_uni.SetMinSize((unit_w, -1))
+                    group = wx.BoxSizer(wx.HORIZONTAL)
+                    group.Add(p_lbl, 0, mid)
+                    group.Add(ctrl, 0, mid | wx.LEFT, 8)
+                    group.Add(p_uni, 0, mid | wx.LEFT, 8)
+                    fields[name] = para.Add(group, 0, mid | wx.LEFT, 14)
                     # The SRF keeps a list of its own. `para_ctrls` holds
-                    # what a Series RLC row hides, and the SRF hides for
-                    # all types but an inductor.
+                    # what a Series RLC row hides.
                     if ctrl is srf:
                         srf_ctrls += [p_lbl, ctrl, p_uni]
                     else:
                         para_ctrls += [p_lbl, ctrl, p_uni]
+                # A type uses TWO fields or fewer. The block keeps the
+                # width of two, thus the Model checkbox stays in its
+                # column. A row with one field has the space at its end.
+                para.SetMinSize((para.CalcMin()[0]
+                                 - group.CalcMin()[0] - 14, -1))
+                # **ONE cell holds the value AND the parasitics, or the
+                # three fields of a Series RLC.** A Series RLC row hides
+                # its parasitics, thus its three fields use their space.
+                # When they had a cell of their own, the value cell of
+                # EACH row kept space for them, and the dialog was 266 px
+                # wider with no Series RLC row.
+                area = wx.BoxSizer(wx.HORIZONTAL)
+                area.Add(single, 0, mid)
+                area.Add(triple, 0, mid)
+                area.AddStretchSpacer()
+                # The stretch space is 0 at the minimum width, thus the
+                # block keeps a gap of its own from the unit.
+                area.Add(para, 0, mid | wx.LEFT, 16)
+                area.Show(triple, False)
+                lg.Add(wx.StaticText(pane, label='Element "%s"' % e["ref"]),
+                       0, mid)
+                lg.Add(kinds, 0, mid)
+                lg.Add(area, 0, mid | wx.EXPAND | wx.LEFT, 6)
                 lg.Add(cb, 0, mid | wx.LEFT, 12)
                 # A preset writes the ESL with ChangeValue, which sends no
                 # EVT_TEXT. Thus the choice stays on the package. An edit
@@ -718,9 +763,9 @@ class SettingsDialog(wx.Dialog):
                                        "area": area, "single": single,
                                        "triple": triple, "rlc": rlc,
                                        "srf": srf, "srf_ctrls": srf_ctrls,
+                                       "para": para, "fields": fields,
                                        "para_ctrls": para_ctrls})
-                for ctrl in srf_ctrls:
-                    ctrl.Show(kind == "L")
+                self._show_fields(self.part_rows[-1], kind)
             # A lumped inductor makes the FDTD not stable at the full
             # Courant step. Thus the runner sets the timestep to
             # `solverenv.time_step_factor` of it. It divides the step limit
@@ -732,7 +777,8 @@ class SettingsDialog(wx.Dialog):
             # parents.
             self.lumped_warn = wx.StaticText(lbox.GetStaticBox(), label="")
             self.lumped_warn.SetForegroundColour(wx.Colour(150, 90, 0))
-            lbox.Add(self.lumped_warn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            lbox.Add(self.lumped_warn, 0,
+                     wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -740,8 +786,8 @@ class SettingsDialog(wx.Dialog):
             self, choices=[p[0] for p in SUBSTRATE_PRESETS]))
         self.preset.SetToolTip(
             "%s uses the board's own stackup, layer by layer.\n"
-            "Rogers: stripline = process Dk, microstrip = design Dk."
-            % BOARD_PRESET)
+            "FR-4, Rogers and PTFE presets use the datasheet values of the "
+            "laminate." % BOARD_PRESET)
         # The default values are the FR-4 preset: refer to
         # SUBSTRATE_PRESETS. 1.6 mm and 35 um (1 oz) go with them.
         self.er = row(sg, "er:", wx.TextCtrl(self, value="4.5"))
@@ -865,6 +911,13 @@ class SettingsDialog(wx.Dialog):
         # `_fit_to_screen` must be free to cut the height, and `SetSize`
         # cannot go below the minimum dimensions of a window.
         content = top.GetMinSize()
+        # **Keep the width of the scroll bar at all times.** The bar comes
+        # into view when the content becomes taller than the body: a new
+        # line of the warning is sufficient. It then took 17 px from
+        # content that had no more width, and the right edge went out of
+        # view.
+        content.SetWidth(content.GetWidth()
+                         + wx.SystemSettings.GetMetric(wx.SYS_VSCROLL_X))
         body.SetInitialSize(content)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(body, 1, wx.EXPAND)
@@ -1056,20 +1109,9 @@ class SettingsDialog(wx.Dialog):
         if area is None:
             return
         rows = max(1, len(self.part_rows))
-        # **The width holds the SRF columns, also when they are hidden.**
-        # They show only for an inductor. A row that becomes an inductor
-        # after the dialog opens adds them, and the Model checkbox then
-        # went out of the window. Thus measure the width with the SRF
-        # shown, and then hide it again.
-        srf = [(c, c.IsShown()) for r in self.part_rows
-               for c in r["srf_ctrls"]]
-        for c, _ in srf:
-            c.Show(True)
-        wide = area.GetSizer().GetMinSize().GetWidth()
-        for c, shown in srf:
-            c.Show(shown)
+        # A hidden ESR, ESL or SRF keeps a blank space of its width, thus
+        # a change of the type does not change the width of a row.
         best = area.GetSizer().GetMinSize()
-        best.SetWidth(max(best.GetWidth(), wide))
         one = best.GetHeight() / float(rows)
         try:
             screen = wx.Display().GetClientArea().GetHeight()
@@ -1214,16 +1256,6 @@ class SettingsDialog(wx.Dialog):
             return {kind: val}
         return comp
 
-    def _idle_body(self, i):
-        """Give True when the run does not include the body of row `i`.
-
-        `solverenv.body_is_idle` holds the rule. `_row_components` then
-        gives only the part.
-        """
-        comp = self._row_components(i)
-        full = self._row_components(i, whole=True)
-        return bool(comp and full and len(full) > len(comp))
-
     def _sweep(self):
         """Give (f_start, f_stop, z0) in Hz and ohm, or give None for a
         text that is not a number or a sweep that is not a sweep."""
@@ -1258,7 +1290,7 @@ class SettingsDialog(wx.Dialog):
 
         `runner._max_timesteps` divides "Max steps" by the timestep factor.
         Thus the SIMULATED time does not change, but the count changes. A
-        "Timestep factor" that the user gives is more important than the
+        "Timestep" that the user gives is more important than the
         rule, in the runner and thus here.
         """
         try:
@@ -1300,41 +1332,62 @@ class SettingsDialog(wx.Dialog):
             # "600 times longer" does not tell if the run is one hour or
             # one week long. The step limit that openEMS receives tells it.
             steps = self._derived_steps()
-            # **"At most", because the count is the LIMIT** (P20). A run
+            # **"Up to", because the count is the LIMIT** (P20). A run
             # stops immediately when its field becomes stable. The 90 uH
             # run of 2026-09-22 stopped after 1.03 million of its 180
             # million.
-            text = ("%s (%s) divides the timestep by %.1f, thus the run "
-                    "takes about %.1f times longer%s."
-                    % (source, value, cost, cost,
+            # The effect first, and then the value that causes it.
+            text = ("The run is about %.1f times longer%s, because of %s."
+                    % (cost,
                        "" if steps is None
-                       else ": at most %s timesteps" % _count_text(steps)))
-        # **Say what the run does with an open part**, because the user
-        # typed a value that the grid will not hold.
+                       else " (up to %s timesteps)" % _count_text(steps),
+                       _cause_text(source, value)))
+        # **A part that is open over the sweep is not in the run.** The
+        # user typed its value, and the run ignores the part. Without this
+        # line, the run-time line went away with no cause when a value
+        # became large. A body that the run leaves out changes |Z| by 2%
+        # or less, thus it is only in the Optimizations list.
+        opens = []
         for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
-            if not cb.GetValue():
-                continue
-            is_open, z = self._open_over_sweep(i)
-            if is_open:
-                epc = self._epc_value(i)
-                text += ("%s%s is an open circuit over this sweep (%s): the "
-                         "run %s, and it costs no run time."
-                         % ("\n" if text else "", ref, _ohm_text(z),
-                            "keeps its EPC of %.3g pF alone" % (epc * 1e12)
-                            if epc else "leaves its gap open"))
-        # **Tell which bodies the run does not include** (P21): ONE line
-        # for all of them, because a board can have many pull-ups.
-        idle = [ref for i, (ref, cb, _, _, _) in enumerate(self.para_rows)
-                if cb.GetValue() and self._idle_body(i)]
-        if idle:
-            text += ("%s%s: the run leaves out the parasitics of the body, "
-                     "which move |Z| by %g%% or less over this sweep."
-                     % ("\n" if text else "", ", ".join(idle),
-                        100 * solverenv.PARASITIC_MIN))
-        if label.GetLabel() != text:
-            label.SetLabel(text)
-            label.Wrap(560)
-            self.Layout()
+            if cb.GetValue():
+                is_open, z = self._open_over_sweep(i)
+                if is_open:
+                    opens.append("%s (%s)" % (ref, _ohm_text(z)))
+        if opens:
+            one = len(opens) == 1
+            text += ("%s%s %s not in the run, because %s over this sweep."
+                     % ("\n" if text else "",
+                        ", ".join(opens) if len(opens) <= 3
+                        else "Multiple components (%d)" % len(opens),
+                        "is" if one else "are",
+                        "it is an open circuit" if one
+                        else "they are open circuits"))
+        # More than 3 parts get one name. The tooltip lists them.
+        if len(opens) > 3:
+            label.SetToolTip("Open circuits over this sweep: "
+                             + ", ".join(opens))
+        else:
+            label.UnsetToolTip()
+        # **The text must never make the dialog wider.** Its borders are
+        # 8 px and those of the rows are 6 px, thus it has 4 px less
+        # width than the rows. A text that wrapped at the width of the
+        # rows was 4 px too wide, and it pushed the right edge of the
+        # dialog out. The minimum width of 0 lets only its height count.
+        #
+        # `wordwrap` and not `label.Wrap`: `Wrap` does nothing when it gets
+        # the same width a second time, also after a new label. Thus a
+        # long text stayed on one line, and its end was cut off.
+        from wx.lib.wordwrap import wordwrap
+        label.SetLabel(wordwrap(text,
+                                self.part_area.GetMinSize().GetWidth() - 4,
+                                wx.ClientDC(label)).rstrip("\n"))
+        label.SetMinSize((0, label.GetBestSize().GetHeight()))
+        self.Layout()
+        # **Paint all the dialog again.** A new warning makes its box
+        # taller, and the Layout moves the controls. The window of the
+        # rows then kept areas that it did not paint again: the label of a
+        # row became empty when a row became an inductor.
+        self.Refresh()
 
     def _pml_mm(self):
         """Give the depth of the PML band that the run will use, in mm.
@@ -1383,7 +1436,7 @@ class SettingsDialog(wx.Dialog):
                 "This board gives no stackup.\n\n"
                 "Open Board Setup > Physical Stackup in the PCB editor, "
                 "give the dielectric its er and its loss tangent, and "
-                "SAVE the board. Or select a preset and type the values.",
+                "save the board. Or select a preset and type the values.",
                 "RFsim", wx.ICON_INFORMATION)
             self.preset.SetSelection(1)  # FR-4
         self._apply_preset()
@@ -1430,35 +1483,49 @@ class SettingsDialog(wx.Dialog):
             self.Destroy()
 
     def _on_ok(self, evt):
-        try:
-            fa, fb = float(self.f_start.GetValue()), float(self.f_stop.GetValue())
-            fd = float(self.f_field.GetValue())
-            z0 = float(self.z0.GetValue())
-            # With BOARD_PRESET, the four fields hold the text of the
-            # stackup. That text can be "3.48 / 4.5" for a board with two
-            # dielectrics. `float()` cannot read that, and it does not have
-            # to: the run uses the stackup and not the fields.
-            if self.uses_board_stackup():
-                er, tand, h, cu_t = 4.5, 0.02, 1.6, 0.035
-            else:
-                er, tand = float(self.er.GetValue()), float(self.tand.GetValue())
-                h, cu_t = float(self.h.GetValue()), float(self.cu_t.GetValue())
-            # A series RLC row hides its ESR and its ESL, and the model
-            # does not use them. Thus this test does not read them.
-            para = [(float(esl.GetValue()), float(esr.GetValue()))
-                    for i, (_, _, _, esl, esr) in enumerate(self.para_rows)
-                    if self._kind_of(i) != RLC_KIND]
-            if (not (0 < fa < fb) or not (fa <= fd <= fb) or z0 <= 0
-                    or er < 1 or tand < 0 or h <= 0 or cu_t <= 0
-                    or any(a < 0 or b < 0 for a, b in para)):
-                raise ValueError
-        except ValueError:
-            wx.MessageBox(
-                "Check frequency / impedance / substrate values.\n"
-                "('Define at' must lie inside the sweep range. "
-                "ESL and ESR must be numbers, and not negative.)",
-                "RFsim", wx.ICON_ERROR)
-            return
+        # **Each message names ONE field**, with the label that the dialog
+        # shows. A single message for all the fields did not tell the user
+        # which field to correct. `got` holds the values that passed, thus
+        # a subsequent rule can compare against them.
+        got = {}
+        checks = [
+            (self.f_start, '"Start"', lambda v: v > 0, "more than 0"),
+            (self.f_stop, '"Stop"', lambda v: v > got[self.f_start],
+             'more than "Start"'),
+            (self.f_field, '"Define at"',
+             lambda v: got[self.f_start] <= v <= got[self.f_stop],
+             'from "Start" to "Stop"'),
+            (self.z0, '"Port impedance"', lambda v: v > 0, "more than 0")]
+        # With BOARD_PRESET, the four fields hold the text of the
+        # stackup. That text can be "3.48 / 4.5" for a board with two
+        # dielectrics. `float()` cannot read that, and it does not have
+        # to: the run uses the stackup and not the fields.
+        if not self.uses_board_stackup():
+            checks += [
+                (self.er, '"er"', lambda v: v >= 1, "of 1 or more"),
+                (self.tand, '"Loss tangent"', lambda v: v >= 0,
+                 "of 0 or more"),
+                (self.h, '"Substrate thickness"', lambda v: v > 0,
+                 "more than 0"),
+                (self.cu_t, '"Copper thickness"', lambda v: v > 0,
+                 "more than 0")]
+        # A series RLC row hides its ESR and its ESL, and the model does
+        # not use them. Thus this test does not read them.
+        for i, (ref, _, _, esl, esr) in enumerate(self.para_rows):
+            if self._kind_of(i) != RLC_KIND:
+                checks += [(c, 'Element "%s": "%s"' % (ref, name),
+                            lambda v: v >= 0, "of 0 or more")
+                           for c, name in ((esr, "ESR"), (esl, "ESL"))]
+        for ctrl, name, ok, rule in checks:
+            try:
+                v = float(ctrl.GetValue())
+            except ValueError:
+                v = None
+            if v is None or not ok(v):
+                wx.MessageBox("%s must be a number %s." % (name, rule),
+                              "RFsim", wx.ICON_ERROR)
+                return
+            got[ctrl] = v
         # A part that the user models must have a type and a value. When
         # the refdes does not give the type, the part starts with "Unknown"
         # and with its Model checkbox off. Thus this test speaks only when
@@ -1496,7 +1563,7 @@ class SettingsDialog(wx.Dialog):
             short = self._kind_of(i) == "R" and v == 0
             if v is None or (v <= 0 and not short):
                 wx.MessageBox(
-                    'Element "%s" needs a value in %s: a positive number%s.'
+                    'Element "%s" must have a value in %s: a positive number%s.'
                     % (r["ref"], ENTRY_UNITS[self._kind_of(i)],
                        ", or 0 for a short" if self._kind_of(i) == "R"
                        else ""),
@@ -1520,7 +1587,7 @@ class SettingsDialog(wx.Dialog):
                     return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
-            wx.MessageBox("Each pad needs a unique port number.",
+            wx.MessageBox("Each pad must have a different port number.",
                           "RFsim", wx.ICON_ERROR)
             return
         if not any(cb.GetValue() for cb in self.port_excite):
@@ -1536,7 +1603,7 @@ class SettingsDialog(wx.Dialog):
             if (self.port_feed[i] and vals[ch.GetSelection()] != "lumped"
                     and self._feed_of(i) is None):
                 wx.MessageBox(
-                    "Port %d: a de-embedded port needs a feed direction "
+                    "Port %d: a de-embedded port must have a feed direction "
                     "and a positive width in mm."
                     % (self.port_order[i].GetSelection() + 1),
                     "RFsim", wx.ICON_ERROR)
@@ -1544,9 +1611,9 @@ class SettingsDialog(wx.Dialog):
         # The three limits of the run. An empty timestep factor is
         # correct: the runner then selects the value itself.
         for ctrl, name, low, high in (
-                (self.max_steps, "Max timesteps", 100, 1e9),
+                (self.max_steps, "Max steps", 100, 1e9),
                 (self.end_crit, "End criteria", 1e-12, 1.0),
-                (self.tsf, "Timestep factor", 1e-3, 1.0)):
+                (self.tsf, "Timestep", 1e-3, 1.0)):
             text = ctrl.GetValue().strip()
             if ctrl is self.tsf and not text:
                 continue
@@ -1565,7 +1632,7 @@ class SettingsDialog(wx.Dialog):
         # 90000 nH causes 180 million steps for the 300000 of the default.
         # That is about 135 hours on the SMALL board of the rigs.
         #
-        # A user who wants such a run can also give a "Timestep factor",
+        # A user who wants such a run can also give a "Timestep",
         # which `_derived_steps` reads. That user then accepts the risk of
         # a run that diverges.
         steps = self._derived_steps()
@@ -1582,22 +1649,17 @@ class SettingsDialog(wx.Dialog):
             # keeps the factor of the rule. The run also stops immediately
             # when its field becomes stable.
             fit = int(MAX_DERIVED_STEPS * factor)
+            cause = _cause_text(source, value)
             wx.MessageBox(
-                "This run can take up to %s timesteps, and RFsim does not "
-                "start a run whose limit is over %s.\n\n"
-                "%s (%s) takes the timestep to 1/%.0f of the Courant "
-                "step, thus the %s steps that you asked for become a "
-                "limit of %s for the same simulated time.\n\n"
-                "The limit is not the length. A run stops as soon as "
-                "its field settles: a 90 uH run stopped after 1.03 "
-                "million of its 180 million steps.\n\n"
-                "To start it, give \"Max steps\" %d or less. That keeps "
-                "the safe timestep, and the run still stops on its own "
-                "when it settles."
+                "This run can use up to %s timesteps. RFsim does not "
+                "start a run with a limit of more than %s.\n\n"
+                "%s sets the timestep to 1/%.0f of the Courant "
+                "step.\n\n"
+                "To start the run, set \"Max steps\" to %d or less. The "
+                "run usually stops before the limit, when its field is "
+                "stable."
                 % (_count_text(steps), _count_text(MAX_DERIVED_STEPS),
-                   source or "A lumped element", value, 1.0 / factor,
-                   _count_text(float(self.max_steps.GetValue())),
-                   _count_text(steps), fit),
+                   cause[0].upper() + cause[1:], 1.0 / factor, fit),
                 "RFsim", wx.ICON_ERROR)
             return
         evt.Skip()
@@ -1684,6 +1746,9 @@ class SettingsDialog(wx.Dialog):
             field.Enable(self.para_rows[i][1].GetValue())
         self._update_lumped_warning()
         self.Layout()
+        # The row changed its controls, thus paint the dialog again. If
+        # not, areas of the rows that did not move stay empty.
+        self.Refresh()
 
     def _part_value(self, i):
         """Give the value of a row in SI units, or give None.
@@ -1721,17 +1786,25 @@ class SettingsDialog(wx.Dialog):
         rlc = kind == RLC_KIND
         r["area"].Show(r["single"], not rlc)
         r["area"].Show(r["triple"], rlc)
-        for ctrl in r["para_ctrls"]:
-            ctrl.Show(not rlc)
-        # **The EPC is only for an inductor.** A capacitor HAS its
-        # capacitance, and this field does not model the parallel
-        # capacitance of a resistor. The text stays in the hidden field.
-        # Thus when the user selects Inductor again, the row comes back as
-        # it was.
-        for ctrl in r["srf_ctrls"]:
-            ctrl.Show(kind == "L")
+        # Hide the BLOCK and not only its controls: its minimum width
+        # must not go into the row of a Series RLC.
+        r["area"].Show(r["para"], not rlc)
+        if not rlc:
+            self._show_fields(r, kind)
         self.part_area.GetSizer().Layout()
         self.part_area.FitInside()
+
+    @staticmethod
+    def _show_fields(r, kind):
+        """Show the ESR, the ESL and the SRF of a row only for a type that
+        uses them. The fields that show move to the left, with no gap.
+
+        The text stays in a hidden field. Thus when the user selects that
+        type again, the row comes back as it was.
+        """
+        use = PARA_FIELDS.get(kind, PARA_FIELDS[None])
+        for name, item in r["fields"].items():
+            item.Show(name in use)
 
     def _part_settings(self, i):
         """Give the entry of one row for `lumped_parasitics`.
@@ -1877,11 +1950,24 @@ def _count_text(n):
 
 
 def _ohm_text(z):
-    """Give an impedance with a prefix, for a label."""
+    """Give an impedance with a prefix, for a label: "12.6 kohm"."""
     for div, name in ((1e6, "Mohm"), (1e3, "kohm")):
         if z >= div:
             return "%.3g %s" % (z / div, name)
     return "%.3g ohm" % z
+
+
+def _cause_text(source, value):
+    """Give the value and the part that set the timestep: "the 100 nH of
+    L1". The warning and the refusal of a run use the same words.
+
+    `source` comes from `_lumped_limit`, as "The body of R1", "The
+    inductor L1" or "The L of D1". Thus the part is its last word. An
+    empty source gives "a lumped element".
+    """
+    if not source:
+        return "a lumped element"
+    return "the %s of %s" % (value, source.rsplit(" ", 1)[1])
 
 
 class RunDialog(wx.Dialog):
@@ -1889,7 +1975,7 @@ class RunDialog(wx.Dialog):
 
     **The window closes when a run succeeds.** Thus its text is gone if it
     does not also go to a file: `log_path` receives each line that the
-    window shows. The runner writes decisions.log itself. That file has
+    window shows. The runner writes optimizations.log itself. That file has
     only the decisions that the run made by itself.
     """
 
@@ -2127,11 +2213,11 @@ class ResultsFrame(wx.Frame):
                     plots.append("Farfield (f=%g GHz)%s"
                                  % (ff["f_hz"] / 1e9, ptag))
         # **The decisions of the run** (B56). The runner writes
-        # decisions.log, and a user must not have to know the file. It is a
+        # optimizations.log, and a user must not have to know the file. It is a
         # list of lines. Thus it shows as text and not as a plot.
         self._decisions = None
         try:
-            with open(os.path.join(self.outdir, "decisions.log"),
+            with open(os.path.join(self.outdir, "optimizations.log"),
                       encoding="utf-8") as fh:
                 self._decisions = fh.read()
         except Exception:

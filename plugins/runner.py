@@ -401,7 +401,7 @@ def _time_step_choice(model):
     if s.get("time_step_factor"):
         f = float(s["time_step_factor"])
         rule, why = _time_step_rule(model)
-        return f, ("%.4g, from the Timestep factor of the settings, "
+        return f, ("%.4g, from the Timestep field of the settings, "
                    "which is more important than the rule (the rule "
                    "gives %s)"
                    % (f, "%.4g, %s" % (rule, why) if rule
@@ -483,18 +483,21 @@ def _decisions(model, res, rlc=True):
 
     **Each line names the decision AND its cause**, because nobody can
     check a decision with no cause. `main` prints the list one time and
-    writes it to decisions.log before the engine starts. `rlc` tells if the
+    writes it to optimizations.log before the engine starts. `rlc` tells if the
     engine has the series topology. A previous engine does not have it, and
     it then removes the parasitics.
     """
     s = model["settings"]
-    out = []
+    # The decisions of `board_reader` come first: a part at an angle, and
+    # a package code that can be imperial or metric. They are not
+    # problems, thus they are not in the warning box before the run.
+    out = list(model.get("notes", []))
     z0 = s.get("z0") or 50.0
     band = "%g to %g GHz" % (s["f_start"] / 1e9, s["f_stop"] / 1e9)
     ports = _port_geometry(model, res, quiet=True)
     for g in ports:
         if g.get("fallback"):
-            out.append("port %d: a LUMPED port, and not a %s" % (
+            out.append("port %d: a lumped port, and not a %s" % (
                 g["number"], g["fallback"]))
     mesh = []
     _mesh(model, ports, res, mesh)
@@ -509,7 +512,7 @@ def _decisions(model, res, rlc=True):
         for e in model.get("lumped_elements", []):
             ref = e.get("ref", "?")
             if ref in ported:
-                out.append("%s: a PORT is in its box (lumped_ports), and "
+                out.append("%s: a port is in its box (lumped_ports), and "
                            "its value goes into the S-matrix after the "
                            "run" % ref)
                 continue
@@ -518,7 +521,7 @@ def _decisions(model, res, rlc=True):
                 continue
             comp = _components(e, para, s)
             if not comp:
-                out.append("%s: NOT modelled, because it has no type or "
+                out.append("%s: not modelled, because it has no type or "
                            "no value. Its gap stays open." % ref)
                 continue
             # The value of the part first, and then what its body adds.
@@ -539,7 +542,7 @@ def _decisions(model, res, rlc=True):
                     {"L": "ESL", "R": "ESR"}[k],
                     _si(full[k], {"R": "ohm", "L": "H"}[k]))
                     for k in "LR" if k in full and k not in comp)
-                body = (", WITHOUT the %s of its %s body, which changes "
+                body = (", without the %s of its %s body, which changes "
                         "|Z| by %.2g%% or less from %s (the limit is "
                         "%g%%)"
                         % (left, e.get("package") or "unknown",
@@ -551,7 +554,7 @@ def _decisions(model, res, rlc=True):
             if ref in opens:
                 epc = (e.get("epc") or 0.0) if para else 0.0
                 out.append(
-                    "%s (%s%s): an OPEN from %s, because its smallest "
+                    "%s (%s%s): an open circuit from %s, because its smallest "
                     "|Z| is %s, %.0f times z0 (the limit is %g times). "
                     "Thus it is not in the grid, %s, and it costs no "
                     "timestep"
@@ -568,9 +571,9 @@ def _decisions(model, res, rlc=True):
                     "L", "RLC") and "L" in comp else
                        "the ESL of its body is an inductance" if "L" in comp
                        else "it has %d components" % len(comp))
-                path = "the SERIES path (LEtype 1), because %s" % why
+                path = "the series path (LEtype 1), because %s" % why
             else:
-                path = ("the CLASSIC path (LEtype 0), because it is one R "
+                path = ("the classic path (LEtype 0), because it is one R "
                         "or one C")
             out.append("%s (%s%s): in the grid, on %s. Its smallest |Z| "
                        "from %s is %s (%.2g times z0), thus it is not an "
@@ -609,9 +612,9 @@ def _epc_decisions(model, grid, rlc=True):
         split = _epc_split(grid, e)
         out.append("%s: its EPC of %s %s" % (
             e.get("ref", "?"), _si(epc, "F"),
-            "is ADJACENT to it, on the other half of its land (the mesh "
+            "is adjacent to it, on the other half of its land (the mesh "
             "line at %.4f mm divides the land)" % split if split is not None
-            else "is REMOVED, because its land has only ONE cell across "
+            else "is removed, because its land has only one cell across "
                  "the current, and two elements cannot share a box. Thus "
                  "the part has no self-resonance. A finer mesh preset "
                  "gives the land more cells."))
@@ -831,7 +834,7 @@ def _report_end(sim_path, nrts, end_criteria):
               "Thus the result is not complete. Increase \"Max steps\", "
               "or make \"End criteria\" larger."
               % (nrts, ns, end_criteria), flush=True)
-        return ("stopped at the STEP LIMIT of %d timesteps (%.1f ns), "
+        return ("stopped at the step limit of %d timesteps (%.1f ns), "
                 "before its end criteria" % (nrts, ns))
     print("[rfsim] the run got to its end criteria of %.3g after %d of "
           "%d timesteps (%.1f ns)" % (end_criteria, steps, nrts, ns),
@@ -1629,7 +1632,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         para = s.get("parasitics", True) and rlc
         if s.get("parasitics", True) and not rlc:
             say("[rfsim] WARNING: this openEMS version has no LEtype, "
-                "thus the package parasitics are OFF (ideal elements)",
+                "thus the package parasitics are off (ideal elements)",
                 flush=True)
         ported = _ported_refs(model)
         opens = _open_parts(model)
@@ -1659,7 +1662,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                         **dict(_le_topology({"C": epc}, rlc),
                                C=epc)).AddBox(e["start"], e["stop"],
                                               priority=15)
-                say("[rfsim] lumped %s: an OPEN at all frequencies of "
+                say("[rfsim] lumped %s: an open circuit at all frequencies of "
                     "the sweep (%.3g ohm or more, %.0f times z0). Thus "
                     "%s, and it costs no timestep" % (
                           e["ref"], z, z / s["z0"],
@@ -1754,11 +1757,11 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                               "; the self-resonance is near %.2f GHz"
                               % (f_res / 1e9) if f_res else ""), flush=True)
                 elif epc > 0:
-                    say("[rfsim] WARNING: the land of %s has only ONE "
+                    say("[rfsim] WARNING: the land of %s has only one "
                         "mesh cell across the current, thus it cannot "
                         "hold the EPC adjacent to the part. Two lumped "
                         "elements cannot share one box. %s keeps only "
-                        "its value, and it has NO self-resonance. Use a "
+                        "its value, and it has no self-resonance. Use a "
                         "finer mesh preset, which gives the land more "
                         "cells."
                           % (e["ref"], e["ref"]), flush=True)
@@ -1806,8 +1809,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                 g["number"], s["z0"], g["start"], g["stop"],
                 g.get("exc_dir", "z"),
                 excite=1.0 if excite else 0, priority=20))
-        say("[rfsim] port %d: %s at (%.2f, %.2f) %s" % (
-            g["number"], g["type"], g["x"], g["y"], note), flush=True)
+        say("[rfsim] port %d: %s at (%.2f, %.2f)%s" % (
+            g["number"], g["type"], g["x"], g["y"],
+            " " + note if note else ""), flush=True)
 
     ff = None
     # An element port excites the gap between two pads. Thus a far field of
@@ -2106,17 +2110,17 @@ def main(model_path, outdir):
 
     # **Tell the decisions of the run ONE time, and keep them.** `build`
     # runs one time for each excitation, thus its own lines come again each
-    # time. This list does not. It goes to decisions.log BEFORE the engine
+    # time. This list does not. It goes to optimizations.log BEFORE the engine
     # starts. Thus a run that stops with an error also keeps the list. The
     # lines of the engine and of the end of each run go after it.
-    log_path = os.path.join(outdir, "decisions.log")
+    log_path = os.path.join(outdir, "optimizations.log")
     choices = _decisions(model, res, _has_lumped_rlc())
-    print("[rfsim] --- the decisions of the run ---", flush=True)
+    print("[rfsim] === optimizations ===", flush=True)
     for line in choices:
-        print("[rfsim] decision: %s" % line, flush=True)
+        print("[rfsim] optimization: %s" % line, flush=True)
 
     def keep(line):
-        """Add one line to decisions.log, with "- " in front, thus the
+        """Add one line to optimizations.log, with "- " in front, thus the
         file is easy to read. A log must not stop a run."""
         try:
             with open(log_path, "a", encoding="utf-8") as fh:
@@ -2126,7 +2130,7 @@ def main(model_path, outdir):
 
     try:
         with open(log_path, "w", encoding="utf-8") as fh:
-            fh.write("RFsim: the decisions of the run\n%s\nmodel: "
+            fh.write("RFsim: optimizations\n%s\nmodel: "
                      "%s\nsweep: %g to %g GHz, z0 %g ohm, mesh %s\n\n"
                      % (time.strftime("%Y-%m-%d %H:%M:%S"), model_path,
                         s["f_start"] / 1e9, s["f_stop"] / 1e9, s["z0"],
@@ -2168,7 +2172,7 @@ def main(model_path, outdir):
                      "above)" % cells))
             for line in _epc_decisions(model, fdtd.GetCSX().GetGrid(),
                                        _has_lumped_rlc()):
-                print("[rfsim] decision: %s" % line, flush=True)
+                print("[rfsim] optimization: %s" % line, flush=True)
                 keep(line)
         fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
                  numThreads=threads)
@@ -2179,7 +2183,7 @@ def main(model_path, outdir):
         bad = _diverged(sim_path)
         if bad:
             name, cause = bad
-            keep("excitation of port %d: STOPPED, %s" % (
+            keep("excitation of port %d: stopped, %s" % (
                 k + 1, "NaN in %s" % name if cause == "nan"
                 else "the field grew again in %s" % name))
             tsf = _time_step_factor(model) or 1.0
@@ -2195,7 +2199,7 @@ def main(model_path, outdir):
                 "[rfsim] ERROR: the FDTD run is not stable. The port "
                 "data of %s increased again after its lowest point, to "
                 "more than %g times that point. The S-matrix of such a "
-                "run is NOT correct: |S11| and |S21| are almost 1 at all "
+                "run is not correct: |S11| and |S21| are almost 1 at all "
                 "frequencies. A smaller timestep does not correct this "
                 "(this run used a timestep factor of %.3g). Increase "
                 "\"Domain margin\" to move the absorber away from the "
