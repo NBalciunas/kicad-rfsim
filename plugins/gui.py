@@ -27,6 +27,11 @@ except ImportError:  # a top-level module
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
+# The solvers, in the sequence of the drop-down list. `solverenv.SOLVERS`
+# holds the keys that model.json gets.
+SOLVERS = solverenv.SOLVERS
+SOLVER_NAMES = {"openems": "openEMS (FDTD)",
+                "emerge": "EMerge (FEM, experimental)"}
 # The rows of the R/L/C parts that the dialog shows without a scroll. Each
 # row is about 29 px tall. With one part, the dialog is 1053 px tall on a
 # screen of 1920x1080.
@@ -75,7 +80,7 @@ RLC_FIELDS = (("R", "r"), ("L", "l"), ("C", "c"))
 # frequency: C = 1 / ((2 pi f)^2 L). An empty field keeps the part as it
 # was. Thus this field changes no board that does not fill it in.
 SRF_LABEL, SRF_UNIT = "SRF:", "GHz"
-# The parasitic fields that each type USES. `runner._parasitic_components`
+# The parasitic fields that each type USES. `solverenv.parasitic_components`
 # gives the ESL only to an R and a C, and the ESR only to a C and an L. An
 # inductor IS an inductance, and a resistor IS a resistance, thus the
 # runner does not read those fields. The SRF gives the EPC of an inductor
@@ -395,6 +400,14 @@ class SettingsDialog(wx.Dialog):
                 g.Add(ctrl, 0, wx.EXPAND)
             return ctrl
 
+        # The EMerge solver is an experiment. The solver comes first,
+        # because it sets which fields below the run uses.
+        sbox = section("Solver")
+        self.solver = wx.Choice(self, choices=[SOLVER_NAMES[k]
+                                               for k in SOLVERS])
+        self.solver.SetSelection(0)
+        sbox.Add(self.solver, 0, wx.ALL | wx.EXPAND, 6)
+
         fbox = section("Frequency")
         fs = wx.BoxSizer(wx.HORIZONTAL)
         fs.Add(wx.StaticText(self, label="Start:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -409,11 +422,34 @@ class SettingsDialog(wx.Dialog):
         fs.Add(wx.StaticText(self, label="GHz"), 0,
                wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
         fbox.Add(fs, 0, wx.ALL | wx.EXPAND, 6)
-        fg = grid_in(fbox)
         # The solver calculates the field dumps, which give the E/H
         # animation, and the far field at this frequency.
-        self.f_field = row(fg, "Define at:",
-                           wx.TextCtrl(self, value="2.4"), "GHz")
+        fd = wx.BoxSizer(wx.HORIZONTAL)
+        fd.Add(wx.StaticText(self, label="Define at:"), 0,
+               wx.ALIGN_CENTER_VERTICAL)
+        self.f_field = wx.TextCtrl(self, value="2.4", size=(60, -1))
+        fd.Add(self.f_field, 1, wx.LEFT, 4)
+        fd.Add(wx.StaticText(self, label="GHz"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        # The count of solved frequencies of EMerge. The FDTD run of
+        # openEMS gives all the sweep from one run, thus the field is off
+        # for it.
+        #
+        # **A SpinCtrlDouble, and not a SpinCtrl.** The dialog moves each
+        # control into its scrolled body below. On Windows a wx.SpinCtrl is
+        # a text box and a buddy button, and after that move it got a size
+        # of 0 x 0: the row showed "Frequencies:" and no field.
+        fd.Add(wx.StaticText(self, label="Frequencies:"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+        self.fem_points = wx.SpinCtrlDouble(self, min=2, max=201,
+                                            initial=21, inc=1,
+                                            size=(60, -1))
+        self.fem_points.SetDigits(0)
+        self.fem_points.SetToolTip(
+            "EMerge solves at this number of frequencies. A vector fit "
+            "gives the other points of the sweep.")
+        fd.Add(self.fem_points, 1, wx.LEFT, 4)
+        fbox.Add(fd, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
 
         pbox = section("Port")
         pg = grid_in(pbox)
@@ -452,8 +488,9 @@ class SettingsDialog(wx.Dialog):
             exc.SetValue(True)
             exc.SetToolTip("Drive this port: one FDTD run for each "
                            "excited port.")
-            # _refresh_port_badges puts the text in. The pad, the
-            # footprint and the net go into the tooltip.
+            # _refresh_port_badges puts the text in: the footprint, the pad
+            # and the net, as on 2026-07-31. The tooltip holds the same text,
+            # for a label that the row cuts.
             label = wx.StaticText(self, label="")
             label.SetToolTip(p["label"])
             self.port_badges.append(p)
@@ -932,6 +969,8 @@ class SettingsDialog(wx.Dialog):
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.solver.Bind(wx.EVT_CHOICE, self._on_solver)
+        self._on_solver(None)
         # The preview uses self.margin and the rows. Thus make it last, and
         # keep it in agreement with the two controls.
         if self._prev_fig is not None:
@@ -1048,21 +1087,21 @@ class SettingsDialog(wx.Dialog):
         return ([[1, 0], [-1, 0], [0, 1], [0, -1]][sel - 1], w)
 
     def _refresh_port_badges(self):
-        """Put "Port N" and its problem tag into the label of each port.
+        """Put the pad and its problem tag into the label of each port.
 
-        N is the number that the choice of that row gives at this time, and
-        not the number of the selection. Two rows can have the same number
-        for a short time; _on_ok refuses that. A tag names what stops all
-        the de-embedded types: "[No Track]". A coplanar gap that is missing
-        gets no tag. It stops only the CPW type, and a board that is not a
-        CPW is the usual case. The type choice shows the measured gap, or
-        it does not show the CPW entry.
+        The label is the footprint, the pad and the net: "P1 Pad 1 (RF1)",
+        as in the dialog of 2026-07-31. The owner wants the net in view.
+        The number of the port is the choice of the row, thus the label
+        does not repeat it. A tag names what stops all the de-embedded
+        types: "[No Track]". A coplanar gap that is missing gets no tag. It
+        stops only the CPW type, and a board that is not a CPW is the usual
+        case. The type choice shows the measured gap, or it does not show
+        the CPW entry.
         """
-        for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
-                                 self.port_badges):
-            label = "Port %d" % (num.GetSelection() + 1)
+        for badge, p in zip(self._port_badge_ctrls, self.port_badges):
+            label = p["label"]
             if not p.get("direction"):
-                label += " [No Track]"
+                label += "  [No Track]"
             badge.SetLabel(label)
         self.Layout()
 
@@ -1149,12 +1188,12 @@ class SettingsDialog(wx.Dialog):
     def _lumped_limit(self):
         """Give (the timestep factor, the source, the value, the row).
 
-        The factor is the SMALLEST factor of all the elements. The two laws
-        are not the same. An inductance gives its factor through
-        `solverenv.time_step_factor`. A resistance in a series branch gives
-        its factor through `solverenv.series_r_factor`.
-        `runner._time_step_factor` uses the smaller of the same two. Thus
-        the number here and the run agree. The label and the refusal of
+        The factor is the SMALLEST factor of all the elements. The two laws are
+        not the same. An inductance gives its factor through
+        `solverenv.time_step_factor`. A resistance in a series branch gives its
+        factor through `solverenv.series_r_factor`.
+        `openems_runner._time_step_factor` uses the smaller of the same two.
+        Thus the number here and the run agree. The label and the refusal of
         `_on_ok` read THIS function.
 
         **Each candidate has the SOURCE of its value** (B49). The largest
@@ -1169,7 +1208,7 @@ class SettingsDialog(wx.Dialog):
             if not cb.GetValue():
                 continue
             # An OPEN at all frequencies of the sweep is not in the grid.
-            # Thus it sets no timestep: `runner._open_parts`.
+            # Thus it sets no timestep: `openems_runner._open_parts`.
             if self._open_over_sweep(i)[0]:
                 continue
             kind = self._kind_of(i)
@@ -1185,7 +1224,7 @@ class SettingsDialog(wx.Dialog):
                 cand.append((solverenv.time_step_factor(nh),
                              "The L of %s" % ref, "%g nH" % nh, i))
                 # The R uses the series law only when the branch has more
-                # than ONE component. `runner._le_topology` holds that
+                # than ONE component. `openems_runner._le_topology` holds that
                 # rule.
                 if (v["r"] or 0) > 0 and sum(
                         x is not None for x in v.values()) > 1:
@@ -1199,7 +1238,7 @@ class SettingsDialog(wx.Dialog):
                              "The inductor %s" % ref, "%g nH" % nh, i))
             # The ESL counts only where the element holds it. An inductor
             # has no ESL in its element. A body that does not change its
-            # part stays out, as in `runner._time_step_rule`.
+            # part stays out, as in `openems_runner._time_step_rule`.
             comp = self._row_components(i) or {}
             body = comp.get("L", 0.0) if kind in ("R", "C") else 0.0
             cand.append((solverenv.time_step_factor(1e9 * body),
@@ -1221,7 +1260,7 @@ class SettingsDialog(wx.Dialog):
         """Give the R, L and C that the runner puts in ONE element for row
         `i`, in SI. Give None for a text that is not a number.
 
-        It is `runner._components` with the parasitics of the row: the ESL
+        It is `solverenv.components` with the parasitics of the row: the ESL
         of a resistor or a capacitor, and the ESR of a capacitor or an
         inductor. "No parasitics" gives 0 for the two. The open rule of the
         dialog and of the runner must read the same branch. If not, the
@@ -1239,7 +1278,7 @@ class SettingsDialog(wx.Dialog):
             return None
         if kind is None or val is None:
             return None
-        # A 0 ohm part is a short, as in `runner._components`: no body.
+        # A 0 ohm part is a short, as in `solverenv.components`: no body.
         if kind == "R" and val == 0:
             return {"R": 0.0}
         comp = {kind: val}
@@ -1250,7 +1289,7 @@ class SettingsDialog(wx.Dialog):
         if kind in ("C", "L") and body_r > 0:
             comp["R"] = body_r
         # **A body that does not change its part stays out**, as in
-        # `runner._components`: the part then uses the classic path.
+        # `solverenv.components`: the part then uses the classic path.
         sweep = None if whole else self._sweep()
         if sweep and solverenv.body_is_idle(comp, kind, *sweep[:2]):
             return {kind: val}
@@ -1288,10 +1327,10 @@ class SettingsDialog(wx.Dialog):
     def _derived_steps(self):
         """Give the step limit that openEMS receives, or give None.
 
-        `runner._max_timesteps` divides "Max steps" by the timestep factor.
-        Thus the SIMULATED time does not change, but the count changes. A
-        "Timestep" that the user gives is more important than the
-        rule, in the runner and thus here.
+        `openems_runner._max_timesteps` divides "Max steps" by the timestep
+        factor. Thus the SIMULATED time does not change, but the count changes.
+        A "Timestep" that the user gives is more important than the rule, in
+        the runner and thus here.
         """
         try:
             steps = float(self.max_steps.GetValue())
@@ -1308,7 +1347,7 @@ class SettingsDialog(wx.Dialog):
         that keeps the run stable. The runner divides the step limit by
         that part for the same simulated time. Thus 1/factor is the run
         time that the inductor costs, and the user must see it BEFORE the
-        run and not after it. The dialog and `runner._time_step_factor`
+        run and not after it. The dialog and `openems_runner._time_step_factor`
         read the ONE function. If not, the number here and the run do not
         agree.
         """
@@ -1318,6 +1357,10 @@ class SettingsDialog(wx.Dialog):
         factor, source, value, row = self._lumped_limit()
         cost = 1.0 / factor
         text = ""
+        # **The two lines are for openEMS only.** EMerge has no timestep,
+        # thus an inductor costs no run time. It also keeps each part in
+        # the model, also a part that is an open circuit over the sweep.
+        fdtd = self._solver_key() == "openems"
         # The rule starts to cost at 0.25 nH. A body ESL of 0603 to 2512
         # (0.35 to 0.90 nH) costs 1.2 to 1.9 times. Below 1.05, the number
         # rounds to "1.0 times longer", which is a warning that gives no
@@ -1327,7 +1370,7 @@ class SettingsDialog(wx.Dialog):
         # 2026-09-21. A body costs the same run time as a value that the
         # user typed, thus it must show the same warning. The words tell
         # which one it is.
-        if cost >= 1.05:
+        if fdtd and cost >= 1.05:
             # **The COUNT of steps, and not only the multiplier** (P20).
             # "600 times longer" does not tell if the run is one hour or
             # one week long. The step limit that openEMS receives tells it.
@@ -1349,7 +1392,7 @@ class SettingsDialog(wx.Dialog):
         # or less, thus it is only in the Optimizations list.
         opens = []
         for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
-            if cb.GetValue():
+            if fdtd and cb.GetValue():
                 is_open, z = self._open_over_sweep(i)
                 if is_open:
                     opens.append("%s (%s)" % (ref, _ohm_text(z)))
@@ -1482,6 +1525,23 @@ class SettingsDialog(wx.Dialog):
         else:
             self.Destroy()
 
+    def _solver_key(self):
+        return SOLVERS[self.solver.GetSelection()]
+
+    def _on_solver(self, evt):
+        """Enable the fields of the solver that the user selected.
+
+        The threads, the run limits and the timestep are for the FDTD run
+        only. The frequency count is for EMerge only.
+        """
+        fem = self._solver_key() == "emerge"
+        self.fem_points.Enable(fem)
+        for c in (self.threads, self.max_steps, self.end_crit, self.tsf):
+            c.Enable(not fem)
+        self._update_lumped_warning()
+        if evt is not None:
+            evt.Skip()
+
     def _on_ok(self, evt):
         # **Each message names ONE field**, with the label that the dialog
         # shows. A single message for all the fields did not tell the user
@@ -1608,6 +1668,11 @@ class SettingsDialog(wx.Dialog):
                     % (self.port_order[i].GetSelection() + 1),
                     "RFsim", wx.ICON_ERROR)
                 return
+        # The rules below are for the FDTD run of openEMS: its limits and
+        # its timesteps. EMerge does not use those fields.
+        if self._solver_key() != "openems":
+            evt.Skip()
+            return
         # The three limits of the run. An empty timestep factor is
         # correct: the runner then selects the value itself.
         for ctrl, name, low, high in (
@@ -1893,6 +1958,8 @@ class SettingsDialog(wx.Dialog):
             # cell count and selects the value. Item i gives i threads.
             "threads": self.threads.GetSelection() or None,
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
+            "solver": self._solver_key(),
+            "fem_points": int(round(self.fem_points.GetValue())),
             "port_types": [vals[c.GetSelection()] for c, vals
                            in zip(self.port_choices, self.port_types)],
             # The manual feed of each pad that has no track: (direction,
@@ -1929,9 +1996,9 @@ class SettingsDialog(wx.Dialog):
             "n_freq": 401,
             "max_timesteps": int(float(self.max_steps.GetValue())),
             "end_criteria": float(self.end_crit.GetValue()),
-            # An empty field gives None. `runner._time_step_factor` then
-            # selects the value from the largest inductance of the model. A
-            # value here is more important than that value.
+            # An empty field gives None. `openems_runner._time_step_factor`
+            # then selects the value from the largest inductance of the model.
+            # A value here is more important than that value.
             "time_step_factor": (float(self.tsf.GetValue())
                                  if self.tsf.GetValue().strip() else None),
         }
@@ -2394,10 +2461,10 @@ class ResultsFrame(wx.Frame):
     def _dump_z(self, port):
         """Give the z of the plane of the field dump, in mm.
 
-        `runner.build` puts the dump at the middle of the substrate between
-        the layer of the EXCITED port and the layer below it: `0.5 * (z_top
-        + z_ref)`. The title of the view names the value, because a field
-        picture with no plane is a picture of nothing.
+        `openems_runner.build` puts the dump at the middle of the substrate
+        between the layer of the EXCITED port and the layer below it: `0.5 *
+        (z_top + z_ref)`. The title of the view names the value, because a
+        field picture with no plane is a picture of nothing.
         """
         z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
         ports = self.model["ports"]
@@ -2483,10 +2550,10 @@ class ResultsFrame(wx.Frame):
                      fontsize=10)
         ax.set_aspect("equal")
 
-        # The block of numbers at the left. The PLANE goes with them. It is
-        # the plane that `runner.build` dumps: the middle of the substrate
-        # between the layer of the excited port and the layer below it. A
-        # field picture with no plane shows nothing.
+        # The block of numbers at the left. The PLANE goes with them. It is the
+        # plane that `openems_runner.build` dumps: the middle of the substrate
+        # between the layer of the excited port and the layer below it. A field
+        # picture with no plane shows nothing.
         head = ("Frequency: %.2f GHz\n" % (f_hz / 1e9))
         tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(substrate mid-plane)"
                 % (vmax, unit, self._dump_z(port)))

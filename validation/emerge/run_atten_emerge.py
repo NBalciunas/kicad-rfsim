@@ -1,0 +1,25 @@
+"""Run `rig_atten` with EMerge.
+
+The rig in `validation/common/rig_atten.py` holds the board, the theory and
+the checks, and its docstring tells what it tests. The two solvers run the
+same rig. This file selects EMerge, and its results go into
+`validation/emerge/out_*`.
+
+Start it with the python of KiCad 10 or of a solver. It does not use
+pcbnew, and it starts the solver itself:
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_atten_emerge.py [coarse|medium]
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
+
+import rigsolve  # noqa: E402
+
+rigsolve.use("emerge", HERE)
+
+import rig_atten  # noqa: E402
+
+if __name__ == "__main__":
+    rig_atten.main(*(sys.argv[1:] or ["coarse"]))

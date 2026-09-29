@@ -13,11 +13,11 @@ import re
 
 import pcbnew
 
-# The depth of the PML band. `extract` sets the dimension of the domain
-# with it, and `runner._mesh` puts the cells of the band in it. Thus the
-# two must read the same rule. `solverenv` imports only `math` and `os`.
-# The plugin loads this file as a module of a package, and the self-test
-# below runs it as a script. Thus the import has the two alternatives.
+# The depth of the PML band. `extract` sets the dimension of the domain with
+# it, and `openems_runner._mesh` puts the cells of the band in it. Thus the two
+# must read the same rule. `solverenv` imports only `math` and `os`. The plugin
+# loads this file as a module of a package, and the self-test below runs it as
+# a script. Thus the import has the two alternatives.
 try:
     from . import solverenv
 except ImportError:                      # run as a top-level module

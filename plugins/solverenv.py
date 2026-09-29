@@ -1,5 +1,7 @@
-"""The location of openEMS, the Python that must run the solver, and the
-timestep rule of a lumped inductor.
+"""The location of openEMS and EMerge, the Python that must run each
+solver, the timestep rule of a lumped inductor, and the rules that the
+two runners share: the version of model.json, the R, L and C of a part,
+and the Touchstone writer.
 
 Two processes import this module: the pcbnew plugin, and the runner in its
 own Python. Thus it must not import pcbnew, wx or numpy. Each value that
@@ -13,18 +15,18 @@ import os
 # worst geometry: a board of 6.4 mm with 100 nH is stable at 0.09, and the
 # bare law gives 0.10.
 #
-# **0.5 comes from the mesh that keeps ONE cell in series.** That mesh
-# moved the boundary of the worst geometry, a board of 6.4 mm. With 0.7,
-# that board kept 1.3x at 100 nH and 1.6x at 10 nH. The mesh of two cells
-# in series gave 2.3x or more on each geometry of the matrix of
-# `validation/run_stability.py`, and that file sets a limit of 1.35x. With
-# 0.5, the same geometry keeps 1.8x and 2.2x, and each other geometry keeps
-# 3.2x or more.
+# **0.5 comes from the mesh that keeps ONE cell in series.** That mesh moved
+# the boundary of the worst geometry, a board of 6.4 mm. With 0.7, that board
+# kept 1.3x at 100 nH and 1.6x at 10 nH. The mesh of two cells in series gave
+# 2.3x or more on each geometry of the matrix of
+# `validation/openems/run_stability_openems.py`, and that file sets a limit of
+# 1.35x. With 0.5, the same geometry keeps 1.8x and 2.2x, and each other
+# geometry keeps 3.2x or more.
 #
 # It costs 1/0.5 = 2 times more timesteps on a board with a 1 nH inductor,
 # and 20 times on a board with 100 nH. It costs nothing on a board with no
 # inductance larger than 0.25 nH. The dialog shows that number before the
-# run. `validation/run_stability.py` measures the margin again.
+# run. `validation/openems/run_stability_openems.py` measures the margin again.
 LE_STAB_MARGIN = 0.5
 
 
@@ -45,11 +47,11 @@ def time_step_factor(l_nh):
     return min(1.0, LE_STAB_MARGIN / l_nh ** 0.5) if l_nh > 0 else 1.0
 
 
-# The constant of the timestep rule of a SERIES branch that has a
-# resistance. openEMS uses `Operator_Ext_LumpedRLC` for `LEtype` = 1. That
-# extension integrates the current of the branch, and a large resistance
-# makes the integrator diverge. The largest stable factor follows `k /
-# sqrt(R[ohm])`. `validation/run_cosim.py` measured k on 2026-09-22 at the
+# The constant of the timestep rule of a SERIES branch that has a resistance.
+# openEMS uses `Operator_Ext_LumpedRLC` for `LEtype` = 1. That extension
+# integrates the current of the branch, and a large resistance makes the
+# integrator diverge. The largest stable factor follows `k / sqrt(R[ohm])`.
+# `validation/openems/run_cosim_openems.py` measured k on 2026-09-22 at the
 # full Courant step:
 #
 #   | geometry             | 500 ohm | 1000 ohm | 2000 ohm |  k   |
@@ -63,12 +65,12 @@ def time_step_factor(l_nh):
 # is for the inductor rule. Thus 7.8 is the bare law.
 #
 # 5.8 gives the worst geometry a margin of 1.35. That is the margin that
-# `validation/run_stability.py` sets for the inductor rule, and it gives
-# the reference board 1.9. The USUAL case also costs nothing. A 0603
+# `validation/openems/run_stability_openems.py` sets for the inductor rule, and
+# it gives the reference board 1.9. The USUAL case also costs nothing. A 0603
 # resistor of 50 ohm gets 0.82 here and 0.707 from its own ESL. Thus the
 # inductor rule sets the factor, and the run time does not change. The rule
-# starts to cost at 100 ohm (1.2 times). It prevents the divergence of a
-# run at 150 ohm and more.
+# starts to cost at 100 ohm (1.2 times). It prevents the divergence of a run at
+# 150 ohm and more.
 LE_SERIES_R = 5.8
 
 
@@ -76,9 +78,9 @@ def series_r_factor(r_ohm):
     """Give the part of the Courant timestep that a SERIES branch with this
     resistance keeps stable.
 
-    `r_ohm` is the largest resistance in a branch with `LEtype` = 1, which
-    is a branch that has more than one component. A branch with ONE
-    resistance does not use that topology: refer to `runner._le_topology`.
+    `r_ohm` is the largest resistance in a branch with `LEtype` = 1, which is a
+    branch that has more than one component. A branch with ONE resistance does
+    not use that topology: refer to `openems_runner._le_topology`.
 
     The factor stops at 1.0, thus a resistance of 34 ohm or less costs
     nothing.
@@ -139,12 +141,13 @@ def is_open(r, l, c, f_start, f_stop, z0):
 # costs 0.09 dB, and 2% of |Z| is about 0.17 dB.
 #
 # **The rule is for the path and not for the parasitic.** A resistor or a
-# capacitor with a body is two components or more. Thus it uses the series
-# path of openEMS. That path changes S21 much more than the body does:
-# 1.67 dB at 200 ohm and 5.47 dB at 1 kohm. The ESL of an 0603 body changes
-# S21 by 0.017 dB and 0.0013 dB (`validation/run_cosim.py topology`). The
-# path also gets a timestep factor of 0.41 and 0.18. The same resistor with
-# no body uses the classic path, with no cost.
+# capacitor with a body is two components or more. Thus it uses the series path
+# of openEMS. That path changes S21 much more than the body does: 1.67 dB at
+# 200 ohm and 5.47 dB at 1 kohm. The ESL of an 0603 body changes S21 by
+# 0.017 dB and 0.0013 dB (`validation/openems/run_cosim_openems.py
+# topology`). The
+# path also gets a timestep factor of 0.41 and 0.18. The same resistor with no
+# body uses the classic path, with no cost.
 PARASITIC_MIN = 0.02
 
 
@@ -252,6 +255,105 @@ def pml_depth(res):
     return PML_CELLS * res * (1.0 - 1e-6)
 
 
+# ------------------------------------------- the rules of the two runners
+# The newest version of model.json that the runners can read. It must
+# agree with `board_reader.MODEL_VERSION`. board_reader imports pcbnew,
+# thus it keeps its own copy.
+MODEL_VERSION = 3
+
+
+def parasitic_components(e):
+    """Give the parasitic components of the body of a part.
+
+    The engine puts the R, the L and the C of one element in series
+    (LEtype=1). Thus:
+
+    - A capacitor becomes ESR + ESL + C. This is the usual model of a
+      capacitor, and it puts the self-resonance at the correct frequency.
+    - A resistor becomes R + ESL.
+    - An inductor becomes DCR + L. A series element cannot make the
+      parallel capacitance of an inductor. Thus this model does not give
+      the self-resonance of an inductor.
+
+    The values are for the body of the part only. The mesh contains the
+    loop of the pads and the tracks.
+    """
+    out = {}
+    esl, esr = e.get("esl") or 0.0, e.get("esr") or 0.0
+    if e["type"] in ("R", "C") and esl > 0:
+        out["L"] = esl
+    if e["type"] in ("C", "L") and esr > 0:
+        out["R"] = esr
+    return out
+
+
+def components(e, para, s=None):
+    """Give the R, L and C that a runner puts in ONE element, in SI.
+
+    `para` tells if the package parasitics are on. The result is the
+    keyword arguments of `AddLumpedElement` in openEMS, and the Z(f) of
+    a `LumpedElement` in EMerge. `_le_topology` and
+    `_time_step_factor` read the same result. Thus the rule of the timestep
+    and the element of that rule always agree.
+
+    `s` is the settings of the run. With a sweep in it, **a body that does
+    not change its part stays out** (`body_is_idle`). The part is
+    then one R or one C, and it uses the classic path of openEMS. It does
+    not use the series path, which costs more than the body models.
+    `settings["keep_idle_body"]` = True keeps all bodies, for a rig that
+    must measure the series path itself. With no `s`, the body always
+    stays. `_decisions` compares against that result.
+
+    An element that `build` does not model gives {}.
+    """
+    if e.get("type") == "RLC":
+        return {k: float(e[k.lower()]) for k in "RLC" if e.get(k.lower())}
+    if not e.get("type") or e.get("value") is None:
+        return {}
+    # A 0 ohm part is a box of metal (a short). `build` models no body for
+    # it, thus its body sets no timestep.
+    if e["type"] == "R" and e["value"] == 0:
+        return {"R": 0.0}
+    comp = {e["type"]: e["value"]}
+    if para:
+        comp.update(parasitic_components(e))
+    if (s and not s.get("keep_idle_body") and s.get("f_start")
+            and s.get("f_stop") and body_is_idle(
+                comp, e["type"], s["f_start"], s["f_stop"])):
+        return {e["type"]: e["value"]}
+    return comp
+
+
+def write_touchstone(path, freq, S, z0):
+    """Write a Touchstone v1 file.
+
+    A file for 1 or 2 ports has one line for each frequency. The columns of
+    a 2-port file are in the usual sequence S11 S21 S12 S22. A file for 3
+    ports or more is in the sequence of the rows, with a maximum of 4 pairs
+    on a line.
+    """
+    n = S.shape[1]
+    with open(path, "w") as fh:
+        fh.write("! rfsim (KiCad + openEMS)\n# HZ S RI R %g\n" % z0)
+        for i, f in enumerate(freq):
+            if n <= 2:
+                vals = ([S[i, 0, 0]] if n == 1 else
+                        [S[i, 0, 0], S[i, 1, 0], S[i, 0, 1], S[i, 1, 1]])
+                fh.write("%.6e %s\n" % (f, " ".join(
+                    "%.9e %.9e" % (v.real, v.imag) for v in vals)))
+                continue
+            fh.write("%.6e" % f)
+            for j in range(n):
+                if j:
+                    fh.write("\n           ")  # one line for each matrix row
+                for k in range(n):
+                    if k and k % 4 == 0:
+                        fh.write("\n           ")  # start a line after 4 pairs
+                    v = S[i, j, k]
+                    fh.write(" %.9e %.9e" % (v.real, v.imag))
+            fh.write("\n")
+
+
 def openems_dirs():
     """Give the possible openEMS install directories, the best one first.
 
@@ -266,10 +368,38 @@ def openems_dirs():
     ) if d]
 
 
-def solver_python():
-    """Give the interpreter that must run runner.py, or give None.
+# The solvers that `settings["solver"]` can name. A model with no key uses
+# openEMS.
+SOLVERS = ("openems", "emerge")
 
-    runner.py imports only numpy, h5py, CSXCAD and openEMS. It does not
+
+def emerge_python():
+    """Give the interpreter that must run emerge_runner.py, or give None.
+
+    EMerge supplies wheels for Python 3.10 to 3.13 only, thus it cannot
+    use the venv of openEMS (3.14). The function looks in this sequence:
+
+      1. $RFSIM_EMERGE_PYTHON
+      2. `venv` in $EMERGE_PATH, then in C:\\emerge
+    """
+    cfg = os.environ.get("RFSIM_EMERGE_PYTHON")
+    if cfg:
+        return cfg
+    for d in (os.environ.get("EMERGE_PATH"), r"C:\emerge"):
+        if not d:
+            continue
+        for sub in (("venv", "Scripts", "python.exe"),
+                    ("venv", "bin", "python")):
+            cand = os.path.join(d, *sub)
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def solver_python():
+    """Give the interpreter that must run openems_runner.py, or give None.
+
+    openems_runner.py imports only numpy, h5py, CSXCAD and openEMS. It does not
     import pcbnew or wx. Thus it can run in a different Python than the
     Python of KiCad. openEMS v0.37 and after make this necessary: they
     supply cp313 and cp314 wheels only, but KiCad 8, 9 and 10 all contain

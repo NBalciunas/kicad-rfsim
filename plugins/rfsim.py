@@ -27,16 +27,32 @@ def _kicad_python():
     return "python"
 
 
-def _solver_missing(exe):
-    """Give the modules that are necessary for runner.py and that `exe`
-    does not have.
+# The runner script and the modules that it must have, for each solver.
+RUNNERS = {"openems": ("openems_runner.py",
+                       ("numpy", "h5py", "CSXCAD", "openEMS")),
+           "emerge": ("emerge_runner.py", ("numpy", "h5py", "emerge"))}
+
+
+def _solver_env(solver):
+    """Give the interpreter of `solver`, the runner script and its
+    modules."""
+    script, mods = RUNNERS[solver]
+    if solver == "emerge":
+        exe = solverenv.emerge_python() or _kicad_python()
+    else:
+        exe = solverenv.solver_python() or _kicad_python()
+    return exe, script, mods
+
+
+def _solver_missing(exe, mods=RUNNERS["openems"][1]):
+    """Give the modules of `mods` that `exe` does not have.
 
     The subprocess uses find_spec, which does not import the extensions.
     Thus a missing openEMS DLL does not look like a missing package.
     """
     code = ("import importlib.util as u\n"
-            "print(','.join(m for m in ('numpy', 'h5py', 'CSXCAD', 'openEMS')\n"
-            "               if u.find_spec(m) is None))")
+            "print(','.join(m for m in %r\n"
+            "               if u.find_spec(m) is None))" % (tuple(mods),))
     try:
         r = subprocess.run([exe, "-c", code], capture_output=True, text=True,
                            timeout=60, creationflags=NO_WINDOW)
@@ -70,22 +86,15 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         # The results window runs in the Python of KiCad. The solver runs
         # in its own interpreter, because openEMS v0.37 and after have no
         # cp311 wheel. Thus the code examines the two sets of packages one
-        # after the other.
-        solver_py = solverenv.solver_python() or _kicad_python()
+        # after the other. The solver comes from the dialog, thus its
+        # packages are examined after the dialog.
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
-        solver_missing = _solver_missing(solver_py)
-        if gui_missing or solver_missing:
-            msg = []
-            if gui_missing:
-                msg.append("Missing in KiCad's Python (results window): %s"
-                           % ", ".join(gui_missing))
-            if solver_missing:
-                msg.append("Missing in the solver Python\n%s\n%s"
-                           % (solver_py, ", ".join(solver_missing)))
-            wx.MessageBox("\n\n".join(msg)
-                          + "\n\nSee the plugin README for install "
-                            "instructions.", "RFsim", wx.ICON_ERROR)
+        if gui_missing:
+            wx.MessageBox("Missing in KiCad's Python (results window): %s"
+                          "\n\nSee the plugin README for install "
+                          "instructions." % ", ".join(gui_missing),
+                          "RFsim", wx.ICON_ERROR)
             return
 
         board = pcbnew.GetBoard()
@@ -128,6 +137,15 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             return
         settings = dlg.get_settings()
         dlg.Destroy()
+
+        solver_py, script, mods = _solver_env(settings["solver"])
+        solver_missing = _solver_missing(solver_py, mods)
+        if solver_missing:
+            wx.MessageBox("Missing in the solver Python\n%s\n%s\n\nSee the "
+                          "plugin README for install instructions."
+                          % (solver_py, ", ".join(solver_missing)),
+                          "RFsim", wx.ICON_ERROR)
+            return
 
         port_types = settings.pop("port_types")
         port_feed = settings.pop("port_feed")
@@ -231,7 +249,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         with open(model_path, "w") as fh:
             json.dump(model, fh, indent=1)
 
-        runner = os.path.join(os.path.dirname(__file__), "runner.py")
+        runner = os.path.join(os.path.dirname(__file__), script)
         cmd = [solver_py, runner, model_path, outdir]
         # run.log keeps all the text that the window shows, because the
         # window closes immediately when a run succeeds.
