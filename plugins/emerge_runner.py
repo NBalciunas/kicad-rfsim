@@ -24,12 +24,16 @@ The limits of this model:
 
 - The copper has no thickness: each side of a sheet has the surface
   impedance of copper. A via is PEC.
-- A wave port still loses a small part of the power. A microstrip of
-  20 mm with PEC copper and no dielectric loss gives |S11|^2 + |S21|^2 =
-  0.974 to 0.998 from 1 to 6 GHz (0.92 to 0.96 with the projection of
-  EMerge, `_power_overlap`). The rest comes from the metal box of the
-  face, which cuts the field of the open line (`_wave_port`). A finer
-  mesh does not change it.
+- A wave port of an open line (msl, cpw) still loses a small part of the
+  power. A microstrip of 20 mm with PEC copper and no dielectric loss
+  gives |S11|^2 + |S21|^2 = 0.969 to 0.996 from 1 to 6 GHz (0.92 to 0.96
+  with the projection of EMerge, `_power_overlap`), with its lowest value
+  near 1.5 GHz. The same stripline with no loss gives 1.000. The field of
+  the open line is not the mode of the metal box of the face, and the
+  port boundary absorbs the difference: about 1.7% of the power at 1.5
+  and 2 GHz. The box also radiates about 1%. A finer mesh, a larger air
+  box and a first-order absorber do not change it. A larger face moves
+  the lowest value to a lower frequency.
 """
 import glob
 import json
@@ -553,6 +557,79 @@ def _fit(g, ports, freq):
     return S, raw, None, "; ".join(causes)
 
 
+def _smooth_plane(fe, X, Y, z_cut):
+    """Give (Ex, Ey, Ez, Hx, Hy, Hz) on the points (X, Y) of the plane
+    z_cut (mm), continuous from one tetrahedron to the next.
+
+    **The elements of EMerge keep only the tangential field continuous**
+    across a face. The normal part jumps, thus a cut through the mesh shows
+    each tetrahedron as a triangle of its own, most at the copper edges,
+    where the elements are small and the field changes fast. This gives
+    the field at each vertex of the tetrahedra that the plane cuts, as the
+    mean of the values at the centres of the tetrahedra of that vertex, and
+    then the linear value between the 4 vertices at each point. Thus the
+    detail follows the mesh: small elements keep a narrow gap. The mean is
+    for each material alone, thus the jump of the normal E at a dielectric
+    face stays. A point outside the mesh gives NaN.
+    """
+    from emerge._emerge.const import MU0
+    b = fe.basis
+    nodes, tets = b.mesh.nodes, b.mesh.tets
+    xs, ys = X.ravel() * MM, Y.ravel() * MM
+    zs = np.full_like(xs, z_cut * MM)
+    tmap = np.asarray(b.interpolate_index(xs, ys, zs)).astype(np.int64)
+    ok = tmap >= 0
+    cut = np.unique(tmap[ok])                       # the cut tetrahedra
+    corner = tets[:, cut]                           # (4, T)
+    # **The value of each tetrahedron at its centre**, which is its most
+    # accurate point, and not at its vertices: a vertex on a copper edge
+    # is singular, and the values of the tetrahedra there left spots.
+    cen = nodes[:, corner].mean(axis=1)             # (3, T)
+    const = 1 / (-1j * 2 * np.pi * fe.freq * (fe._dur * MU0))
+    ev = np.array(b.interpolate(fe._field, cen[0], cen[1], cen[2], cut))
+    hv = np.array(b.interpolate_curl(fe._field, cen[0], cen[1], cen[2],
+                                     const, cut))
+    ev, hv = np.tile(ev, 4), np.tile(hv, 4)         # the same at each vertex
+    # One key for each (vertex, material).
+    mat = np.unique(np.round(np.real(np.asarray(fe._der)[cut]), 6),
+                    return_inverse=True)[1].ravel()
+    key = corner.ravel() * (mat.max() + 1) + np.tile(mat, 4)
+    ukey, inv = np.unique(key, return_inverse=True)
+    cnt = np.bincount(inv)
+
+    def mean(v):
+        return (np.bincount(inv, v.real) + 1j * np.bincount(inv, v.imag)) / cnt
+
+    ev = np.array([mean(c) for c in ev])            # (3, K)
+    hv = np.array([mean(c) for c in hv])
+    # the linear weights of each point in its tetrahedron
+    t = tmap[ok]
+    ti = np.searchsorted(cut, t)                    # the index of t in cut
+    v = nodes[:, tets[:, t]]                        # (3, 4, P)
+    A = np.transpose(v[:, 1:, :] - v[:, :1, :], (2, 0, 1))  # (P, 3, 3)
+    p = np.array([xs[ok], ys[ok], zs[ok]]) - v[:, 0, :]
+    lam = np.linalg.solve(A, p.T[..., None])[..., 0]        # (P, 3)
+    w = np.column_stack([1 - lam.sum(1), lam])              # (P, 4)
+    # the key of each vertex of the tetrahedron of each point
+    k = tets[:, t] * (mat.max() + 1) + mat[ti]
+    col = np.searchsorted(ukey, k)                          # (4, P)
+    # **A median of 3 x 3 points** then takes the last spots at a copper
+    # edge away. A median keeps an edge sharp, and it keeps each feature
+    # of 2 points or more. On the patch of the rigs the peak went down by
+    # 1.6%.
+    from scipy import ndimage
+    out = []
+    for comp in list(ev) + list(hv):
+        f = np.full(xs.shape, np.nan, dtype=complex)
+        f[ok] = np.sum(comp[col] * w.T, axis=0)
+        f = f.reshape(X.shape)
+        g = np.nan_to_num(f)
+        g = (ndimage.median_filter(g.real, 3)
+             + 1j * ndimage.median_filter(g.imag, 3))
+        out.append(np.where(np.isnan(f), np.nan, g))
+    return out
+
+
 def _write_fields(data, model, z_of, box, outdir, f_hz, power):
     """Write excN/Ef.h5, excN/Hf.h5 and excN/field.json for each excited
     port, in the format that `gui._load_field` reads.
@@ -579,11 +656,16 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power):
             continue
         z_cut = 0.5 * (z_of[p["layer"]] + z_of[p["ref_layer"]])
         fe.excite_port(p["number"])
-        fe.interpolate(X * MM, Y * MM, np.full_like(X, z_cut) * MM)
+        try:
+            f6 = _smooth_plane(fe, X, Y, z_cut)
+        except Exception as e:  # the internals of another EMerge version
+            say("the field view has no smoothing (%s: %s)"
+                % (type(e).__name__, e))
+            fe.interpolate(X * MM, Y * MM, np.full_like(X, z_cut) * MM)
+            f6 = (fe.Ex, fe.Ey, fe.Ez, fe.Hx, fe.Hy, fe.Hz)
         d = os.path.join(outdir, "exc%d" % (i + 1))
         os.makedirs(d, exist_ok=True)
-        for name, comps in (("Ef.h5", (fe.Ex, fe.Ey, fe.Ez)),
-                            ("Hf.h5", (fe.Hx, fe.Hy, fe.Hz))):
+        for name, comps in (("Ef.h5", f6[:3]), ("Hf.h5", f6[3:])):
             # (3, Nx, Ny, 1), which is the sequence of the axes of openEMS.
             # A point outside the mesh gives NaN.
             F = np.nan_to_num(np.array(comps))[..., None]

@@ -68,7 +68,7 @@ def shot(win, path):
                                      size.GetWidth(), size.GetHeight()))
 
 
-def dialog(extra=()):
+def dialog(extra=(), solvers=None):
     board = pcbnew.LoadBoard(BOARD)
     pads = [p for fp in board.GetFootprints()
             if fp.GetReference() in ("P1", "P2") for p in fp.Pads()]
@@ -76,7 +76,8 @@ def dialog(extra=()):
     les = list(pre["lumped_elements"]) + list(extra)
     return gui.SettingsDialog(None, pre["ports"], HERE, les, preview=pre,
                               packages=board_reader.package_presets(),
-                              esr=board_reader.esr_presets())
+                              esr=board_reader.esr_presets(),
+                              solvers=solvers)
 
 
 def unknown(ref):
@@ -101,6 +102,12 @@ def capture_dialog(out):
         d = dialog(extra)
         shot(d, os.path.join(out, name + ".png"))
         d.Destroy()
+    # A solver that is not installed: greyed out, with a line below.
+    d = dialog(solvers={"openems": None,
+                        "emerge": r"C:\emerge\venv\Scripts\python.exe "
+                                  "has no emerge"})
+    shot(d, os.path.join(out, "dialog-no-emerge.png"))
+    d.Destroy()
     # The condition where the capture of 2026-08-04 found that defect: an
     # edit of the ESL must move the row to "Custom".
     d = dialog()

@@ -57,12 +57,13 @@ ROGERS = {
 }
 
 
-def dialog(extra=(), stackup=None):
+def dialog(extra=(), stackup=None, solvers=None):
     """Give a dialog for the board of run_lumped_openems.py, which has one R.
 
     `extra` has more elements, for the tests of a part when the board does
     not give its type. `stackup` replaces the stackup keys of the preview,
-    for the tests of the "KiCad's Stackup" preset.
+    for the tests of the "KiCad's Stackup" preset. `solvers` is the state of
+    the solvers that `rfsim._solver_state` gives; None: each one can run.
     """
     board = pcbnew.LoadBoard(BOARD)
     pads = [p for fp in board.GetFootprints()
@@ -76,7 +77,7 @@ def dialog(extra=(), stackup=None):
         pre.update(stackup)
     d = gui.SettingsDialog(None, pre["ports"], HERE, les, preview=pre,
                            packages=board_reader.package_presets(),
-                           esr=board_reader.esr_presets())
+                           esr=board_reader.esr_presets(), solvers=solvers)
     return d
 
 
@@ -785,7 +786,7 @@ def test_the_solver_choice_reaches_the_settings():
     # The body of R1 (0.4 nH) costs openEMS run time, and the label says so.
     assert "times longer" in d.lumped_warn.GetLabel(), d.lumped_warn.GetLabel()
     d.solver.SetSelection(gui.SOLVERS.index("emerge"))
-    fire(d.solver, wx.EVT_CHOICE)
+    fire(d.solver, wx.EVT_RADIOBOX)
     assert d.fem_points.IsEnabled()
     assert not any(c.IsEnabled() for c in (d.threads, d.max_steps,
                                            d.end_crit, d.tsf))
@@ -812,11 +813,53 @@ def test_the_solver_choice_reaches_the_settings():
     finally:
         wx.MessageBox = old_box
     d.solver.SetSelection(gui.SOLVERS.index("openems"))
-    fire(d.solver, wx.EVT_CHOICE)
+    fire(d.solver, wx.EVT_RADIOBOX)
     assert "times longer" in d.lumped_warn.GetLabel(), d.lumped_warn.GetLabel()
+    assert all(d.solver.IsItemEnabled(i) for i in range(len(gui.SOLVERS)))
+    assert d.solver_note.GetLabel() == "", d.solver_note.GetLabel()
     d.Destroy()
     print("the solver choice OK (openEMS by default, EMerge and its "
           "frequencies)")
+
+
+def test_a_missing_solver_is_greyed_out():
+    """The plugin needs one solver, not all. A solver that is not installed
+    stays in the list, greyed out, with its cause in the tooltip and in the
+    line below. The first solver that can run is the default. With no
+    solver that can run, Run refuses."""
+    i_oe, i_em = gui.SOLVERS.index("openems"), gui.SOLVERS.index("emerge")
+    no_oe = {"openems": r"C:\x\python.exe has no CSXCAD, openEMS",
+             "emerge": None}
+    d = dialog(solvers=no_oe)
+    assert not d.solver.IsItemEnabled(i_oe) and d.solver.IsItemEnabled(i_em)
+    assert d.solver.GetSelection() == i_em
+    assert "has no CSXCAD" in d.solver.GetItemToolTip(i_oe).GetTip()
+    assert "Not installed: openEMS." in d.solver_note.GetLabel(), \
+        d.solver_note.GetLabel()
+    s = d.get_settings()
+    assert s["solver"] == "emerge", s["solver"]
+    # the fields of EMerge, and not of openEMS, from the start
+    assert d.fem_points.IsEnabled() and not d.max_steps.IsEnabled()
+    assert d.lumped_warn.GetLabel() == "", d.lumped_warn.GetLabel()
+    d.Destroy()
+
+    d = dialog(solvers={"openems": None, "emerge": "no venv"})
+    assert d.solver.GetSelection() == i_oe
+    assert not d.solver.IsItemEnabled(i_em)
+    assert d.get_settings()["solver"] == "openems"
+    d.Destroy()
+
+    d = dialog(solvers={"openems": "no venv", "emerge": "no venv"})
+    old_box, stopped = wx.MessageBox, []
+    wx.MessageBox = lambda msg, *a, **k: (stopped.append(msg), wx.OK)[1]
+    try:
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert stopped and "is not installed" in stopped[0], stopped
+    finally:
+        wx.MessageBox = old_box
+    d.Destroy()
+    print("a missing solver OK (greyed out, the next one is the default, "
+          "and none refuses the run)")
 
 
 def test_the_kicad_stackup_preset_gives_the_board():
@@ -1275,6 +1318,7 @@ if __name__ == "__main__":
     test_the_rogers_grades_have_two_rows()
     test_the_run_limits_reach_the_settings()
     test_the_solver_choice_reaches_the_settings()
+    test_a_missing_solver_is_greyed_out()
     test_the_kicad_stackup_preset_gives_the_board()
     test_the_x_of_the_dialog_does_not_start_the_run()
     test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics()

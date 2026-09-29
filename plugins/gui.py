@@ -27,11 +27,10 @@ except ImportError:  # a top-level module
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
               ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
 MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
-# The solvers, in the sequence of the drop-down list. `solverenv.SOLVERS`
-# holds the keys that model.json gets.
+# The solvers, in the sequence of the buttons. `solverenv.SOLVER_INFO` holds
+# them, and `SOLVERS` holds the keys that model.json gets.
 SOLVERS = solverenv.SOLVERS
-SOLVER_NAMES = {"openems": "openEMS (FDTD)",
-                "emerge": "EMerge (FEM, experimental)"}
+SOLVER_NAMES = {k: v["name"] for k, v in solverenv.SOLVER_INFO.items()}
 # The rows of the R/L/C parts that the dialog shows without a scroll. Each
 # row is about 29 px tall. With one part, the dialog is 1053 px tall on a
 # screen of 1920x1080.
@@ -345,8 +344,11 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None, esr=None):
+                 packages=None, esr=None, solvers=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
+        # {the key of a solver: None when it can run, or the cause when it
+        # cannot}, from `rfsim._solver_state`. None: each solver can run.
+        self._solver_state = dict(solvers or {})
         # {the code of the package: the ESL in H} and {the type of the
         # part: the ESR in ohm}. board_reader keeps the two tables, thus
         # there is one source of truth. This module must not import it:
@@ -402,11 +404,30 @@ class SettingsDialog(wx.Dialog):
 
         # The EMerge solver is an experiment. The solver comes first,
         # because it sets which fields below the run uses.
-        sbox = section("Solver")
-        self.solver = wx.Choice(self, choices=[SOLVER_NAMES[k]
-                                               for k in SOLVERS])
-        self.solver.SetSelection(0)
-        sbox.Add(self.solver, 0, wx.ALL | wx.EXPAND, 6)
+        #
+        # **A wx.RadioBox, and not a wx.Choice**: a solver that is not
+        # installed stays in the list but greyed out, and a wx.Choice cannot
+        # disable one item. Its tooltip and the line below give the cause.
+        # The first solver that can run is the default.
+        self.solver = wx.RadioBox(self, label="Solver",
+                                  choices=[SOLVER_NAMES[k] for k in SOLVERS],
+                                  majorDimension=1, style=wx.RA_SPECIFY_ROWS)
+        top.Add(self.solver, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+        absent = []
+        for i, k in enumerate(SOLVERS):
+            why = self._solver_state.get(k)
+            if why:
+                self.solver.EnableItem(i, False)
+                self.solver.SetItemToolTip(i, "Not installed: %s" % why)
+                absent.append(SOLVER_NAMES[k].split(" (")[0])
+        can_run = [i for i, k in enumerate(SOLVERS)
+                   if not self._solver_state.get(k)]
+        self.solver.SetSelection(can_run[0] if can_run else 0)
+        self.solver_note = wx.StaticText(self, label=(
+            "Not installed: %s. The README tells how to install it."
+            % ", ".join(absent)) if absent else "")
+        if absent:
+            top.Add(self.solver_note, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
 
         fbox = section("Frequency")
         fs = wx.BoxSizer(wx.HORIZONTAL)
@@ -969,7 +990,7 @@ class SettingsDialog(wx.Dialog):
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CLOSE, self._on_close)
-        self.solver.Bind(wx.EVT_CHOICE, self._on_solver)
+        self.solver.Bind(wx.EVT_RADIOBOX, self._on_solver)
         self._on_solver(None)
         # The preview uses self.margin and the rows. Thus make it last, and
         # keep it in agreement with the two controls.
@@ -1543,6 +1564,15 @@ class SettingsDialog(wx.Dialog):
             evt.Skip()
 
     def _on_ok(self, evt):
+        # With no solver that can run, the selection stays on a greyed-out
+        # solver. `rfsim` stops before the dialog in that case; a dialog
+        # that is made directly gets the same refusal here.
+        why = self._solver_state.get(self._solver_key())
+        if why:
+            wx.MessageBox("%s is not installed: %s"
+                          % (SOLVER_NAMES[self._solver_key()], why),
+                          "RFsim", wx.ICON_ERROR)
+            return
         # **Each message names ONE field**, with the label that the dialog
         # shows. A single message for all the fields did not tell the user
         # which field to correct. `got` holds the values that passed, thus

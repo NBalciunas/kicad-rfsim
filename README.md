@@ -2,21 +2,22 @@
 
 # RFsim
 
-Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver.
-The geometry goes from the native board objects of KiCad to the primitives of CSXCAD.
+Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver or the [EMerge](https://www.emerge-software.com) FEM solver.
+The geometry goes from the native board objects of KiCad to the model of the solver.
 
 ## Features
 
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
 - Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
 - Animate the E-field and the H-field on the mid-plane of the substrate.
-- Calculate the far field with NF2FF: three polar cuts, a 3D pattern, Dmax and the efficiency.
+- Calculate the far field: three polar cuts, a 3D pattern, Dmax and the efficiency.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
 - Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
 - Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
+- Select the solver in the dialog: openEMS (FDTD) or EMerge (FEM).
 
 ## Installation
 
@@ -31,11 +32,9 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
 
    > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
-5) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases). Extract the `openEMS` folder to `C:\openEMS`.
+5) Install at least one solver (step 6, step 7 or both). The dialog grays out a solver that is not installed.
 
-   > For a different folder, set the `OPENEMS_PATH` environment variable. The plugin is tested with openEMS v0.37.0-rc1 (CSXCAD 0.7.0-rc1).
-
-6) Install [Python 3.14](https://www.python.org/downloads/), then make the venv of the solver:
+6) Install openEMS (tested with v0.37.0-rc1). Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases) and extract the `openEMS` folder to `C:\openEMS`. Install [Python 3.14](https://www.python.org/downloads/), then make the venv of openEMS:
 
    ```bat
    py -3.14 -m venv C:\openEMS\venv
@@ -43,16 +42,16 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
    C:\openEMS\venv\Scripts\python.exe -c "import os; os.add_dll_directory('C:/openEMS'); import CSXCAD, openEMS; print('ok')"
    ```
 
-   > The last command must print `ok`. A warning about the version of HDF5 is not a problem.
+   > The last command must print `ok`. A warning about the version of HDF5 is not a problem. For a different folder, set `OPENEMS_PATH`.
 
-7) Optional: install [EMerge](https://github.com/FennisRobert/EMerge), the FEM solver (an experiment). Make its venv with the Python of KiCad:
+7) Install EMerge (tested with 2.8.9). Make its venv with the Python of KiCad:
 
    ```bat
    "C:\Program Files\KiCad\10.0\bin\python.exe" -m venv C:\emerge\venv
    C:\emerge\venv\Scripts\python.exe -m pip install emerge==2.8.9 h5py
    ```
 
-   > For a different folder, set the `EMERGE_PATH` environment variable. The plugin is tested with EMerge 2.8.9. The first EMerge run compiles its code for some minutes.
+   > The first EMerge run compiles its code for some minutes. For a different folder, set `EMERGE_PATH`.
 
 8) Restart KiCad. The plugin is now installed.
 
@@ -63,14 +62,15 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog: the ports, the R/L/C parts and the domain.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
-5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
+4. Select the solver.
+5. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
+6. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports
 
 **A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** Its box covers the whole pad and the whole substrate.
 
-Each port needs copper on the reference layer below the pad, or the plugin does not run. A CPW port is the exception: its return path is the copper at the sides of the line.
+Each port needs copper at the pad on the reference layer, the adjacent layer below or, for an inner layer, above. Without it, the plugin does not run. A CPW port is the exception: its return path is the copper at the sides of the line.
 
 The dialog gives only the types that the geometry permits:
 
@@ -196,7 +196,7 @@ The `validation/` folder makes its own test boards, runs the solver and compares
 
 * `validation\common\` - the tests that need no solver, the builders of the test boards, and the rigs that the two solvers share (`rig_*.py`).
 * `validation\openems\` - the files that run openEMS. Each file name ends in `_openems`.
-* `validation\emerge\` - the files that run EMerge (an experiment). Each file name ends in `_emerge`.
+* `validation\emerge\` - the files that run EMerge. Each file name ends in `_emerge`.
 
 Run the files with the Python of KiCad, and the files marked "solver Python" with `C:\openEMS\venv\Scripts\python.exe`:
 
@@ -223,7 +223,7 @@ Make the test boards of the rigs of the two solvers.
 
 ### The two solvers
 
-Each rig below has one file for each solver. The two files run the same board and the same checks (`validation\common\rig_*.py`), and each one writes its results into its own folder. In EMerge, a microstrip, CPW or stripline port is a wave port, which measures Z0 and eps_eff of its line as openEMS does. `run_atten` holds the loss of EMerge against a constant tan d, because the dielectric of EMerge has a constant tan d.
+Each rig below has one file for each solver. The two files run the same board and the same checks (`validation\common\rig_*.py`), and write their results into the folder of their solver.
 
 * **`run_rlc_openems.py [mesh] [R1|L1|C1]`**, **`run_rlc_emerge.py [mesh] [R1|L1|C1]`**  
 R, L and C in series between two lines. |S21| must stay flat for R, fall for L and rise for C.
@@ -240,7 +240,7 @@ A zone with a void below the line, against the same board with no void. The void
 * **`run_feature_openems.py [mesh] [stub width in mm]`**, **`run_feature_emerge.py [mesh] [stub width in mm]`** (solver Python)  
 An open stub that no port covers, against theory. Its notch in |S21| gives eps_eff, which tests the mesh cells across a narrow feature.
 * **`run_via_openems.py [mesh]`**, **`run_via_emerge.py [mesh]`** (solver Python)  
-The inductance of one via against Goldfarb and Pucel, for four drill sizes. In openEMS, each is within 20% at the medium preset. In EMerge, each is within 30%: the formula is low for a via in a wide strip, and the two solvers agree to 2% to 5% with the same Z0. At coarse, a drill of 0.3 mm reads −16%: use a finer preset for such a via.
+The inductance of one via against Goldfarb and Pucel, for four drill sizes. Each is within 20% in openEMS at the medium preset, and within 30% in EMerge. At coarse, openEMS reads a drill of 0.3 mm −16%: use a finer preset for such a via.
 * **`run_epc_openems.py [mesh]`**, **`run_epc_emerge.py [mesh]`**  
 The self-resonance of an inductor on an 0402 land, against 1/(2π√(LC)). The notch in |S21| must be at that frequency.
 * **`run_headless_openems.py [mesh] [msl|lumped]`**, **`run_headless_emerge.py [mesh] [msl|lumped]`**  
@@ -264,7 +264,7 @@ The guard that refuses a run whose field grew. Three good traces must pass, and 
 ### EMerge only (`validation\emerge\`)
 
 * **`run_boards_emerge.py [mesh] [msl|series_r|shunt_c|cpw|stripline|patch]`**  
-The boards of the openEMS rigs through EMerge: a microstrip, a series resistor of 50 Ω, a capacitor in shunt, a CPW, a stripline, and a patch antenna for 2.4 GHz. The line ports are wave ports. The resistor must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, and no board may give out more power than it gets. On the microstrip, the E-field view must give 7.07 V across the substrate, which is 0.5 W in 50 Ω. The patch must have a dip in S11 near 2.4 GHz, and a far field of 5 to 9 dBi at broadside. It needs the venv of EMerge at `C:\emerge\venv`.
+Six boards through EMerge: a microstrip, a series resistor of 50 Ω, a capacitor in shunt, a CPW, a stripline and a patch antenna for 2.4 GHz. No board may give out more power than it gets. The resistor must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB, the E-field of the microstrip 7.07 V across the substrate (0.5 W in 50 Ω), and the patch a dip in S11 near 2.4 GHz and 5 to 9 dBi at broadside.
 
 ## License
 

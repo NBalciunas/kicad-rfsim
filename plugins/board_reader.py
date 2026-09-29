@@ -108,6 +108,11 @@ _AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 # a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
 # than this limit is not a coplanar ground.
 MAX_CPW_GAP = 2.0
+# The line port of openEMS is symmetric: a stripline strip at the center
+# between its two planes, and a CPW with the same gap on its two sides. A
+# port whose two sides differ by more than this part, |a - b| / (a + b),
+# gets a warning.
+ASYM_WARN = 0.25
 
 
 def _parse_value(text, kind):
@@ -728,7 +733,14 @@ def _ray_hits(px, py, axis, sign, polys):
     return sorted(hits)
 
 
-def _coplanar_gap(polys, x, y, direction):
+def _median(values):
+    """Give the median of `values`, rounded to 1e-5."""
+    v = sorted(values)
+    n = len(v)
+    return round(0.5 * (v[(n - 1) // 2] + v[n // 2]), 5)
+
+
+def _coplanar_gap(polys, x, y, direction, sides=False):
     """Measure the gap between a feed line and the copper at its sides.
 
     A CPW port must have this value. The function sends a ray to each side
@@ -738,16 +750,21 @@ def _coplanar_gap(polys, x, y, direction):
 
     The function gives None if the copper is not on the two sides, or if it
     is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+
+    With `sides`, it gives (the gap, the median gap of the +side, the median
+    gap of the -side), or three None. extract() warns when the two sides are
+    not the same, because the CPW port has the same gap on its two sides.
     """
+    none = (None, None, None) if sides else None
     if not direction or not polys:
-        return None
+        return none
     axis = 1 if direction[0] else 0  # the ray goes across the feed line
     dx, dy = direction
     # Get samples along the line and not at the pad. Frequently, a pad is
     # wider than the line. A sample that is not on copper gives a number of
     # hits that is not odd, and the code ignores it. (The line stops before
     # that point.)
-    gaps = []
+    side = {1: [], -1: []}
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
         pair = []
@@ -757,14 +774,14 @@ def _coplanar_gap(polys, x, y, direction):
                 break
             if len(hits) < 2 or hits[1] - hits[0] > MAX_CPW_GAP:
                 break  # no copper at the side of the line: not a CPW
-            pair.append(hits[1] - hits[0])
+            pair.append((sign, hits[1] - hits[0]))
         if len(pair) == 2:
-            gaps += pair
-    if len(gaps) < 4:  # 2 sides at 2 positions or more
-        return None
-    gaps.sort()
-    n = len(gaps)
-    return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+            for sign, g in pair:
+                side[sign].append(g)
+    if len(side[1]) < 2:  # 2 sides at 2 positions or more
+        return none
+    gap = _median(side[1] + side[-1])
+    return (gap, _median(side[1]), _median(side[-1])) if sides else gap
 
 
 def copper_along(polys, x, y, direction):
@@ -832,6 +849,28 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
             return round(lo, 4)
         d += step
     return None
+
+
+def _reference_at_pad(p, names, polygons, box):
+    """Give (ref_layer, ref_layer2) of the port `p`, with a reference layer
+    that has copper at the pad.
+
+    `_port` reads the stackup alone, thus the reference of a pad on an inner
+    layer is always the layer below it. When that layer has no copper at the
+    pad and the layer above has, the two change places: the ground plane of
+    such a board is above the strip. The layer below then becomes the second
+    plane of a stripline, and extract() tests it as it tests each second
+    plane. `names` are the copper layers from the top, and `box` is the box
+    of the pad.
+    """
+    i = names.index(p["layer"])
+    if not 0 < i < len(names) - 1:
+        return p["ref_layer"], p["ref_layer2"]
+    above, below = names[i - 1], p["ref_layer"]
+    if (not _touches(polygons.get(below, []), box)
+            and _touches(polygons.get(above, []), box)):
+        return above, (below if p["ref_layer2"] else None)
+    return p["ref_layer"], p["ref_layer2"]
 
 
 def _touches(polys, box):
@@ -1266,12 +1305,30 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
             })
 
     ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    names = [c["name"] for c in copper_layers]
+    ref_notes = []
     # Measure the coplanar gap of each port. The copper of the layer must
     # be available first. Thus this operation comes after the extraction of
     # the polygons. A port that has a gap can use a CPW port.
     for p, pad in zip(ports, pads):
+        ref = p["ref_layer"]
+        p["ref_layer"], p["ref_layer2"] = _reference_at_pad(
+            p, names, polygons, _pad_box(pad))
+        if p["ref_layer"] != ref:
+            ref_notes.append(
+                "Port %d (%s): the reference layer is %s, above the pad, "
+                "because %s has no copper at the pad"
+                % (p["number"], p["label"], p["ref_layer"], ref))
         polys_l = polygons.get(p["layer"], [])
-        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        p["gap"], side_a, side_b = _coplanar_gap(
+            polys_l, p["x"], p["y"], p["direction"], sides=True)
+        if p["gap"] and abs(side_a - side_b) / (side_a + side_b) > ASYM_WARN:
+            warnings.append(
+                "Port %d (%s): the coplanar gap is %.3f mm on one side of "
+                "the line and %.3f mm on the other. A CPW port models the "
+                "same gap on the two sides, thus its Z0 is approximate."
+                % (p["number"], p["label"], min(side_a, side_b),
+                   max(side_a, side_b)))
         # How far the copper runs from the pad along the feed. The
         # runner caps the length of a de-embedded port with it: refer
         # to `copper_run`. None means "further than the limit", and the
@@ -1279,14 +1336,14 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
         # A stripline must have copper on the two planes. _port reads only
         # the stackup. Thus it gives a height for each strip on an inner
-        # layer, also when the second plane is empty above the pad. The
+        # layer, also when the second plane is empty at the pad. The
         # port then puts its voltage probes into open board. The guard
         # below tests the reference layer; this test is for the second
         # plane.
         if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
                                         _pad_box(pad)):
             warnings.append(
-                "Port %d (%s): there is no copper on %s above the pad, "
+                "Port %d (%s): there is no copper on %s at the pad, "
                 "thus this is not a stripline. The Stripline port type "
                 "is not available."
                 % (p["number"], p["label"], p["ref_layer2"]))
@@ -1298,7 +1355,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
             p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
                          for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
-        if p["height"] and p["asymmetry"] > 0.25:
+        if p["height"] and p["asymmetry"] > ASYM_WARN:
             warnings.append(
                 "Port %d (%s): the strip is not at the center between %s "
                 "and %s (%.0f%% off center). A Stripline port models a "
@@ -1332,7 +1389,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 continue
             raise ValueError(
                 "Port %d (%s): there is no copper on the reference layer "
-                "%s below the pad.\nThe port excites the pad against %s. "
+                "%s at the pad.\nThe port excites the pad against %s. "
                 "Thus a ground plane or a pour on %s must touch the edge "
                 "of the pad, or more. For a PCB antenna, the edge of the "
                 "pour is usually at the feed pad. Add or extend a filled "
@@ -1347,6 +1404,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     lumped, le_warn, notes = _lumped_elements(board, region, copper_layers,
                                               port_refs)
     warnings += le_warn
+    notes = ref_notes + notes
 
     for c in copper_layers:
         c.pop("id")
@@ -1566,6 +1624,40 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         _ok = (_want is None and _got is None) or (
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
+    # The two sides of a CPW (B66): 0.2 mm at +y and 0.6 mm at -y. The gap
+    # is the median of the two, and extract() warns: |a - b| / (a + b) is
+    # 0.5, above ASYM_WARN.
+    _ASYM = [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -5.0, 20.0, -1.1)]
+    _got = _coplanar_gap(_ASYM, 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (0.4, 0.2, 0.6), _got
+    assert abs(_got[1] - _got[2]) / (_got[1] + _got[2]) > ASYM_WARN
+    _got = _coplanar_gap(_CPW, 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (0.2, 0.2, 0.2), _got
+    _got = _coplanar_gap([_STRIP], 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (None, None, None), _got
+    # The reference layer of a pad on an inner layer (P23). The ground is
+    # on F.Cu above the pad, and In2.Cu below it has no copper there.
+    _NAMES = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    _PAD = (-0.5, -0.5, 0.5, 0.5)
+    _PLANE = [_rect(-5.0, -5.0, 5.0, 5.0)]
+    _AWAY = [_rect(10.0, 10.0, 12.0, 12.0)]
+    _in1 = {"layer": "In1.Cu", "ref_layer": "In2.Cu", "ref_layer2": "F.Cu"}
+    for _polys, _want in (
+            ({"F.Cu": _PLANE, "In2.Cu": _AWAY}, ("F.Cu", "In2.Cu")),
+            ({"F.Cu": _PLANE}, ("F.Cu", "In2.Cu")),
+            ({"F.Cu": _PLANE, "In2.Cu": _PLANE}, ("In2.Cu", "F.Cu")),
+            ({"In2.Cu": _PLANE}, ("In2.Cu", "F.Cu")),
+            ({}, ("In2.Cu", "F.Cu"))):  # no plane: the guard stops it
+        _got = _reference_at_pad(_in1, _NAMES, _polys, _PAD)
+        assert _got == _want, (_polys.keys(), _got, _want)
+    # With no stripline (ref_layer2 None), the port keeps no second plane.
+    _got = _reference_at_pad(dict(_in1, ref_layer2=None), _NAMES,
+                             {"F.Cu": _PLANE}, _PAD)
+    assert _got == ("F.Cu", None), _got
+    # A pad on an outer layer has one neighbour, and it does not change.
+    _got = _reference_at_pad({"layer": "B.Cu", "ref_layer": "In2.Cu",
+                              "ref_layer2": None}, _NAMES, {}, _PAD)
+    assert _got == ("In2.Cu", None), _got
     # A ray that goes through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
     # The copper test for a manual feed direction. The strip goes to +x
@@ -1573,7 +1665,7 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     assert copper_along([_STRIP], 0.0, 0.0, [1, 0]), "copper_along +x"
     assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
     assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
-    print("geometry OK (%d cases)" % (len(_GEO) + 4))
+    print("geometry OK (%d cases)" % (len(_GEO) + 15))
 
     # (the name, the code, does it give a warning?). A name that has the
     # metric code is not ambiguous, also when the imperial code is 0402 or

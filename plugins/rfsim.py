@@ -1,5 +1,5 @@
 """The RFsim plugin of KiCad: it simulates the S-parameters of the selected
-pads with openEMS."""
+pads with openEMS or EMerge (`solverenv.SOLVER_INFO`)."""
 import importlib.util
 import json
 import os
@@ -27,40 +27,55 @@ def _kicad_python():
     return "python"
 
 
-# The runner script and the modules that it must have, for each solver.
-RUNNERS = {"openems": ("openems_runner.py",
-                       ("numpy", "h5py", "CSXCAD", "openEMS")),
-           "emerge": ("emerge_runner.py", ("numpy", "h5py", "emerge"))}
-
-
 def _solver_env(solver):
     """Give the interpreter of `solver`, the runner script and its
-    modules."""
-    script, mods = RUNNERS[solver]
-    if solver == "emerge":
-        exe = solverenv.emerge_python() or _kicad_python()
-    else:
-        exe = solverenv.solver_python() or _kicad_python()
-    return exe, script, mods
+    modules (`solverenv.SOLVER_INFO`)."""
+    info = solverenv.SOLVER_INFO[solver]
+    exe = info["python"]() or _kicad_python()
+    return exe, info["runner"], info["modules"]
 
 
-def _solver_missing(exe, mods=RUNNERS["openems"][1]):
-    """Give the modules of `mods` that `exe` does not have.
+def _solver_state():
+    """Give {solver: None when it can run, or the cause when it cannot}.
 
-    The subprocess uses find_spec, which does not import the extensions.
-    Thus a missing openEMS DLL does not look like a missing package.
+    The plugin needs one solver and not all, thus the dialog greys out a
+    solver with a cause. A subprocess for each solver uses find_spec, which
+    does not import the extensions: a missing openEMS DLL does not look like
+    a missing package. The subprocesses run at the same time, thus the
+    dialog waits for the slowest one and not for all of them.
     """
-    code = ("import importlib.util as u\n"
-            "print(','.join(m for m in %r\n"
-            "               if u.find_spec(m) is None))" % (tuple(mods),))
-    try:
-        r = subprocess.run([exe, "-c", code], capture_output=True, text=True,
-                           timeout=60, creationflags=NO_WINDOW)
-    except Exception as e:
-        return ["(cannot run %s: %s)" % (exe, e)]
-    if r.returncode != 0:
-        return ["(probe failed: %s)" % (r.stderr or "").strip()[-200:]]
-    return [m for m in r.stdout.strip().split(",") if m]
+    probes = {}
+    for key in solverenv.SOLVERS:
+        exe, _, mods = _solver_env(key)
+        code = ("import importlib.util as u\n"
+                "print(','.join(m for m in %r\n"
+                "               if u.find_spec(m) is None))" % (tuple(mods),))
+        try:
+            probes[key] = (exe, subprocess.Popen(
+                [exe, "-c", code], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, creationflags=NO_WINDOW))
+        except Exception as e:
+            probes[key] = (exe, "cannot run %s: %s" % (exe, e))
+    state = {}
+    for key, (exe, p) in probes.items():
+        if isinstance(p, str):
+            state[key] = p
+            continue
+        try:
+            out, err = p.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            state[key] = "%s did not answer in 60 s" % exe
+            continue
+        missing = [m for m in out.strip().split(",") if m]
+        if p.returncode != 0:
+            state[key] = "the probe of %s failed: %s" % (
+                exe, (err or "").strip()[-200:])
+        elif missing:
+            state[key] = "%s has no %s" % (exe, ", ".join(missing))
+        else:
+            state[key] = None
+    return state
 
 
 class RFSimPlugin(pcbnew.ActionPlugin):
@@ -68,7 +83,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         self.name = "RFsim"
         self.category = "RF tools"
         self.description = ("Simulate S-parameters of the selected pad(s) "
-                            "with openEMS.")
+                            "with openEMS or EMerge.")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__),
                                            "assets", "icon.png")
@@ -83,11 +98,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(traceback.format_exc(), "RFsim", wx.ICON_ERROR)
 
     def _run(self):
-        # The results window runs in the Python of KiCad. The solver runs
+        # The results window runs in the Python of KiCad. Each solver runs
         # in its own interpreter, because openEMS v0.37 and after have no
-        # cp311 wheel. Thus the code examines the two sets of packages one
-        # after the other. The solver comes from the dialog, thus its
-        # packages are examined after the dialog.
+        # cp311 wheel and EMerge has no cp314 wheel. Thus the code examines
+        # the packages of KiCad here, and those of each solver before the
+        # dialog, which greys out a solver that cannot run.
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
         if gui_missing:
@@ -103,6 +118,16 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(
                 "Select at least one pad to run a simulation.",
                 "RFsim", wx.ICON_INFORMATION)
+            return
+
+        solvers = _solver_state()
+        if all(solvers.values()):
+            wx.MessageBox(
+                "No solver is installed. RFsim needs one of them:\n\n%s\n\n"
+                "See the plugin README for install instructions." % "\n".join(
+                    "%s: %s" % (solverenv.SOLVER_INFO[k]["name"], why)
+                    for k, why in solvers.items()),
+                "RFsim", wx.ICON_ERROR)
             return
 
         # The stackup comes from the saved file or from the board in
@@ -131,21 +156,16 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  preview.get("lumped_elements", []),
                                  preview=preview,
                                  packages=board_reader.package_presets(),
-                                 esr=board_reader.esr_presets())
+                                 esr=board_reader.esr_presets(),
+                                 solvers=solvers)
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
         settings = dlg.get_settings()
         dlg.Destroy()
 
-        solver_py, script, mods = _solver_env(settings["solver"])
-        solver_missing = _solver_missing(solver_py, mods)
-        if solver_missing:
-            wx.MessageBox("Missing in the solver Python\n%s\n%s\n\nSee the "
-                          "plugin README for install instructions."
-                          % (solver_py, ", ".join(solver_missing)),
-                          "RFsim", wx.ICON_ERROR)
-            return
+        # The dialog lets only a solver that can run through.
+        solver_py, script, _ = _solver_env(settings["solver"])
 
         port_types = settings.pop("port_types")
         port_feed = settings.pop("port_feed")

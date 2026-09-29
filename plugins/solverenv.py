@@ -368,11 +368,6 @@ def openems_dirs():
     ) if d]
 
 
-# The solvers that `settings["solver"]` can name. A model with no key uses
-# openEMS.
-SOLVERS = ("openems", "emerge")
-
-
 def emerge_python():
     """Give the interpreter that must run emerge_runner.py, or give None.
 
@@ -421,3 +416,23 @@ def solver_python():
             if os.path.isfile(cand):
                 return cand
     return None
+
+
+# **The solvers of the plugin**, in the sequence of the dialog. Each one has
+# the name that the dialog shows, its runner in this folder, the modules
+# that the runner imports, and the function that finds its Python (None:
+# the Python of KiCad). The plugin needs one of them, not all: the dialog
+# greys out a solver whose Python does not have its modules. A new solver
+# is one more entry here, and a runner that reads model.json and writes
+# results.sNp. A model with no "solver" key uses openEMS.
+SOLVER_INFO = {
+    "openems": {"name": "openEMS (FDTD)",
+                "runner": "openems_runner.py",
+                "modules": ("numpy", "h5py", "CSXCAD", "openEMS"),
+                "python": solver_python},
+    "emerge": {"name": "EMerge (FEM, experimental)",
+               "runner": "emerge_runner.py",
+               "modules": ("numpy", "h5py", "emerge"),
+               "python": emerge_python},
+}
+SOLVERS = tuple(SOLVER_INFO)
