@@ -132,6 +132,36 @@ def test_the_field_views_say_what_they_show():
     f.Destroy()
 
 
+def test_the_current_views_say_what_they_show():
+    """F4: a view of the current on the layer of the port and on its
+    reference plane, in A/m, on the plane of that copper.
+
+    On the matched microstrip, the current across the line is
+    sqrt(2 * 0.5 W / 50 ohm) = 0.141 A peak on the strip, and back on the
+    plane. The views are for the pattern (the hot spots and the return
+    path): openEMS gave 0.126 A and 0.122 A, EMerge 0.152 A and 0.142 A.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings() if n.startswith("Current on ")]
+    layers = {c["name"] for c in f.model["copper_layers"]}
+    got = {n[len("Current on "):].split(" (")[0] for n in names}
+    port = f.model["ports"][0]
+    assert {port["layer"], port["ref_layer"]} <= got, (names, got)
+    assert got <= layers, (got, layers)
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        t = texts(f.figure)
+        layer = name[len("Current on "):].split(" (")[0]
+        assert "a/m" in t, "%r has no unit: %s" % (name, t)
+        assert ("copper %s" % layer).lower() in t, \
+            "%r does not name its copper: %s" % (name, t)
+        assert "maximum:" in t and "phase:" in t, t
+    print("the current views name the layer, the unit and the plane OK "
+          "(%d views)" % len(names))
+    f.Destroy()
+
+
 def test_the_far_field_views_say_directivity():
     """The unit is dBi, and each view gives its numbers.
 
@@ -220,11 +250,64 @@ def test_the_field_views_have_the_scale_of_cst():
           "from 0.5 W)" % (v, want))
 
 
+def test_a_trace_can_be_hidden():
+    """A check box for each trace: a cleared box takes the trace out of the
+    graph and of its legend, the other traces keep their colours, and the
+    choice holds in the next view. A field view has no check boxes."""
+    f = frame()
+
+    def show(name):
+        f.choice.SetStringSelection(name)
+        f._plot()
+        ax = f.figure.get_axes()[0]
+        lines = {ln.get_label(): ln.get_color() for ln in ax.get_lines()
+                 if not ln.get_label().startswith("_")}
+        leg = ax.get_legend()
+        return lines, [t.get_text() for t in leg.get_texts()] if leg else []
+
+    def click(i, on):
+        f.traces.Check(i, on)
+        ev = wx.CommandEvent(wx.wxEVT_CHECKLISTBOX, f.traces.GetId())
+        ev.SetInt(i)
+        f.traces.GetEventHandler().ProcessEvent(ev)
+
+    before, _ = show("S-Parameters [Magnitude]")
+    names = list(f.traces.GetStrings())
+    assert f.side.IsShown() and names == list(before), names
+    assert "S11" in names and "S21" in names, names
+    click(names.index("S11"), False)
+    lines, leg = show("S-Parameters [Magnitude]")
+    assert "S11" not in lines and "S11" not in leg, (lines, leg)
+    assert lines["S21"] == before["S21"], "S21 changed its colour"
+    assert not f.traces.IsChecked(names.index("S11"))
+    lines, _ = show("S-Parameters [Phase]")
+    assert "S11" not in lines and "S21" in lines, lines
+    lines, _ = show("Smith Chart")
+    assert "S11" not in lines, lines
+    show("S-Parameters [Magnitude]")
+    for i in range(len(names)):  # each trace hidden: no legend, no error
+        click(i, False)
+    lines, leg = show("S-Parameters [Magnitude]")
+    assert not lines and not leg, (lines, leg)
+    show("Smith Chart")
+    click(names.index("S11"), True)
+    lines, _ = show("S-Parameters [Magnitude]")
+    assert list(lines) == ["S11"], lines
+    f.choice.SetSelection(next(i for i, n in enumerate(f.choice.GetStrings())
+                               if n.startswith("E-Field")))
+    f._plot()
+    assert not f.side.IsShown(), "a field view shows the check boxes"
+    print("a trace can be hidden OK (%s)" % ", ".join(names))
+    f.Destroy()
+
+
 if __name__ == "__main__":
     app = wx.App(False)
     test_every_view_draws()
+    test_a_trace_can_be_hidden()
     test_the_decisions_are_a_view()
     test_the_field_views_say_what_they_show()
+    test_the_current_views_say_what_they_show()
     test_the_far_field_views_say_directivity()
     test_the_ports_are_on_the_field_views()
     test_the_field_views_have_the_scale_of_cst()

@@ -324,6 +324,20 @@ def components(e, para, s=None):
     return comp
 
 
+# The name of a current view in each excN folder is this prefix, the copper
+# layer and ".h5" (F4): the current of the sheet in A/m, in the format of
+# Ef.h5. The two runners write it, and the results window reads it.
+CURRENT_PREFIX = "Jf_"
+
+
+def current_layers(p):
+    """Give the copper layers of the current views of the port `p`: its
+    layer and its reference planes, with no copy. The reference planes
+    carry the return path."""
+    return list(dict.fromkeys(
+        l for l in (p["layer"], p["ref_layer"], p.get("ref_layer2")) if l))
+
+
 def write_touchstone(path, freq, S, z0):
     """Write a Touchstone v1 file.
 

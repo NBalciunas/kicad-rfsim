@@ -239,7 +239,7 @@ def _use_wxagg():
 
 
 def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
-                pml_mm=None):
+                pml_mm=None, subregion=False):
     """Show the top view of the model.
 
     B.Cu is blue, F.Cu is red, the ports are green and the R/L/C parts are
@@ -257,6 +257,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
                   depth before 2026-09-20.
     show_lumped   Show the R/L/C parts or do not show them. The dialog
                   gives False when no part has its "Model" checkbox.
+    subregion     With `margin_mm`: the domain around the port pads, and
+                  not around the board (F20), as `extract` makes it.
     """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -279,8 +281,15 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
         rg = m["region"]
     else:  # extract() adds the clear air AND the band to the board bbox
         d = float(margin_mm) + float(margin_mm if pml_mm is None else pml_mm)
-        rg = {"x0": br["x0"] - d, "x1": br["x1"] + d,
-              "y0": br["y0"] - d, "y1": br["y1"] + d}
+        box = br
+        if subregion and m["ports"]:
+            ps = m["ports"]
+            box = {"x0": min(p["x"] - p["length"] / 2.0 for p in ps),
+                   "x1": max(p["x"] + p["length"] / 2.0 for p in ps),
+                   "y0": min(p["y"] - p["width"] / 2.0 for p in ps),
+                   "y1": max(p["y"] + p["width"] / 2.0 for p in ps)}
+        rg = {"x0": box["x0"] - d, "x1": box["x1"] + d,
+              "y0": box["y0"] - d, "y1": box["y1"] + d}
     ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
             [br["y0"], br["y0"], br["y1"], br["y1"], br["y0"]],
             color="0.25", lw=1.2)
@@ -340,6 +349,13 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
         ax.set_title("Board Layout")
+
+
+def _legend(ax, **kw):
+    """Draw the legend of `ax` if it has a trace. A graph whose traces the
+    user hid has no legend, and matplotlib then gives no warning."""
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(**kw)
 
 
 class SettingsDialog(wx.Dialog):
@@ -893,6 +909,14 @@ class SettingsDialog(wx.Dialog):
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+        # F20: the domain around the port pads, and not the full board.
+        self.subregion = row(rg, "Domain:", wx.CheckBox(
+            self, label="Only the area around the ports"))
+        self.subregion.SetToolTip(
+            "The domain is the box of the port pads plus the margin. The "
+            "copper, the vias and the parts outside it are not in the "
+            "model. This is faster on a large board. The copper that the "
+            "edge cuts ends in the absorber.")
         # A structure with a high Q rings for a long time. The run then
         # stops at the step limit before the energy decreases to the end
         # criteria, and the S-parameters are not correct. Before this, the
@@ -1003,6 +1027,7 @@ class SettingsDialog(wx.Dialog):
             for c in (self.f_stop, self.er):
                 c.Bind(wx.EVT_TEXT, self._on_preview_change)
             self.mesh.Bind(wx.EVT_CHOICE, self._on_preview_change)
+            self.subregion.Bind(wx.EVT_CHECKBOX, self._on_preview_change)
             self._redraw_preview()
         if self.para_rows:
             for _, cb, _, _, _ in self.para_rows:
@@ -1480,6 +1505,7 @@ class SettingsDialog(wx.Dialog):
             _draw_board(ax, self._preview_model, compact=True,
                         margin_mm=self.margin.GetValue(),
                         pml_mm=self._pml_mm(),
+                        subregion=self.subregion.GetValue(),
                         show_lumped=(not self.para_rows
                                      or self._any_modelled()))
         except Exception as e:  # the preview must not stop the dialog
@@ -1984,6 +2010,7 @@ class SettingsDialog(wx.Dialog):
             "h": None if board else float(self.h.GetValue()),
             "cu_t": None if board else float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
+            "subregion": self.subregion.GetValue(),
             # "Auto" is item 0 and it gives None: the runner then reads the
             # cell count and selects the value. Item i gives i threads.
             "threads": self.threads.GetSelection() or None,
@@ -2267,6 +2294,14 @@ class ResultsFrame(wx.Frame):
                                               k + "f.h5")):
                 p = int(re.search(r"exc(\d+)", hit).group(1))
                 self.field_h5s[(k, p)] = hit
+        # The current on a copper layer (F4): the kind is "J:" and the
+        # name of the layer, from Jf_<layer>.h5.
+        pre = solverenv.CURRENT_PREFIX
+        for hit in glob.glob(os.path.join(self.outdir, "exc*",
+                                          pre + "*.h5")):
+            p = int(re.search(r"exc(\d+)", hit).group(1))
+            layer = os.path.basename(hit)[len(pre):-3]
+            self.field_h5s[("J:" + layer, p)] = hit
         self._ff = {}  # port (0 = previous or unknown) -> the far-field dict
         for path in glob.glob(os.path.join(self.outdir, "farfield*.json")):
             m = re.search(r"farfield_p(\d+)", os.path.basename(path))
@@ -2299,6 +2334,18 @@ class ResultsFrame(wx.Frame):
                     if (k, p) in self.field_h5s:
                         plots.append("%s-Field%s%s" % (
                             k, ftag,
+                            " (Port %d)" % p if len(fports) > 1 else ""))
+            # The current views, in the order of the layers from the top.
+            order = [c["name"] for c in self.model.get("copper_layers", [])]
+            layers = sorted({k[2:] for k, _ in self.field_h5s
+                             if k.startswith("J:")},
+                            key=lambda n: order.index(n) if n in order
+                            else len(order))
+            for layer in layers:
+                for p in fports:
+                    if ("J:" + layer, p) in self.field_h5s:
+                        plots.append("Current on %s%s%s" % (
+                            layer, ftag,
                             " (Port %d)" % p if len(fports) > 1 else ""))
             for p in sorted(self._ff):
                 ff = self._ff[p]
@@ -2335,14 +2382,35 @@ class ResultsFrame(wx.Frame):
                                 style=wx.TE_MULTILINE | wx.TE_READONLY
                                 | wx.TE_DONTWRAP)
         self.text.Hide()
+        # **A check box for each trace of a graph**: a trace that the user
+        # clears leaves the graph, and the scale fits the traces that stay.
+        # The choice holds for each name in each view, thus S11 hidden in
+        # the magnitude is also hidden in the phase and the Smith chart.
+        # The list is on a white panel of the height of the canvas, thus
+        # the column at the right of the graph is white as the figure.
+        self.side = wx.Panel(self)
+        self.side.SetBackgroundColour(wx.WHITE)
+        self.traces = wx.CheckListBox(self.side)
+        side = wx.BoxSizer(wx.VERTICAL)
+        self._gap = side.Add((0, 6))  # `_place_traces` sets its height
+        side.Add(self.traces, 0, wx.RIGHT, 6)
+        self.side.SetSizer(side)
+        self.side.Hide()
+        self._hidden = set()
+        self._labels = []
 
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(self.choice, 0, wx.ALL, 6)
-        s.Add(self.canvas, 1, wx.EXPAND)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(self.canvas, 1, wx.EXPAND)
+        row.Add(self.side, 0, wx.EXPAND)
+        s.Add(row, 1, wx.EXPAND)
         s.Add(self.text, 1, wx.EXPAND)
         s.Add(self.toolbar, 0, wx.EXPAND)
         self.SetSizer(s)
         self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
+        self.traces.Bind(wx.EVT_CHECKLISTBOX, self._on_trace)
+        self.canvas.mpl_connect("draw_event", self._place_traces)
         self._plot()
         # The canvas gets its dimensions from the sizer only after an
         # EVT_SIZE. Without this call, the figure paints at its native
@@ -2356,11 +2424,13 @@ class ResultsFrame(wx.Frame):
             self._anim.event_source.stop()
             self._anim = None
         self.figure.clear()
+        self._labels = []
         sel = self.choice.GetStringSelection()
         text = sel == DECISIONS_VIEW
         self.text.Show(text)
         self.canvas.Show(not text)
         self.toolbar.Show(not text)
+        self.side.Hide()
         self.Layout()
         if text:
             return
@@ -2377,6 +2447,10 @@ class ResultsFrame(wx.Frame):
         elif sel.startswith(("E-Field", "H-Field")):
             ax.remove()
             self._plot_field(sel[0], pnum)
+        elif sel.startswith("Current on "):
+            ax.remove()
+            layer = base[len("Current on "):].split(" (f=")[0]
+            self._plot_field("J:" + layer, pnum)
         elif sel.startswith("Farfield"):
             ax.remove()
             ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
@@ -2392,53 +2466,120 @@ class ResultsFrame(wx.Frame):
                 for k in range(net.nports):
                     if not np.any(np.abs(net.s[:, j, k]) > 1e-9):
                         continue  # port k is not excited: no data in column
+                    name = "S%d%d" % (j + 1, k + 1)
+                    c = self._keep(name)
+                    if not c:
+                        continue
                     v = (np.degrees(np.angle(net.s[:, j, k])) if phase
                          else net.s_db[:, j, k])
-                    ax.plot(f_ghz, v, label="S%d%d" % (j + 1, k + 1))
+                    ax.plot(f_ghz, v, color=c, label=name)
             ax.set_title("S-Parameters [Phase]" if phase
                          else "S-Parameters [Magnitude]")
             ax.set_ylabel("°" if phase else "dB")
-            ax.legend()
+            _legend(ax)
         elif sel.startswith("Smith"):
             grid = True
             for i in range(net.nports):
                 if not np.any(np.abs(net.s[:, i, i]) > 1e-9):
                     continue  # port i is not excited: no data for S_ii
-                net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid)
+                c = self._keep("S%d%d" % (i + 1, i + 1))
+                if not c:
+                    continue
+                net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid, color=c)
                 grid = False
+            if grid:  # the user hid each trace: the chart alone
+                from skrf.plotting import smith
+                smith(ax=ax, draw_labels=True)
             for ln in ax.get_lines():  # skrf writes "name, S11": use "S11"
                 if ", S" in ln.get_label():
                     ln.set_label(ln.get_label().split(", ")[-1])
-            ax.legend()
+            _legend(ax)
             ax.set_title("S-Parameters [Impedance View]")
         elif sel.startswith("VSWR"):
             for i in range(net.nports):
                 s_ii = net.s[:, i, i]
                 if not np.any(np.abs(s_ii) > 1e-9):
                     continue
+                c = self._keep("Port %d" % (i + 1))
+                if not c:
+                    continue
                 mag = np.clip(np.abs(s_ii), 0, 0.999999)
-                ax.plot(f_ghz, (1 + mag) / (1 - mag),
+                ax.plot(f_ghz, (1 + mag) / (1 - mag), color=c,
                         label="Port %d" % (i + 1))
             ax.set_title("Voltage Standing Wave Ratio (VSWR)")
-            ax.set_ylim(1, min(20, ax.get_ylim()[1]))
-            ax.legend()
+            if ax.get_lines():
+                ax.set_ylim(1, min(20, ax.get_ylim()[1]))
+            _legend(ax)
         else:  # the group delay: all the pairs that have data, in one graph
             for k in range(net.nports):
                 for j in range(net.nports):
                     if j == k or not np.any(np.abs(net.s[:, j, k]) > 1e-9):
                         continue
+                    name = "S%d%d" % (j + 1, k + 1)
+                    c = self._keep(name)
+                    if not c:
+                        continue
                     phase = np.unwrap(np.angle(net.s[:, j, k]))
                     gd = -np.gradient(phase, 2 * np.pi * net.f) * 1e9
-                    ax.plot(f_ghz, gd, label="S%d%d" % (j + 1, k + 1))
+                    ax.plot(f_ghz, gd, color=c, label=name)
             ax.set_title("Group delay")
             ax.set_ylabel("Group delay / ns")
-            ax.legend()
+            _legend(ax)
 
         if not sel.startswith(("Smith", "Board", "E-Field", "H-Field",
-                               "Farfield")):
+                               "Farfield", "Current on ")):
             ax.set_xlabel("Frequency / GHz")
             ax.grid(True, alpha=0.4)
+        if self._labels:
+            self.traces.Set(self._labels)
+            for i, name in enumerate(self._labels):
+                self.traces.Check(i, name not in self._hidden)
+            self.traces.InvalidateBestSize()
+            self.side.Show()
+            self.Layout()
+            self.side.Layout()
         self.canvas.draw()
+
+    def _keep(self, name):
+        """Put the trace `name` in the check boxes of the view. Give its
+        colour, or None if the user hid it.
+
+        The colour comes from the place of the trace in the list, and not
+        from the traces that the graph shows. Thus a trace keeps its colour
+        when the user hides another one.
+        """
+        self._labels.append(name)
+        if name in self._hidden:
+            return None
+        return "C%d" % (len(self._labels) - 1)
+
+    def _place_traces(self, event=None):
+        """Put the top of the check boxes at the top of the graph, and not
+        at the top of the figure, where the title is.
+
+        Each draw calls it: a resize moves the frame of an axis with a
+        fixed aspect, as the Smith chart.
+        """
+        axes = self.figure.get_axes()
+        if not self.side.IsShown() or not axes:
+            return
+        # The figure has pixels of the device, and the sizer has the
+        # logical pixels of wx: they differ on a screen with a scale.
+        fig_h = self.figure.bbox.height
+        top = ((fig_h - axes[0].bbox.y1) * self.canvas.GetSize().height
+               / fig_h)
+        top = max(int(round(top)), 0)
+        if self._gap.GetSpacer().height != top:
+            self._gap.AssignSpacer((0, top))
+            self.side.Layout()
+
+    def _on_trace(self, event):
+        name = self.traces.GetString(event.GetInt())
+        if self.traces.IsChecked(event.GetInt()):
+            self._hidden.discard(name)
+        else:
+            self._hidden.add(name)
+        self._plot()
 
     def _plot_board(self, ax):
         """Show the top view of the model.
@@ -2469,23 +2610,25 @@ class ResultsFrame(wx.Frame):
         f_ghz = np.asarray(d["freq_hz"], float) / 1e9
         z_all = []
         nums = sorted(d["ports"], key=int)
-        for num in nums:
+        for n, num in enumerate(nums):
             p = d["ports"][num]
-            re, im = (np.asarray(p["Z0_real"], float),
-                      np.asarray(p["Z0_imag"], float))
-            z_all += [re, im]
             # One port does not have a tag in the legend, because the name
-            # of the port adds nothing.
+            # of the port adds nothing. Re and Im of a port share a colour.
             tag = " (Port %s)" % num if len(nums) > 1 else ""
-            ln, = ax.plot(f_ghz, re, label="Re(Z0)" + tag)
-            ax.plot(f_ghz, im, "--", lw=1.0, color=ln.get_color(),
-                    label="Im(Z0)" + tag)
+            for part, ls, lw in (("real", "-", None), ("imag", "--", 1.0)):
+                name = "%s(Z0)%s" % (part[:2].title(), tag)
+                if not self._keep(name):
+                    continue
+                z = np.asarray(p["Z0_" + part], float)
+                z_all.append(z)
+                ax.plot(f_ghz, z, ls, lw=lw, color="C%d" % n, label=name)
 
-        lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
-        pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
-        ax.set_ylim(lo - pad, hi + pad)
+        if z_all:
+            lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
+            pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
+            ax.set_ylim(lo - pad, hi + pad)
         ax.set_ylabel("Impedance / ohm")
-        ax.legend(fontsize=8)
+        _legend(ax, fontsize=8)
         ax.set_title("Line Impedance")
 
     def _dump_z(self, port):
@@ -2503,7 +2646,8 @@ class ResultsFrame(wx.Frame):
 
     def _plot_field(self, kind, port=None):
         """Show an animation of the wave on the middle plane of the
-        substrate.
+        substrate, or of the current on a copper layer ("J:" and the layer,
+        in A/m: the current of the sheet).
 
         The picture is the magnitude of the field vector at one phase, in
         the style of CST. The scale goes from zero to the largest value of
@@ -2556,7 +2700,9 @@ class ResultsFrame(wx.Frame):
         # hides the dimension of a step.
         bar.ax.set_yticklabels(["%.3g" % t for t in ticks], fontsize=7)
 
-        top = self.model["ports"][0]["layer"]
+        # A current view (F4) shows the copper of its own layer.
+        current = kind.startswith("J:")
+        top = kind[2:] if current else self.model["ports"][0]["layer"]
         for poly in self.model["polygons"].get(top, []):
             ax.plot([p[0] for p in poly] + [poly[0][0]],
                     [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
@@ -2574,8 +2720,9 @@ class ResultsFrame(wx.Frame):
                         zorder=6)
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s-Field (f=%g GHz)%s"
-                     % (kind, f_hz / 1e9,
+        ax.set_title("%s (f=%g GHz)%s"
+                     % ("Current on %s" % top if current else
+                        "%s-Field" % kind, f_hz / 1e9,
                         " (Port %d)" % port if len(ports) > 1 else ""),
                      fontsize=10)
         ax.set_aspect("equal")
@@ -2585,8 +2732,14 @@ class ResultsFrame(wx.Frame):
         # between the layer of the excited port and the layer below it. A field
         # picture with no plane shows nothing.
         head = ("Frequency: %.2f GHz\n" % (f_hz / 1e9))
-        tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(substrate mid-plane)"
-                % (vmax, unit, self._dump_z(port)))
+        if current:
+            z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
+            tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(copper %s)"
+                    % (vmax, unit, z_of.get(top, 0.0), top))
+        else:
+            tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n"
+                    "(substrate mid-plane)"
+                    % (vmax, unit, self._dump_z(port)))
         info = info_ax.text(0.0, 0.5, head + "Phase: 0\N{DEGREE SIGN}" + tail,
                             fontsize=9, va="center", ha="left",
                             linespacing=1.8)

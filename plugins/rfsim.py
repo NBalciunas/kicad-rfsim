@@ -198,7 +198,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         model = board_reader.extract(board, pads, settings["margin_mm"],
                                      substrate, live_stackup=live,
                                      f_stop=settings["f_stop"],
-                                     mesh=settings["mesh"])
+                                     mesh=settings["mesh"],
+                                     subregion=settings.get("subregion",
+                                                            False))
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:

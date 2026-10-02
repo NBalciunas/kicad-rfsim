@@ -8,13 +8,13 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 ## Features
 
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
-- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
-- Animate the E-field and the H-field on the mid-plane of the substrate.
+- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay. Clear the check box of a trace to hide it.
+- Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
 - Calculate the far field: three polar cuts, a 3D pattern, Dmax and the efficiency.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
 - Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
 - Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
-- Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
+- Extract the geometry from the board: the pads, tracks, arcs, vias, zones, shapes and text on copper.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
 - Select the solver in the dialog: openEMS (FDTD) or EMerge (FEM).
@@ -63,7 +63,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 2. Click the **RFsim** icon in the toolbar.
 3. Look at the preview at the top of the dialog: the ports, the R/L/C parts and the domain.
 4. Select the solver.
-5. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
+5. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin (or only the area around the ports, for a large board), the run limits and the output directory.
 6. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports

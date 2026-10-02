@@ -103,13 +103,20 @@ ESL_FLOOR_H = 0.03e-9  # ...but not a tolerance smaller than this
 # its own reads about 5% high. Thus its tolerance is not the tolerance of
 # an ESL. `two()` below measures that error.
 L_PART_TOL = 0.15
-# |S11|^2 + |S21|^2 at the notch. The branch has no resistance in these
-# runs. Thus the power that does not go through must come back. Only the
-# copper, the dielectric and the radiation remove a small part. A run
-# that gives less than this is not a measurement. An inductor of 5 nH gave
-# 0.951 at coarse and 0.917 at medium, and its value then moved from
-# +5.1% to +16.2%. An inductor of 2 nH gives 0.975 and reads +5% at each
-# preset. This guard shows the difference between the two conditions.
+# |S11|^2 + |S21|^2 at the notch, as a part of the same sum of the board
+# next to the notch (0.7 to 0.9 and 1.1 to 1.3 of f0, the median). The
+# branch has no resistance in these runs. Thus the power that does not go
+# through must come back, and only the loss of the board itself (copper,
+# dielectric, radiation, the ports) removes a part. A run that loses MORE
+# at the notch is not a measurement. In openEMS, an inductor of 5 nH gave
+# 0.944 of the board at medium and read +16.2%, and 0.955 at coarse and
+# read +5.1%; 1 nH, 2 nH and the short give 0.988 to 1.005.
+#
+# **It is relative, and not an absolute sum** (B72, 2026-09-30). The board
+# of EMerge keeps only 0.99 to 0.87 of the power over the sweep with no
+# notch at all (tan d constant, the copper, and the wave ports), thus an
+# absolute 0.95 failed its good runs (0.914 to 0.933 at the notch, +2.4%
+# and +2.9%). Relative to its own board, EMerge gives 0.990 to 0.999.
 POWER_MIN = 0.95
 
 
@@ -305,9 +312,13 @@ def two(mesh="coarse"):
         f0, depth = notch(f, s21)
         ltot = inductance(f0, cval)
         i = int(np.argmin(np.abs(s21)))
-        power = abs(s11[i]) ** 2 + abs(s21[i]) ** 2
-        print("   notch %.4f GHz, %.1f dB -> L %.4f nH (sum|S|^2 %.3f)"
-              % (f0 / 1e9, depth, ltot * 1e9, power))
+        pw = np.abs(s11) ** 2 + np.abs(s21) ** 2
+        near = (((f >= 0.7 * f0) & (f <= 0.9 * f0))
+                | ((f >= 1.1 * f0) & (f <= 1.3 * f0)))
+        power = pw[i] / float(np.median(pw[near]))
+        print("   notch %.4f GHz, %.1f dB -> L %.4f nH (sum|S|^2 %.3f, %.3f "
+              "of the board next to it)"
+              % (f0 / 1e9, depth, ltot * 1e9, pw[i], power))
         out[tag] = (f0, depth, ltot, power)
 
     fails = []
@@ -317,8 +328,9 @@ def two(mesh="coarse"):
         # The guard that tells a measurement from a run that only looks
         # like one. Refer to POWER_MIN.
         if power < POWER_MIN:
-            fails.append("%s: sum|S|^2 is %.3f at the notch, thus this run "
-                         "does not measure an inductance" % (tag, power))
+            fails.append("%s: sum|S|^2 at the notch is %.3f of the board "
+                         "next to it, thus this run does not measure an "
+                         "inductance" % (tag, power))
     l_board = out["short"][2]
     print("\n   the branch with a short: %.4f nH (notch %.4f GHz)"
           % (l_board * 1e9, out["short"][0] / 1e9))

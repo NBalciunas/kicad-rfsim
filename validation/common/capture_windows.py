@@ -147,6 +147,11 @@ def capture_results(out):
                          dpi=90)
     print("   wrote %d views with figure.savefig"
           % len(f.choice.GetStrings()))
+    # The window itself: the check boxes of the traces, with S11 hidden.
+    f.choice.SetSelection(0)
+    f._hidden.add("S11")
+    f._plot()
+    shot(f, os.path.join(out, "results-s11-hidden.png"))
     f.Destroy()
 
 

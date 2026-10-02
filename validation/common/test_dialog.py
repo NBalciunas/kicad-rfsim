@@ -862,6 +862,37 @@ def test_a_missing_solver_is_greyed_out():
           "and none refuses the run)")
 
 
+def test_the_subregion_crops_the_domain():
+    """F20: "Only the area around the ports" is off by default, and it
+    reaches the settings. `extract` then makes the domain the box of the
+    port pads plus the margin and the band, and not the full board."""
+    d = dialog()
+    assert d.get_settings()["subregion"] is False
+    d.subregion.SetValue(True)
+    fire(d.subregion, wx.EVT_CHECKBOX)       # the preview follows it
+    assert d.get_settings()["subregion"] is True
+    d.Destroy()
+
+    board = pcbnew.LoadBoard(BOARD)
+    pads = [p for fp in board.GetFootprints()
+            if fp.GetReference() in ("P1", "P2") for p in fp.Pads()]
+    full = board_reader.extract(board, pads, 4.0)
+    sub = board_reader.extract(board, pads, 4.0, subregion=True)
+    rf, rs = full["region"], sub["region"]
+    assert (rs["x0"] >= rf["x0"] and rs["x1"] <= rf["x1"]
+            and rs["y0"] >= rf["y0"] and rs["y1"] <= rf["y1"]), (rf, rs)
+    # the pads plus 4 mm of air plus 4 mm of band (no f_stop: the band is
+    # as deep as the margin)
+    ps = sub["ports"]
+    x0 = min(p["x"] - p["length"] / 2.0 for p in ps) - 8.0
+    x1 = max(p["x"] + p["length"] / 2.0 for p in ps) + 8.0
+    assert abs(rs["x0"] - x0) < 1e-3 and abs(rs["x1"] - x1) < 1e-3, (rs, x0, x1)
+    assert any("area around the ports" in n for n in sub["notes"]), sub["notes"]
+    assert not any("area around the ports" in n for n in full["notes"])
+    assert [e["ref"] for e in sub["lumped_elements"]] == ["R1"]
+    print("the subregion OK (off by default, the box of the pads, a note)")
+
+
 def test_the_kicad_stackup_preset_gives_the_board():
     """A board that HAS a stackup starts at "KiCad's Stackup".
 
@@ -1319,6 +1350,7 @@ if __name__ == "__main__":
     test_the_run_limits_reach_the_settings()
     test_the_solver_choice_reaches_the_settings()
     test_a_missing_solver_is_greyed_out()
+    test_the_subregion_crops_the_domain()
     test_the_kicad_stackup_preset_gives_the_board()
     test_the_x_of_the_dialog_does_not_start_the_run()
     test_a_series_rlc_row_shows_r_l_and_c_and_no_parasitics()

@@ -78,6 +78,9 @@ FEM_POINTS = {"coarse": 11, "medium": 21, "fine": 31, "ultrafine": 41}
 # samples come from the FEM solution, thus the count sets only the picture.
 FIELD_POINTS = 60000
 FIELD_STEP_MIN_MM = 0.05
+# The sigma of the smoothing of the field views, as a part of the element
+# at the copper edges (`_write_fields`).
+FIELD_BLUR = 0.5
 # The speed of light, in m/s.
 C0_M = 299792458.0
 # The impedance of free space, in ohm.
@@ -557,7 +560,7 @@ def _fit(g, ports, freq):
     return S, raw, None, "; ".join(causes)
 
 
-def _smooth_plane(fe, X, Y, z_cut):
+def _smooth_plane(fe, X, Y, z_cut, blur=0.0):
     """Give (Ex, Ey, Ez, Hx, Hy, Hz) on the points (X, Y) of the plane
     z_cut (mm), continuous from one tetrahedron to the next.
 
@@ -571,6 +574,9 @@ def _smooth_plane(fe, X, Y, z_cut):
     detail follows the mesh: small elements keep a narrow gap. The mean is
     for each material alone, thus the jump of the normal E at a dielectric
     face stays. A point outside the mesh gives NaN.
+
+    `blur` is the sigma of a Gauss filter at the end, in points of the
+    grid: it takes the facets of the linear values away (`_write_fields`).
     """
     from emerge._emerge.const import MU0
     b = fe.basis
@@ -626,18 +632,34 @@ def _smooth_plane(fe, X, Y, z_cut):
         g = np.nan_to_num(f)
         g = (ndimage.median_filter(g.real, 3)
              + 1j * ndimage.median_filter(g.imag, 3))
+        if blur > 0.3:
+            # The mean of the points IN the mesh alone: a hole (a void
+            # or a via) must not pull its edge to 0.
+            inside = ndimage.gaussian_filter((~np.isnan(f)).astype(float),
+                                             blur)
+            g = (ndimage.gaussian_filter(g.real, blur)
+                 + 1j * ndimage.gaussian_filter(g.imag, blur))
+            g = g / np.maximum(inside, 1e-6)
         out.append(np.where(np.isnan(f), np.nan, g))
     return out
 
 
-def _write_fields(data, model, z_of, box, outdir, f_hz, power):
-    """Write excN/Ef.h5, excN/Hf.h5 and excN/field.json for each excited
-    port, in the format that `gui._load_field` reads.
+def _write_fields(data, model, z_of, box, outdir, f_hz, power, edge):
+    """Write excN/Ef.h5, excN/Hf.h5, the current views and excN/field.json
+    for each excited port, in the format that `gui._load_field` reads.
 
     The plane is the middle of the substrate below the port, as in the
     openEMS runner. It covers the air box, which is the board and the
     margin. `power` is the incident power of a port of EMerge, thus
     sqrt(0.5 / power) gives the scale of CST: a wave of 1 sqrt(W) peak.
+
+    **The view is smoothed by `FIELD_BLUR` of `edge`**, the element at the
+    copper edges in mm. The linear values of `_smooth_plane` show each
+    element as a facet: a patch of the owner (27 k tetrahedra, `edge` 0.56
+    mm, a grid of 0.13 mm) had edges that wobbled and a mottled inside.
+    A Gauss of 0.5 `edge` took that away and lowered the peak by 2%; 1
+    `edge` lowered it by 8%. A sigma in mm, and not in points, is the
+    same on a small board and on a large one.
     """
     import h5py
     s = model["settings"]
@@ -651,13 +673,18 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power):
     x = np.arange(x0, x1 + 0.5 * step, step)
     y = np.arange(y0, y1 + 0.5 * step, step)
     X, Y = np.meshgrid(x, y, indexing="ij")         # (Nx, Ny)
+    # The planes of the H jump of a current view: a quarter of the element
+    # at the copper edges from the sheet, and inside the thinnest layer.
+    h_min = min(dl["z_top"] - dl["z_bottom"]
+                for dl in model["dielectric_layers"])
+    dz = max(min(0.25 * edge, 0.2 * h_min), 0.01)
     for i, p in enumerate(model["ports"]):
         if p["number"] not in want:
             continue
         z_cut = 0.5 * (z_of[p["layer"]] + z_of[p["ref_layer"]])
         fe.excite_port(p["number"])
         try:
-            f6 = _smooth_plane(fe, X, Y, z_cut)
+            f6 = _smooth_plane(fe, X, Y, z_cut, FIELD_BLUR * edge / step)
         except Exception as e:  # the internals of another EMerge version
             say("the field view has no smoothing (%s: %s)"
                 % (type(e).__name__, e))
@@ -665,16 +692,39 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power):
             f6 = (fe.Ex, fe.Ey, fe.Ez, fe.Hx, fe.Hy, fe.Hz)
         d = os.path.join(outdir, "exc%d" % (i + 1))
         os.makedirs(d, exist_ok=True)
-        for name, comps in (("Ef.h5", f6[:3]), ("Hf.h5", f6[3:])):
+
+        def write(name, comps, z):
             # (3, Nx, Ny, 1), which is the sequence of the axes of openEMS.
             # A point outside the mesh gives NaN.
             F = np.nan_to_num(np.array(comps))[..., None]
             with h5py.File(os.path.join(d, name), "w") as fh:
                 m = fh.create_group("Mesh")
-                m["x"], m["y"], m["z"] = x, y, np.array([z_cut])
+                m["x"], m["y"], m["z"] = x, y, np.array([z])
                 fd = fh.create_group("FieldData").create_group("FD")
                 fd["f0"] = F.astype(np.complex64)
                 fd.attrs["frequency"] = np.array([f_got])
+
+        write("Ef.h5", f6[:3], z_cut)
+        write("Hf.h5", f6[3:], z_cut)
+        # **The current on the copper (F4)**: the sheet current is
+        # K = z x (H above - H below), from the smoothed H at `dz` above
+        # and below the layer. The layer of the port and its reference
+        # planes, which carry the return path.
+        for layer in solverenv.current_layers(p):
+            zc = z_of[layer]
+            try:
+                up = _smooth_plane(fe, X, Y, zc + dz,
+                                   FIELD_BLUR * edge / step)[3:]
+                dn = _smooth_plane(fe, X, Y, zc - dz,
+                                   FIELD_BLUR * edge / step)[3:]
+            except Exception as e:
+                say("the current view of %s is not available (%s: %s)"
+                    % (layer, type(e).__name__, e))
+                continue
+            jump_x = np.nan_to_num(up[0]) - np.nan_to_num(dn[0])
+            jump_y = np.nan_to_num(up[1]) - np.nan_to_num(dn[1])
+            write(solverenv.CURRENT_PREFIX + layer + ".h5",
+                  (-jump_y, jump_x, np.zeros_like(jump_x)), zc)
         with open(os.path.join(d, "field.json"), "w") as fh:
             json.dump({"f_hz": f_got, "P_inc_W": power,
                        "scale": [float(np.sqrt(0.5 / power)), 0.0]}, fh,
@@ -1118,7 +1168,7 @@ def main(model_path, outdir):
 
     try:
         f_got, count = _write_fields(data, model, z_of, view,
-                                     outdir, f_field, lports[0].power)
+                                     outdir, f_field, lports[0].power, edge)
         notes.append("The field views are at %g GHz, on the middle plane of "
                      "the substrate below each excited port, from %d samples "
                      "of the FEM solution" % (f_got / 1e9, count))

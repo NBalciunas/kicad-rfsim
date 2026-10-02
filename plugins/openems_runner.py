@@ -53,6 +53,7 @@ if os.name == "nt":
 import numpy as np
 
 C0 = 299792458.0
+CURRENT_PREFIX = solverenv.CURRENT_PREFIX
 EPS0 = 8.8541878128e-12
 # Cells per wavelength. **The preset controls the step of the AIR and of the
 # plain substrate only.** The copper gives its own lines. Thus a track that is
@@ -1793,6 +1794,19 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             edge = pml - s["margin_mm"]
             dump.AddBox([r["x0"] + edge, r["y0"] + edge, z_cut],
                         [r["x1"] - edge, r["y1"] - edge, z_cut])
+        # **The current on the copper (F4)**: the layer of the port and its
+        # reference planes, which carry the return path. Dump type 13 is
+        # rot H, the total current density. Type 12 is kappa E, and that is
+        # almost zero on a ConductingSheet. `_surface_current` then changes
+        # the A/m^2 of the plane into the A/m of the sheet.
+        pm = model["ports"][excite_idx]
+        z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
+        for layer in _current_layers(pm):
+            dump = csx.AddDump(CURRENT_PREFIX + layer, dump_type=13,
+                               dump_mode=1, file_type=1,
+                               frequency=[f_dump])
+            dump.AddBox([r["x0"] + edge, r["y0"] + edge, z_of[layer]],
+                        [r["x1"] - edge, r["y1"] - edge, z_of[layer]])
 
         # The NF2FF box is in the middle of the band of clear air between
         # the structure and the PML. That is the face of the absorber, and
@@ -1811,6 +1825,36 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
     say("[rfsim] mesh: %d x %d x %d lines" % tuple(
         grid.GetQtyLines(a) for a in "xyz"), flush=True)
     return fdtd, ports, ff
+
+
+_current_layers = solverenv.current_layers
+
+
+def _surface_current(sim_path, zs, model, p):
+    """Change each current dump of port `p` from rot H (A/m^2) into the
+    current of the copper sheet (A/m), in its own file.
+
+    The sheet has no thickness. On the grid, rot H at the line of the sheet
+    is the jump of the tangential H across it, divided by the distance of
+    the two H lines: half of the two cells at the sheet. Thus that distance
+    times rot H is the current of the sheet. `zs` are the z lines of the
+    grid, in mm.
+    """
+    import h5py
+    zs = np.asarray(zs, float)
+    z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
+    for layer in _current_layers(p):
+        path = os.path.join(sim_path, CURRENT_PREFIX + layer + ".h5")
+        if not os.path.isfile(path):
+            continue
+        k = int(np.argmin(np.abs(zs - z_of[layer])))
+        lo, hi = zs[max(k - 1, 0)], zs[min(k + 1, len(zs) - 1)]
+        dz = 0.5 * (hi - lo) * 1e-3                 # m
+        with h5py.File(path, "r+") as fh:
+            fd = fh["FieldData"]["FD"]
+            for name in [n for n in fd if n.startswith("f0")]:
+                fd[name][...] = np.asarray(fd[name]) * dz
+            fd.attrs["unit"] = "A/m"
 
 
 def _field_norm(sim_path, port, f_hz, z0):
@@ -2190,6 +2234,13 @@ def main(model_path, outdir):
             except Exception as e:
                 print("[rfsim] WARNING: the scale of the field views of "
                       "port %d is not available: %s" % (k + 1, e), flush=True)
+            try:
+                _surface_current(sim_path,
+                                 fdtd.GetCSX().GetGrid().GetLines("z"),
+                                 model, model["ports"][k])
+            except Exception as e:
+                print("[rfsim] WARNING: the current views of port %d are "
+                      "not available: %s" % (k + 1, e), flush=True)
 
     if lines:
         with open(os.path.join(outdir, "lines.json"), "w") as fh:
