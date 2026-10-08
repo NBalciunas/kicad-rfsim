@@ -232,7 +232,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             and e.get("type")
             and (e.get("value") is not None or e["type"] == "RLC")]
         for p, t, f in zip(model["ports"], port_types, port_feed):
+            # A coaxial feed gives its side in the value: "coax:B.Cu".
+            t, _, side = t.partition(":")
             p["type"] = t
+            if side:
+                p["coax_side"] = side
             if f and not p["direction"]:
                 # The manual feed of the dialog: the pad has no track. The
                 # user gave the direction and the width of a line that the
@@ -264,15 +268,38 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
+        states = settings.pop("states", None)
         model["settings"] = settings
 
         os.makedirs(outdir, exist_ok=True)
-        model_path = os.path.join(outdir, "model.json")
-        with open(model_path, "w") as fh:
-            json.dump(model, fh, indent=1)
-
         runner = os.path.join(os.path.dirname(__file__), script)
-        cmd = [solver_py, runner, model_path, outdir]
+        if states:
+            # **F30: one run for each state, each in a folder of its own.**
+            # A state changes the values of some parts, and nothing else
+            # (`solverenv.apply_state`). STATES_FILE lists the folders for
+            # the results window, State 1 first: the reference.
+            cmd, listed = [], []
+            for k, st in enumerate(states, 1):
+                folder = solverenv.STATE_DIR % k
+                sdir = os.path.join(outdir, folder)
+                os.makedirs(sdir, exist_ok=True)
+                path = os.path.join(sdir, "model.json")
+                with open(path, "w") as fh:
+                    json.dump(solverenv.apply_state(model, st), fh, indent=1)
+                cmd.append(("State %d of %d: %s" % (k, len(states),
+                                                    st["name"]),
+                            [solver_py, runner, path, sdir]))
+                listed.append({"name": st["name"], "dir": folder,
+                               "parts": st["parts"]})
+            with open(os.path.join(outdir, solverenv.STATES_FILE), "w") as fh:
+                json.dump({"states": listed}, fh, indent=1)
+            first = os.path.join(outdir, solverenv.STATE_DIR % 1)
+        else:
+            model_path = os.path.join(outdir, "model.json")
+            with open(model_path, "w") as fh:
+                json.dump(model, fh, indent=1)
+            cmd = [solver_py, runner, model_path, outdir]
+            first = outdir
         # run.log keeps all the text that the window shows, because the
         # window closes immediately when a run succeeds.
         run = gui.RunDialog(None, cmd,
@@ -280,5 +307,5 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         ok = run.ShowModal() == wx.ID_OK
         run.Destroy()
         if ok:
-            s2p = os.path.join(outdir, "results.s%dp" % len(pads))
+            s2p = os.path.join(first, "results.s%dp" % len(pads))
             gui.ResultsFrame(None, s2p).Show()

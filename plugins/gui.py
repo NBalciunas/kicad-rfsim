@@ -25,7 +25,8 @@ except ImportError:  # a top-level module
     import solverenv
 
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
-              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
+              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline"),
+              ("Coaxial Feed Port", "coax")]
 MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
 # The solvers, in the sequence of the buttons. `solverenv.SOLVER_INFO` holds
 # them, and `SOLVERS` holds the keys that model.json gets.
@@ -144,6 +145,53 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
+# The rule of a cell of the states grid (F30), for the message that refuses
+# it. A cell uses the units of the row of its part.
+STATE_RULES = {"R": "a number of 0 or more, in ohm (0 is a short)",
+               "C": "a positive number, in pF",
+               "L": "a positive number, in nH",
+               RLC_KIND: "R / L / C in ohm / nH / pF, each 0 or more and one "
+                         "or more above 0 (0 leaves that component out)"}
+
+
+def _state_text(kind, entry):
+    """Give the text of a cell of the states grid for the part `entry`
+    ({"value"} or {"r", "l", "c"} in SI) of type `kind`."""
+    if kind == RLC_KIND:
+        return " / ".join("%g" % ((entry.get(key) or 0.0) / ENTRY_SCALE[k])
+                          for k, key in RLC_FIELDS)
+    return _entry_text(kind, entry.get("value"))
+
+
+def _state_value(kind, text):
+    """Read a cell of the states grid: give the entry of the part in SI,
+    {"value"} or {"r", "l", "c"}. A cell that does not obey
+    `STATE_RULES` gives a ValueError.
+
+    A Series RLC cell is three numbers with "/" between them, in the units
+    of the three fields of its row: "2 / 0.5 / 0" is 2 ohm and 0.5 nH, with
+    no C (a PIN diode that is on); "0 / 0.5 / 0.15" is a PIN diode that is
+    off.
+    """
+    if kind == RLC_KIND:
+        words = text.split("/")
+        if len(words) != 3:
+            raise ValueError(text)
+        out = {}
+        for (k, key), word in zip(RLC_FIELDS, words):
+            v = float(word) if word.strip() else 0.0
+            if v < 0:
+                raise ValueError(text)
+            out[key] = v * ENTRY_SCALE[k] if v else None
+        if all(v is None for v in out.values()):
+            raise ValueError(text)
+        return out
+    v = float(text)
+    if v < 0 or (v == 0 and kind != "R"):
+        raise ValueError(text)
+    return {"value": v * ENTRY_SCALE[kind]}
+
+
 # The er and the tan d of each preset. **FR-4 must agree with
 # `board_reader.DEF_EPSILON`**, which is the value that the plugin uses
 # when the board file has no stackup. Until 2026-08-05, the two were 4.2
@@ -205,8 +253,21 @@ def _port_choices(p):
     arbitrary. Three decimals are also necessary. A stackup that comes from
     mil gives 0.127 mm and 0.254 mm, and two decimals make the two values
     equal. The label of the port row names what the geometry does not give.
+
+    **A through-hole pad gets a coaxial feed and no lumped port.** There
+    is one entry for each side that has a gap around the pad, with the
+    default side first: the side is where the connector is. Its value is
+    "coax:" and the layer. A lumped port of such a pad goes to the adjacent
+    layer, and there the copper below the pad is the ring of the pad.
     """
     out = [PORT_TYPES[0]]
+    if p.get("drill"):
+        coax = p.get("coax") or {}
+        out = [("%s [Side: %s, Gap: %.3f mm]"
+                % (PORT_TYPES[4][0], side,
+                   coax[side]["r_out"] - coax[side]["r_in"]),
+                "coax:" + side)
+               for side in sorted(coax, key=lambda n: n != p.get("coax_side"))]
     if p.get("direction"):
         out.append(PORT_TYPES[1])
         if p.get("gap"):
@@ -591,6 +652,13 @@ class SettingsDialog(wx.Dialog):
                                   for i in range(len(ports))]
         self._refresh_port_badges()
 
+        # F30: the states of the parts, from `StatesDialog`. A list of
+        # {"name", "cells": {ref: text}}, State 1 first; [] is one state.
+        # `_state_kinds` keeps the type of each part when the user edited
+        # the states, because a cell holds a number in the unit of that
+        # type.
+        self._states = []
+        self._state_kinds = {}
         # (ref, the Model checkbox, the package choice, the ESL, the ESR)
         self.para_rows = []
         if lumped:
@@ -853,6 +921,21 @@ class SettingsDialog(wx.Dialog):
             self.lumped_warn.SetForegroundColour(wx.Colour(150, 90, 0))
             lbox.Add(self.lumped_warn, 0,
                      wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            # **F30: the states of the parts**, for example the states of
+            # a phase shifter. Each state is a run of its own, and the
+            # results window compares them. The rows above are State 1.
+            srow = wx.BoxSizer(wx.HORIZONTAL)
+            self.states_btn = wx.Button(lbox.GetStaticBox(),
+                                        label="Edit States...")
+            self.states_btn.SetToolTip(
+                "Give the parts other values, one set for each state. Each "
+                "state is one run, and the results compare them.")
+            self.states_lbl = wx.StaticText(lbox.GetStaticBox(), label="")
+            srow.Add(self.states_btn, 0, mid)
+            srow.Add(self.states_lbl, 0, mid | wx.LEFT, 8)
+            lbox.Add(srow, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            self.states_btn.Bind(wx.EVT_BUTTON, self._on_states)
+            self._refresh_states_label()
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -1100,7 +1183,9 @@ class SettingsDialog(wx.Dialog):
         type that went away changes to Lumped. The control goes off when
         Lumped is the one entry.
         """
-        rows = _port_choices(p)
+        # A through-hole pad with no gap and no line has no type. `extract`
+        # stops such a pad, thus the Lumped entry here is a safe value.
+        rows = _port_choices(p) or [PORT_TYPES[0]]
         ch = self.port_choices[k]
         old = self.port_types[k]
         cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0 \
@@ -1248,61 +1333,72 @@ class SettingsDialog(wx.Dialog):
         worse than no text.
 
         A factor of 1.0 comes back with no source and no row.
+
+        **Each state of F30 is a run of its own**, thus the values of each
+        state count as well: the run of the worst state sets the cost and
+        the refusal. Their source names the state.
         """
         cand = [(1.0, "", "", -1)]
         for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
-            if not cb.GetValue():
-                continue
-            # An OPEN at all frequencies of the sweep is not in the grid.
-            # Thus it sets no timestep: `openems_runner._open_parts`.
-            if self._open_over_sweep(i)[0]:
-                continue
-            kind = self._kind_of(i)
-            if kind == RLC_KIND:
-                # The three fields ARE the part: a series RLC gets no
-                # package parasitics. A text that is not a number counts as
-                # nothing here, and `_on_ok` refuses it.
-                try:
-                    v = self._rlc_values(i)
-                except ValueError:
-                    continue
-                nh = 1e9 * (v["l"] or 0.0)
-                cand.append((solverenv.time_step_factor(nh),
-                             "The L of %s" % ref, "%g nH" % nh, i))
-                # The R uses the series law only when the branch has more
-                # than ONE component. `openems_runner._le_topology` holds that
-                # rule.
-                if (v["r"] or 0) > 0 and sum(
-                        x is not None for x in v.values()) > 1:
-                    cand.append((solverenv.series_r_factor(v["r"]),
-                                 "The R of %s" % ref,
-                                 "%g ohm" % v["r"], i))
-                continue
-            if kind == "L":
-                nh = 1e9 * (self._part_value(i) or 0.0)
-                cand.append((solverenv.time_step_factor(nh),
-                             "The inductor %s" % ref, "%g nH" % nh, i))
-            # The ESL counts only where the element holds it. An inductor
-            # has no ESL in its element. A body that does not change its
-            # part stays out, as in `openems_runner._time_step_rule`.
-            comp = self._row_components(i) or {}
-            body = comp.get("L", 0.0) if kind in ("R", "C") else 0.0
-            cand.append((solverenv.time_step_factor(1e9 * body),
-                         "The body of %s" % ref,
-                         "%g nH" % (1e9 * body), i))
-            # A part with a body ESL is a branch of two components. Thus a
-            # RESISTOR then also uses the series law. The ESR of a
-            # capacitor and the DCR of an inductor are some ohms at most.
-            # `series_r_factor` gives 1.0 below 34 ohm, thus they cannot
-            # set this minimum. For that cause, they stay out.
-            if kind == "R" and body > 0:
-                cand.append((solverenv.series_r_factor(
-                    self._part_value(i) or 0.0),
-                    "The resistor %s" % ref,
-                    "%g ohm" % (self._part_value(i) or 0.0), i))
+            if cb.GetValue():
+                cand += self._limit_candidates(i, ref)
+        for name, i, entry in self._state_entries():
+            cand += self._limit_candidates(
+                i, '%s in "%s"' % (self.para_rows[i][0], name), entry)
         return min(cand)
 
-    def _row_components(self, i, whole=False):
+    def _limit_candidates(self, i, ref, entry=None):
+        """Give the candidates of `_lumped_limit` for row `i`, with the
+        values of the row, or with `entry` of a state (`_state_value`).
+        `ref` names the part in the source."""
+        out = []
+        # An OPEN at all frequencies of the sweep is not in the grid.
+        # Thus it sets no timestep: `openems_runner._open_parts`.
+        if self._open_over_sweep(i, entry)[0]:
+            return out
+        kind = self._kind_of(i)
+        if kind == RLC_KIND:
+            # The three fields ARE the part: a series RLC gets no
+            # package parasitics. A text that is not a number counts as
+            # nothing here, and `_on_ok` refuses it.
+            try:
+                v = entry if entry is not None else self._rlc_values(i)
+            except ValueError:
+                return out
+            nh = 1e9 * (v["l"] or 0.0)
+            out.append((solverenv.time_step_factor(nh),
+                        "The L of %s" % ref, "%g nH" % nh, i))
+            # The R uses the series law only when the branch has more
+            # than ONE component. `openems_runner._le_topology` holds that
+            # rule.
+            if (v["r"] or 0) > 0 and sum(
+                    x is not None for x in v.values()) > 1:
+                out.append((solverenv.series_r_factor(v["r"]),
+                            "The R of %s" % ref, "%g ohm" % v["r"], i))
+            return out
+        val = (entry["value"] if entry is not None
+               else self._part_value(i)) or 0.0
+        if kind == "L":
+            out.append((solverenv.time_step_factor(1e9 * val),
+                        "The inductor %s" % ref, "%g nH" % (1e9 * val), i))
+        # The ESL counts only where the element holds it. An inductor
+        # has no ESL in its element. A body that does not change its
+        # part stays out, as in `openems_runner._time_step_rule`.
+        comp = self._row_components(i, entry=entry) or {}
+        body = comp.get("L", 0.0) if kind in ("R", "C") else 0.0
+        out.append((solverenv.time_step_factor(1e9 * body),
+                    "The body of %s" % ref, "%g nH" % (1e9 * body), i))
+        # A part with a body ESL is a branch of two components. Thus a
+        # RESISTOR then also uses the series law. The ESR of a
+        # capacitor and the DCR of an inductor are some ohms at most.
+        # `series_r_factor` gives 1.0 below 34 ohm, thus they cannot
+        # set this minimum. For that cause, they stay out.
+        if kind == "R" and body > 0:
+            out.append((solverenv.series_r_factor(val),
+                        "The resistor %s" % ref, "%g ohm" % val, i))
+        return out
+
+    def _row_components(self, i, whole=False, entry=None):
         """Give the R, L and C that the runner puts in ONE element for row
         `i`, in SI. Give None for a text that is not a number.
 
@@ -1311,15 +1407,17 @@ class SettingsDialog(wx.Dialog):
         inductor. "No parasitics" gives 0 for the two. The open rule of the
         dialog and of the runner must read the same branch. If not, the
         dialog can tell "open" for a part that the run puts in the grid.
-        `whole` keeps a body that the run does not include.
+        `whole` keeps a body that the run does not include. `entry` is the
+        value of a state (F30), in the place of the value of the row: a
+        state keeps the body of its row (`solverenv.apply_state`).
         """
         _, cb, ch, esl, esr = self.para_rows[i]
         kind = self._kind_of(i)
         try:
             if kind == RLC_KIND:
-                v = self._rlc_values(i)
+                v = entry if entry is not None else self._rlc_values(i)
                 return {"R": v["r"], "L": v["l"], "C": v["c"]}
-            val = self._part_value(i)
+            val = entry["value"] if entry is not None else self._part_value(i)
         except ValueError:
             return None
         if kind is None or val is None:
@@ -1352,16 +1450,17 @@ class SettingsDialog(wx.Dialog):
             return None
         return (fa, fb, z0) if 0 < fa <= fb and z0 > 0 else None
 
-    def _open_over_sweep(self, i):
+    def _open_over_sweep(self, i, entry=None):
         """Give (True, the smallest |Z| of the sweep) when the part of row
         `i` is an open circuit at ALL frequencies of the sweep.
 
         `solverenv.is_open` holds the rule, and the runner also reads it:
         **such a part does not go into the grid.** Its gap stays open. The
         EPC of an inductor stays without the part, because at GHz a choke
-        on a board IS that capacitance. It costs no timestep.
+        on a board IS that capacitance. It costs no timestep. `entry` is
+        the value of a state, as in `_row_components`.
         """
-        comp = self._row_components(i)
+        comp = self._row_components(i, entry=entry)
         sweep = self._sweep()
         if not comp or not sweep:
             return False, 0.0
@@ -1701,6 +1800,11 @@ class SettingsDialog(wx.Dialog):
                         "the part with no self-resonance." % r["ref"],
                         "RFsim", wx.ICON_ERROR)
                     return
+        # The cells of the states (F30) obey the rules of the rows.
+        bad = self._check_states()
+        if bad:
+            wx.MessageBox(bad, "RFsim", wx.ICON_ERROR)
+            return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
             wx.MessageBox("Each pad must have a different port number.",
@@ -1716,7 +1820,8 @@ class SettingsDialog(wx.Dialog):
         # width that is not a number.
         for i, (ch, vals) in enumerate(zip(self.port_choices,
                                            self.port_types)):
-            if (self.port_feed[i] and vals[ch.GetSelection()] != "lumped"
+            if (self.port_feed[i]
+                    and vals[ch.GetSelection()] in ("msl", "cpw", "stripline")
                     and self._feed_of(i) is None):
                 wx.MessageBox(
                     "Port %d: a de-embedded port must have a feed direction "
@@ -1994,6 +2099,103 @@ class SettingsDialog(wx.Dialog):
         self._update_lumped_warning()
         evt.Skip()
 
+    # ------------------------------------------------ the states (F30)
+    def _state_rows(self):
+        """Give (ref, type, the text of the row) of each part that a state
+        can change: a part with its Model box on and a type."""
+        out = []
+        for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
+            kind = self._kind_of(i)
+            if not cb.GetValue() or kind is None:
+                continue
+            try:
+                entry = (self._rlc_values(i) if kind == RLC_KIND
+                         else {"value": self._part_value(i)})
+            except ValueError:
+                entry = {}
+            out.append((ref, kind, _state_text(kind, entry)))
+        return out
+
+    def _on_states(self, evt):
+        rows = self._state_rows()
+        if not rows:
+            wx.MessageBox("A state changes the values of the parts. Turn on "
+                          "Model for a part and give it a type first.",
+                          "RFsim", wx.ICON_INFORMATION)
+            return
+        dlg = StatesDialog(self, rows, self._states)
+        if dlg.ShowModal() == wx.ID_OK:
+            self._states = dlg.get_states()
+            self._state_kinds = {ref: kind for ref, kind, _ in rows}
+        dlg.Destroy()
+        self._refresh_states_label()
+        self._update_lumped_warning()
+
+    def _refresh_states_label(self):
+        label = getattr(self, "states_lbl", None)
+        if label is None:
+            return
+        n = len(self._states)
+        label.SetLabel("One state: the values above." if n <= 1 else
+                       "%d states, one run each. State 1 (the values above) "
+                       "is the reference." % n)
+        self.Layout()
+
+    def _state_entries(self):
+        """Give (the name of the state, the row, the entry in SI) of each
+        cell of State 2 and above that the run uses.
+
+        A cell of a part that is off, or with no type, gives nothing. So
+        does a cell that is not a number, or a part that changed its type
+        after the user edited the states: `_on_ok` refuses those.
+        """
+        rows = {ref: i for i, (ref, _, _, _, _) in enumerate(self.para_rows)}
+        for st in self._states[1:]:
+            for ref, text in st.get("cells", {}).items():
+                i = rows.get(ref)
+                if i is None or not self.para_rows[i][1].GetValue():
+                    continue
+                kind = self._kind_of(i)
+                if kind is None or self._state_kinds.get(ref) != kind:
+                    continue
+                try:
+                    yield st["name"], i, _state_value(kind, text)
+                except ValueError:
+                    continue
+
+    def _state_settings(self):
+        """Give `settings["states"]`: [{"name", "parts": {ref: entry}}],
+        State 1 first with no parts, or None for one state."""
+        if len(self._states) <= 1:
+            return None
+        out = [{"name": st["name"], "parts": {}} for st in self._states]
+        by_name = {st["name"]: st for st in out}
+        for name, i, entry in self._state_entries():
+            by_name[name]["parts"][self.para_rows[i][0]] = entry
+        return out
+
+    def _check_states(self):
+        """Give the text that refuses a cell of the states, or None."""
+        rows = {ref: i for i, (ref, _, _, _, _) in enumerate(self.para_rows)}
+        for st in self._states[1:]:
+            for ref, text in st.get("cells", {}).items():
+                i = rows.get(ref)
+                if i is None or not self.para_rows[i][1].GetValue():
+                    continue
+                kind = self._kind_of(i)
+                if kind is None:
+                    continue
+                if self._state_kinds.get(ref) != kind:
+                    return ('Element "%s" has a different type than when you '
+                            'edited the states. Click "Edit States..." '
+                            "again." % ref)
+                try:
+                    _state_value(kind, text)
+                except ValueError:
+                    return ('State "%s", element "%s": give %s.'
+                            % (st["name"], ref, STATE_RULES[kind]))
+        return None
+
     def get_settings(self):
         board = self.uses_board_stackup()
         return {
@@ -2049,6 +2251,9 @@ class SettingsDialog(wx.Dialog):
             "lumped_parasitics": {
                 ref: self._part_settings(i)
                 for i, (ref, _, _, _, _) in enumerate(self.para_rows)},
+            # F30: None for one state. rfsim.py makes one run for each
+            # state, with `solverenv.apply_state`.
+            "states": self._state_settings(),
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             "max_timesteps": int(float(self.max_steps.GetValue())),
@@ -2104,6 +2309,10 @@ class RunDialog(wx.Dialog):
     """
 
     def __init__(self, parent, cmd, log_path=None):
+        """`cmd` is one command, or a list of (title, command) that run
+        one after the other: a run for each state of F30. The title of
+        each one goes into the window first. The window stops at the first
+        command that stops with an error, and Cancel stops all of them."""
         wx.Dialog.__init__(self, parent, title="RFsim",
                            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY,
@@ -2123,12 +2332,19 @@ class RunDialog(wx.Dialog):
                 self._log_file = open(log_path, "w", encoding="utf-8")
             except OSError:
                 self._log_file = None
-        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT,
-                                     creationflags=flags)
+        self._steps = (list(cmd) if cmd and isinstance(cmd[0], tuple)
+                       else [(None, cmd)])
+        self._stop = False
+        self._pending = ""
+        self.proc = self._start(self._steps[0][1])
         self.Bind(wx.EVT_BUTTON, self._on_cancel, id=wx.ID_CANCEL)
         threading.Thread(target=self._pump, daemon=True).start()
+
+    @staticmethod
+    def _start(cmd):
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, creationflags=flags)
 
     def _log_lines(self, lines):
         """Write complete lines to run.log, each with "- " in front, thus
@@ -2137,27 +2353,41 @@ class RunDialog(wx.Dialog):
             self._log_file.write(("- " + line if line.strip() else "")
                                  + "\n")
 
+    def _emit(self, text):
+        """Show `text` and write its complete lines to run.log. A chunk can
+        end in the middle of a line, thus the file keeps the part after the
+        last line end until the next chunk."""
+        if self._log_file:
+            *done, self._pending = (self._pending + text).split("\n")
+            self._log_lines(done)
+        wx.CallAfter(self._append, text)
+
     def _pump(self):
-        stream = self.proc.stdout
-        # A chunk can end in the middle of a line. Thus the file keeps the
-        # part after the last line end until the next chunk.
-        pending = ""
-        while True:
-            chunk = stream.read(256)
-            if not chunk:
+        rc = 0
+        for k, (title, cmd) in enumerate(self._steps):
+            if self._stop:
+                rc = rc or 1
                 break
-            text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
-            text = text.replace("\r", "\n")
-            if self._log_file:
-                *done, pending = (pending + text).split("\n")
-                self._log_lines(done)
-            wx.CallAfter(self._append, text)
-        rc = self.proc.wait()
+            if k:
+                self.proc = self._start(cmd)
+            if title:
+                self._emit("%s[rfsim] ===== %s =====\n"
+                           % ("\n" if k else "", title))
+            stream = self.proc.stdout
+            while True:
+                chunk = stream.read(256)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
+                self._emit(text.replace("\r", "\n"))
+            rc = self.proc.wait()
+            if rc:
+                break
         # Close the file BEFORE the dialog ends. Thus the caller can read
         # it immediately when ShowModal returns.
         if self._log_file:
-            if pending:
-                self._log_lines([pending])
+            if self._pending:
+                self._log_lines([self._pending])
             if rc:
                 self._log_lines(["*** the solver stopped with an error "
                                  "(exit code %s) ***" % rc])
@@ -2178,9 +2408,145 @@ class RunDialog(wx.Dialog):
             self.btn.SetLabel("Close")
 
     def _on_cancel(self, evt):
+        self._stop = True
         if self.proc.poll() is None:
             self.proc.kill()
         evt.Skip()
+
+
+class StatesDialog(wx.Dialog):
+    """Edit the states of the parts (F30): one column for each state, and
+    one row for each part with its Model box on and a type.
+
+    The first row holds the names of the states. **State 1 is the values
+    of the rows of the settings dialog**: its cells are read-only here, and
+    the rows change them. It is the reference of the views that compare
+    the states. A cell holds the value in the unit of its row, or "R / L /
+    C" in ohm / nH / pF for a Series RLC (`_state_value`). An EMPTY cell
+    keeps the value of State 1, thus a state names only the parts that it
+    changes. A new state starts as a copy of the last one.
+
+    `rows` is [(ref, type, the text of the row)], and `states` is what
+    `get_states` gave the last time, or [].
+    """
+
+    def __init__(self, parent, rows, states):
+        import wx.grid
+        wx.Dialog.__init__(self, parent, title="RFsim: states of the parts",
+                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._rows = rows
+        g = self.grid = wx.grid.Grid(self)
+        n = max(len(states), 2)
+        g.CreateGrid(1 + len(rows), n)
+        g.SetRowLabelValue(0, "Name")
+        for r, (ref, kind, _) in enumerate(rows, 1):
+            unit = ("ohm / nH / pF" if kind == RLC_KIND
+                    else ENTRY_UNITS[kind])
+            g.SetRowLabelValue(r, "%s (%s, %s)" % (ref, KIND_NAMES[kind],
+                                                   unit))
+        g.SetRowLabelSize(wx.grid.GRID_AUTOSIZE)
+        for c in range(n):
+            st = states[c] if c < len(states) else {}
+            self._fill(c, st.get("name") or "State %d" % (c + 1),
+                       st.get("cells"))
+        g.AutoSizeColumns()
+        add = wx.Button(self, label="Add State")
+        rem = wx.Button(self, label="Remove State")
+        note = wx.StaticText(self, label=(
+            "State 1 is the values of the rows, and the reference. An empty "
+            "cell keeps the value of State 1.\nA Series RLC cell is R / L / "
+            "C, for example 2 / 0.5 / 0 (a PIN diode that is on)."))
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        top.Add(add, 0, wx.RIGHT, 8)
+        top.Add(rem, 0)
+        s = wx.BoxSizer(wx.VERTICAL)
+        s.Add(top, 0, wx.ALL, 8)
+        s.Add(g, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        s.Add(note, 0, wx.ALL, 8)
+        s.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0,
+              wx.ALL | wx.ALIGN_RIGHT, 8)
+        self.SetSizerAndFit(s)
+        add.Bind(wx.EVT_BUTTON, self._on_add)
+        rem.Bind(wx.EVT_BUTTON, self._on_remove)
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+
+    def _fill(self, c, name, cells):
+        """Fill column `c`. Column 0 shows the rows, read-only. A state
+        with no `cells` (a new one) starts with the values of the rows; a
+        state from before keeps its empty cells empty."""
+        import wx.grid
+        g = self.grid
+        g.SetColLabelValue(c, "State %d" % (c + 1))
+        g.SetCellValue(0, c, name)
+        for r, (ref, _, text) in enumerate(self._rows, 1):
+            if c == 0:
+                g.SetCellValue(r, c, text)
+                g.SetReadOnly(r, c)
+                g.SetCellBackgroundColour(r, c, wx.Colour(235, 235, 235))
+            else:
+                g.SetCellValue(r, c, text if cells is None
+                               else cells.get(ref, ""))
+
+    def _on_add(self, evt):
+        g = self.grid
+        g.AppendCols(1)
+        c = g.GetNumberCols() - 1
+        self._fill(c, "State %d" % (c + 1), {
+            ref: g.GetCellValue(r, c - 1)
+            for r, (ref, _, _) in enumerate(self._rows, 1)})
+        g.AutoSizeColumns()
+
+    def _on_remove(self, evt):
+        """Remove the last state. One column left is one state: no states."""
+        g = self.grid
+        if g.GetNumberCols() > 1:
+            g.DeleteCols(g.GetNumberCols() - 1, 1)
+
+    def _on_ok(self, evt):
+        g = self.grid
+        if g.IsCellEditControlEnabled():
+            g.SaveEditControlValue()
+        names = []
+        for c in range(g.GetNumberCols()):
+            name = g.GetCellValue(0, c).strip() or "State %d" % (c + 1)
+            if name in names:
+                wx.MessageBox('Two states have the name "%s". Give each '
+                              "state a different name." % name, "RFsim",
+                              wx.ICON_ERROR)
+                return
+            names.append(name)
+            for r, (ref, kind, _) in enumerate(self._rows, 1):
+                text = g.GetCellValue(r, c).strip()
+                if c == 0 or not text:
+                    continue
+                try:
+                    _state_value(kind, text)
+                except ValueError:
+                    g.SetGridCursor(r, c)
+                    wx.MessageBox('State "%s", element "%s": give %s.'
+                                  % (name, ref, STATE_RULES[kind]),
+                                  "RFsim", wx.ICON_ERROR)
+                    return
+        evt.Skip()
+
+    def get_states(self):
+        """Give [{"name", "cells": {ref: text}}], State 1 first, or [] for
+        one state. An empty cell is not in "cells": it follows the row.
+        Each other cell keeps its value when the row changes after this,
+        thus the grid shows what the run uses."""
+        g = self.grid
+        if g.GetNumberCols() <= 1:
+            return []
+        out = []
+        for c in range(g.GetNumberCols()):
+            cells = {}
+            for r, (ref, _, _) in enumerate(self._rows, 1):
+                cell = g.GetCellValue(r, c).strip()
+                if c and cell:
+                    cells[ref] = cell
+            out.append({"name": g.GetCellValue(0, c).strip()
+                        or "State %d" % (c + 1), "cells": cells})
+        return out
 
 
 def _load_field(h5_path):
@@ -2258,6 +2624,72 @@ def _lobe_stats(ang_deg, D):
             "width": float(width), "sll": sll}
 
 
+def _define_at(model):
+    """Give the frequency of "Define at" of a model, in Hz, or None."""
+    s = (model or {}).get("settings", {})
+    return s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
+                                if "f_start" in s else None)
+
+
+def _read_states(touchstone_path):
+    """Give the runs of the states (F30) of the run of `touchstone_path`,
+    or None.
+
+    The run of each state is in a folder of its own, and
+    `solverenv.STATES_FILE` in the folder above lists them, State 1 first.
+    The result is {"names", "paths", "nets", "index"}, where "index" is the
+    state of `touchstone_path`. A state that has no results (a run that
+    stopped) is not in it. Fewer than two states give None.
+    """
+    import skrf
+    here = os.path.dirname(os.path.abspath(touchstone_path))
+    root = os.path.dirname(here)
+    try:
+        with open(os.path.join(root, solverenv.STATES_FILE)) as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    out = {"names": [], "paths": [], "nets": []}
+    for st in data.get("states", []):
+        path = os.path.join(root, st["dir"], os.path.basename(touchstone_path))
+        try:
+            out["nets"].append(skrf.Network(path))
+        except Exception:
+            continue
+        out["names"].append(st["name"])
+        out["paths"].append(path)
+    keys = [os.path.normcase(os.path.abspath(q)) for q in out["paths"]]
+    me = os.path.normcase(os.path.abspath(touchstone_path))
+    if len(keys) < 2 or me not in keys:
+        return None
+    out["index"] = keys.index(me)
+    return out
+
+
+def _state_views(states):
+    """Give the names of the views that compare the states (F30).
+
+    The transmission is the first S_jk with j > k that the reference state
+    has (S21 for a 2-port that excites port 1), or else one with j < k. A
+    1-port board compares S11. The reflection S11 comes last.
+    """
+    import numpy as np
+    if not states:
+        return []
+    net = states["nets"][0]
+    n = net.nports
+    pairs = [(j, k) for k in range(n) for j in range(n) if j > k]
+    pairs += [(j, k) for k in range(n) for j in range(n) if j < k]
+    through = next(((j, k) for j, k in pairs
+                    if np.any(np.abs(net.s[:, j, k]) > 1e-9)), (0, 0))
+    name = "S%d%d" % (through[0] + 1, through[1] + 1)
+    out = ["States: %s [%s]" % (name, kind)
+           for kind in ("Magnitude", "Phase", "Phase difference")]
+    if through != (0, 0):
+        out.append("States: S11 [Magnitude]")
+    return out
+
+
 class ResultsFrame(wx.Frame):
     """Show the plots of the Touchstone file. It uses skrf and matplotlib."""
 
@@ -2269,8 +2701,85 @@ class ResultsFrame(wx.Frame):
         import skrf
 
         wx.Frame.__init__(self, parent, title="RFsim", size=(820, 620))
-        self.net = skrf.Network(touchstone_path)
+        self._anim = None
+        # **F30: the runs of the states of the parts**, when this run is one
+        # of them. A choice selects the state of the other views, and the
+        # "States" views compare all of them.
+        self._states = _read_states(touchstone_path)
+        plots = self._load(touchstone_path)
+        self.choice = wx.Choice(self, choices=plots)
+        self.choice.SetSelection(0)
+        self.figure = Figure(figsize=(8, 5.5), layout="constrained")
+        self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
+        # The default minimum dimensions are the native dimensions of the
+        # figure, 800x550. The sizer then cannot make the canvas smaller,
+        # and it cuts the bottom axis.
+        self.canvas.SetMinSize((320, 240))
+        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
+        self.toolbar.Realize()
+        self.text = wx.TextCtrl(self, value=self._decisions or "",
+                                style=wx.TE_MULTILINE | wx.TE_READONLY
+                                | wx.TE_DONTWRAP)
+        self.text.Hide()
+        # **A check box for each trace of a graph**: a trace that the user
+        # clears leaves the graph, and the scale fits the traces that stay.
+        # The choice holds for each name in each view, thus S11 hidden in
+        # the magnitude is also hidden in the phase and the Smith chart.
+        # The list is on a white panel of the height of the canvas, thus
+        # the column at the right of the graph is white as the figure.
+        self.side = wx.Panel(self)
+        self.side.SetBackgroundColour(wx.WHITE)
+        self.traces = wx.CheckListBox(self.side)
+        side = wx.BoxSizer(wx.VERTICAL)
+        self._gap = side.Add((0, 6))  # `_place_traces` sets its height
+        side.Add(self.traces, 0, wx.RIGHT, 6)
+        self.side.SetSizer(side)
+        self.side.Hide()
+        self._hidden = set()
+        self._labels = []
+
+        s = wx.BoxSizer(wx.VERTICAL)
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        top.Add(self.choice, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.state_choice = None
+        if self._states:
+            self.state_choice = wx.Choice(self, choices=self._states["names"])
+            self.state_choice.SetSelection(self._states["index"])
+            self.state_choice.SetToolTip(
+                "The state that the other views show. The States views "
+                "compare all the states.")
+            top.Add(wx.StaticText(self, label="State:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+            top.Add(self.state_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+            self.state_choice.Bind(wx.EVT_CHOICE, self._on_state)
+        s.Add(top, 0, wx.ALL, 6)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(self.canvas, 1, wx.EXPAND)
+        row.Add(self.side, 0, wx.EXPAND)
+        s.Add(row, 1, wx.EXPAND)
+        s.Add(self.text, 1, wx.EXPAND)
+        s.Add(self.toolbar, 0, wx.EXPAND)
+        self.SetSizer(s)
+        self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
+        self.traces.Bind(wx.EVT_CHECKLISTBOX, self._on_trace)
+        self.canvas.mpl_connect("draw_event", self._place_traces)
+        self._plot()
+        # The canvas gets its dimensions from the sizer only after an
+        # EVT_SIZE. Without this call, the figure paints at its native
+        # dimensions. The label of the bottom axis then stays cut until the
+        # user changes the dimensions of the window.
+        wx.CallAfter(self.SendSizeEvent)
+
+    def _load(self, touchstone_path):
+        """Read the results of one run, and give the list of its views.
+
+        The results window calls it again when the user selects an other
+        state (F30). The "States" views read all the states, thus they do
+        not change with it.
+        """
         import numpy as np
+        import skrf
+        self.net = skrf.Network(touchstone_path)
         plots = ["S-Parameters [Magnitude]", "S-Parameters [Phase]"]
         if self.net.nports >= 1:
             plots += ["Smith Chart", "VSWR"]
@@ -2278,6 +2787,7 @@ class ResultsFrame(wx.Frame):
                for k in range(self.net.nports)
                for j in range(self.net.nports) if j != k):
             plots += ["Group delay"]
+        plots += _state_views(self._states)
 
         self.outdir = os.path.dirname(os.path.abspath(touchstone_path))
         try:
@@ -2321,7 +2831,6 @@ class ResultsFrame(wx.Frame):
         if self._lines and self._lines.get("ports"):
             plots.append("Line Impedance")
         self._field = {}
-        self._anim = None
         if self.model:
             s = self.model.get("settings", {})
             f_hz = s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
@@ -2368,55 +2877,7 @@ class ResultsFrame(wx.Frame):
             pass
         if self._decisions:
             plots.append(DECISIONS_VIEW)
-        self.choice = wx.Choice(self, choices=plots)
-        self.choice.SetSelection(0)
-        self.figure = Figure(figsize=(8, 5.5), layout="constrained")
-        self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-        # The default minimum dimensions are the native dimensions of the
-        # figure, 800x550. The sizer then cannot make the canvas smaller,
-        # and it cuts the bottom axis.
-        self.canvas.SetMinSize((320, 240))
-        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
-        self.toolbar.Realize()
-        self.text = wx.TextCtrl(self, value=self._decisions or "",
-                                style=wx.TE_MULTILINE | wx.TE_READONLY
-                                | wx.TE_DONTWRAP)
-        self.text.Hide()
-        # **A check box for each trace of a graph**: a trace that the user
-        # clears leaves the graph, and the scale fits the traces that stay.
-        # The choice holds for each name in each view, thus S11 hidden in
-        # the magnitude is also hidden in the phase and the Smith chart.
-        # The list is on a white panel of the height of the canvas, thus
-        # the column at the right of the graph is white as the figure.
-        self.side = wx.Panel(self)
-        self.side.SetBackgroundColour(wx.WHITE)
-        self.traces = wx.CheckListBox(self.side)
-        side = wx.BoxSizer(wx.VERTICAL)
-        self._gap = side.Add((0, 6))  # `_place_traces` sets its height
-        side.Add(self.traces, 0, wx.RIGHT, 6)
-        self.side.SetSizer(side)
-        self.side.Hide()
-        self._hidden = set()
-        self._labels = []
-
-        s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self.choice, 0, wx.ALL, 6)
-        row = wx.BoxSizer(wx.HORIZONTAL)
-        row.Add(self.canvas, 1, wx.EXPAND)
-        row.Add(self.side, 0, wx.EXPAND)
-        s.Add(row, 1, wx.EXPAND)
-        s.Add(self.text, 1, wx.EXPAND)
-        s.Add(self.toolbar, 0, wx.EXPAND)
-        self.SetSizer(s)
-        self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
-        self.traces.Bind(wx.EVT_CHECKLISTBOX, self._on_trace)
-        self.canvas.mpl_connect("draw_event", self._place_traces)
-        self._plot()
-        # The canvas gets its dimensions from the sizer only after an
-        # EVT_SIZE. Without this call, the figure paints at its native
-        # dimensions. The label of the bottom axis then stays cut until the
-        # user changes the dimensions of the window.
-        wx.CallAfter(self.SendSizeEvent)
+        return plots
 
     def _plot(self):
         import numpy as np
@@ -2460,6 +2921,9 @@ class ResultsFrame(wx.Frame):
                 self._plot_farfield(ff, tag, ptag)
             else:                            # only "(f=xx GHz)": a 3D balloon
                 self._plot_farfield3d(ff, ptag, pnum)
+        elif sel.startswith("States: "):
+            ax.remove()
+            self._plot_states(sel)
         elif sel.startswith("S-Parameters"):
             phase = sel.endswith("[Phase]")
             for j in range(net.nports):
@@ -2539,6 +3003,71 @@ class ResultsFrame(wx.Frame):
             self.Layout()
             self.side.Layout()
         self.canvas.draw()
+
+    def _on_state(self, evt):
+        """Show the views of an other state (F30). The view stays the same
+        when the other state has it."""
+        if self._anim:
+            self._anim.event_source.stop()
+            self._anim = None
+        name = self.choice.GetStringSelection()
+        plots = self._load(self._states["paths"][
+            self.state_choice.GetSelection()])
+        self.choice.Set(plots)
+        self.choice.SetSelection(plots.index(name) if name in plots else 0)
+        self.text.SetValue(self._decisions or "")
+        self._plot()
+
+    def _plot_states(self, sel):
+        """Show one S-parameter of all the states (F30), one trace each.
+
+        [Magnitude] in dB, [Phase] in degrees, and [Phase difference]: the
+        phase of each state less that of the reference (State 1),
+        continuous across the sweep and in -180 to 180 degrees at "Define
+        at". The block of text gives the value of each state at "Define
+        at", as the far-field views give theirs. For a phase shifter, the
+        difference is the shift of each state, and the magnitude its loss.
+        """
+        import numpy as np
+        st = self._states
+        m = re.match(r"States: S(\d)(\d) \[(.+)\]$", sel)
+        j, k, kind = int(m.group(1)) - 1, int(m.group(2)) - 1, m.group(3)
+        gs = self.figure.add_gridspec(1, 2, width_ratios=[3.0, 1.0])
+        ax = self.figure.add_subplot(gs[0])
+        info = self.figure.add_subplot(gs[1])
+        info.axis("off")
+        f_at = _define_at(self.model) or float(np.mean(st["nets"][0].f))
+        ref = st["nets"][0]
+        ref_ph = np.unwrap(np.angle(ref.s[:, j, k]))
+        unit = "dB" if kind == "Magnitude" else "\N{DEGREE SIGN}"
+        lines = []
+        for name, net in zip(st["names"], st["nets"]):
+            v = net.s[:, j, k]
+            f = net.f
+            if kind == "Magnitude":
+                y = 20.0 * np.log10(np.maximum(np.abs(v), 1e-12))
+            elif kind == "Phase":
+                y = np.degrees(np.angle(v))
+            else:
+                y = np.degrees(np.unwrap(np.angle(v))
+                               - np.interp(f, ref.f, ref_ph))
+            i = int(np.argmin(np.abs(f - f_at)))
+            if kind == "Phase difference":
+                y = y - 360.0 * np.round(y[i] / 360.0)
+            lines.append("%s = %.2f %s" % (name, y[i], unit))
+            c = self._keep(name)
+            if c:
+                ax.plot(f / 1e9, y, color=c, label=name)
+        label = "S%d%d" % (j + 1, k + 1)
+        ax.set_title("States: %s [%s]" % (label, kind))
+        ax.set_xlabel("Frequency / GHz")
+        ax.set_ylabel({"Magnitude": "dB", "Phase": "\N{DEGREE SIGN}"}.get(
+            kind, "\N{DEGREE SIGN} vs. %s" % st["names"][0]))
+        ax.grid(True, alpha=0.4)
+        _legend(ax)
+        info.text(0.0, 0.5, "\n".join(
+            ["Frequency = %g GHz" % (f_at / 1e9), "%s [%s]:" % (label, kind)]
+            + lines), fontsize=9, va="center", ha="left", linespacing=1.8)
 
     def _keep(self, name):
         """Put the trace `name` in the check boxes of the view. Give its
@@ -2843,6 +3372,10 @@ class ResultsFrame(wx.Frame):
             if mis is not None:
                 lines.append("Tot. Effic. : %.4f dB" % (rad_db + mis))
         lines.append("Dir. : %.3f dBi" % float(D.max()))
+        # The XPD of the runner is at the largest D of this grid.
+        if ff.get("xpd_dB") is not None:
+            lines.append("XPD : %.1f dB" % ff["xpd_dB"])
+            lines.append("Ludwig 3 ref. : %g deg." % ff["ludwig3_ref_deg"])
         info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
                      va="center", ha="left", linespacing=1.8)
 
@@ -2865,13 +3398,18 @@ class ResultsFrame(wx.Frame):
     def _plot_farfield(self, ff, cut, ptag=""):
         """Show one polar cut of the directivity in absolute dBi.
 
-        The style is the style of CST.
+        The style is the style of CST. **A far field with the two parts of
+        Ludwig 3** (`solverenv.polarization`) shows three traces: Abs, Co
+        and Cross, each with a check box. The block of text then gives the
+        reference of Ludwig 3 and the XPD at the main lobe of the cut. A
+        previous far field has Abs only, with its title of before.
         """
         import numpy as np
         c = ff["cuts"][cut]
         ang_deg = np.asarray(c["angle_deg"], float)
         D = np.asarray(c["D_dBi"], float)
         phi_cut = cut.startswith("Phi")
+        pol = "D_co_dBi" in c and "D_cross_dBi" in c
 
         gs = self.figure.add_gridspec(1, 2, width_ratios=[2.4, 1.0])
         ax = self.figure.add_subplot(gs[0], projection="polar")
@@ -2880,7 +3418,19 @@ class ResultsFrame(wx.Frame):
 
         peak = float(D.max())
         rmin = peak - 40.0
-        ax.plot(np.radians(ang_deg), np.maximum(D, rmin), color="tab:red")
+        if not pol:
+            ax.plot(np.radians(ang_deg), np.maximum(D, rmin),
+                    color="tab:red")
+        else:
+            for name, key in (("Abs", "D_dBi"), ("Co", "D_co_dBi"),
+                              ("Cross", "D_cross_dBi")):
+                col = self._keep(name)
+                if col:
+                    ax.plot(np.radians(ang_deg),
+                            np.maximum(np.asarray(c[key], float), rmin),
+                            color=col, label=name)
+            _legend(ax, loc="lower left", bbox_to_anchor=(-0.18, -0.12),
+                    fontsize=8)
         ax.set_theta_zero_location("N")
         ax.set_thetagrids(range(0, 360, 30),
                           labels=[str(a) for a in range(0, 360, 30)])
@@ -2888,7 +3438,8 @@ class ResultsFrame(wx.Frame):
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))
-        ax.set_title("Farfield Directivity Abs (%s)%s" % (cut, ptag))
+        ax.set_title("Farfield Directivity %s(%s)%s"
+                     % ("" if pol else "Abs ", cut, ptag))
         ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
                       % ("Theta" if phi_cut else "Phi"))
 
@@ -2899,5 +3450,13 @@ class ResultsFrame(wx.Frame):
                  "Angular width (3 dB) = %.1f deg." % st["width"]]
         if st["sll"] is not None:
             lines.append("Side lobe level = %.1f dB" % st["sll"])
+        if pol:
+            # The XPD at the main lobe of THIS cut: co-pol less cross-pol
+            # in the direction of the peak of Abs.
+            i0 = int(np.argmax(D))
+            lines.append("Ludwig 3 ref. = %g deg." % ff["ludwig3_ref_deg"])
+            lines.append("XPD (main lobe) = %.1f dB"
+                         % (float(c["D_co_dBi"][i0])
+                            - float(c["D_cross_dBi"][i0])))
         info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
                      va="center", ha="left", linespacing=1.8)

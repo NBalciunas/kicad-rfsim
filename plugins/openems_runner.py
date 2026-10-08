@@ -180,6 +180,31 @@ RANK_VIA_SURFACE = 0
 # mesh does not grade outward from a feature, and `_feature_lines` gives the
 # measurement for that.
 POLY_FEATURE_CELLS = 2
+# **The 1/3 - 2/3 rule at a long copper edge** (F8, `_edge_thirds`). A mesh
+# line ON the edge of a copper sheet makes the copper electrically larger:
+# FDTD does not hold the peak of the field at the edge. The rule puts the
+# edge at 1/3 of a cell: one line EDGE_THIRDS * res / 3 in the copper, and
+# one 2/3 of that cell out of it. The tutorials of openEMS use the same
+# rule with a cell of res / 4.
+#
+# Measured on 2026-10-07 on the patch of `rig_probe` (28.314 mm on 1.53 mm
+# of er 4.5), the resonance against the closed form, for the probe, the
+# small coaxial feed and the pad of kicad-rfgen:
+#
+#   no rule, coarse        -8.3%  -9.1%  -9.3%
+#   no rule, medium        -6.6%  -7.3%  -8.0%
+#   no rule, fine          -5.1%  -5.9%  -6.2%
+#   the rule, coarse       -3.7%  -4.2%  -4.5%
+#   the rule, medium       -3.4%  -4.2%  -4.4%
+#   the rule, fine         -3.5%  -4.3%  -4.6%
+#   EMerge, coarse         -4.2%  -4.7%  -5.0%
+#
+# Thus with the rule the coarse preset gives the answer of EMerge to 0.5
+# points, and the mesh no longer moves it. A cell of res / 2 gave the same
+# answer as res / 4. res / 8 put the two lines nearer than `tol`, and the
+# merge made ONE line out of the copper: -14.3%. Thus the two lines are
+# anchors, and res / 4 is 2 times the largest `tol`.
+EDGE_THIRDS = 0.25
 # The margin and the law of the timestep rule are in `solverenv`. The
 # DIALOG shows the cost of an inductor before a run, and it must not import
 # this module. An import of the runner replaces `warnings.showwarning` for
@@ -498,6 +523,14 @@ def _decisions(model, res, rlc=True):
         if g.get("fallback"):
             out.append("Port %d is a lumped port, and not a %s" % (
                 g["number"], g["fallback"]))
+        if g.get("coax"):
+            out.append(
+                "Port %d is a coaxial feed on %s: a lumped port across the "
+                "gap of %.3f mm between the through-hole pad and the "
+                "copper around it, on the %s axis and %.3f mm wide. The "
+                "current goes through the board in the barrel of the hole"
+                % (g["number"], g["coax_side"], g["coax"]["gap"],
+                   g["exc_dir"], g["coax"]["width"]))
     # **Each line is a sentence**, with its subject first, and not
     # "category: text". The log puts "[rfsim] optimization: " in front of
     # it, and two labels in one line read badly.
@@ -1005,6 +1038,24 @@ def _port_geometry(model, res, quiet=False):
             # copper run caps its length.
             ports.append(g)
             continue
+        if p["type"] == "coax":
+            # **A coaxial feed is flat in the gap around a through-hole
+            # pad**, on the layer of its side (`solverenv.coax_box`). Its
+            # width is the barrel: the box and the via share the surface
+            # lines of the barrel, thus the merge moves no line of the two.
+            box = solverenv.coax_box(p, z_of, VIA_SURFACE)
+            if box:
+                g.update(start=box["start"], stop=box["stop"],
+                         exc_dir=box["exc"], coax=box)
+                ports.append(g)
+                continue
+            g["fallback"] = "coax, because it has no gap on %s" % (
+                p.get("coax_side") or "a side of the board")
+            if not quiet:
+                print("[rfsim] WARNING: port %d (coax): it has no gap on "
+                      "%s, thus it changes to a lumped port"
+                      % (p["number"], p.get("coax_side") or "a side"),
+                      flush=True)
         # Each de-embedded port must have a track that gives the direction.
         # A CPW port also must have the gap. A stripline port must have a
         # plane above the strip and a plane below it.
@@ -1086,6 +1137,137 @@ def _pml_band(lo, hi, depth):
     step = float(depth) / n
     return ([lo + i * step for i in range(n + 1)]
             + [hi - i * step for i in range(n + 1)])
+
+
+def _inside(polys, x, y):
+    """Tell if the point (x, y) is in the copper `polys`, with the
+    half-open rule of the crossing test."""
+    n = 0
+    for poly in polys:
+        prev = poly[-1]
+        for cur in poly:
+            if (prev[1] <= y) != (cur[1] <= y):
+                t = prev[0] + ((y - prev[1]) * (cur[0] - prev[0])
+                               / (cur[1] - prev[1]))
+                if t > x:
+                    n += 1
+            prev = cur
+    return n % 2 == 1
+
+
+def _clear_for(polys, x, y, axis, sign, metal, length):
+    """Tell if each sample from (x, y) along `axis` and `sign`, to
+    `length`, stays in the copper (`metal`) or out of it."""
+    for k in range(1, 17):
+        d = length * k / 16.0
+        px, py = (x + sign * d, y) if axis == 0 else (x, y + sign * d)
+        if _inside(polys, px, py) != metal:
+            return False
+    return True
+
+
+def _edge_thirds(model, xs, ys, res, ports, tol):
+    """Put the lines of each LONG copper edge at 1/3 and 2/3 of a cell
+    (F8), in the place of the line on the edge. Give the new lines of each
+    axis, which `_mesh` makes anchors.
+
+    A coordinate gets the rule when each straight edge on it, on each
+    layer, is a long edge: copper at one side and none at the other, the
+    same side for each, `res` of copper and of clear board at the two
+    sides, and `res` of edge in all. **A narrow feature keeps its line on
+    the edge**: a track, a gap or a land are the cells of `_feature_lines`
+    and of the ports, and their numbers come from that mesh. A coordinate
+    that a port, a via, a lumped element or the region holds also keeps it.
+    A slit of `Fracture` has copper at its two sides, thus it is no edge.
+
+    **A line port keeps the mesh along its feed**, from 2 cells behind its
+    box (or its pad and one cell, when that is more) to its far end. The open end of a track behind the feed is in the
+    near field of the port. On the boards of `run_shunt_openems.py two`
+    (a sweep to 5 GHz, ports of 9 mm and a plane of measurement 1.67 mm
+    after the feed), the rule at that end gave sum|S|^2 = 11.7, and the
+    board with no rule there gives 0.96 to 1.00.
+
+    **The board must continue a cell beyond the edge.** The copper of a
+    plane or a pour that ends AT the edge of the board ends where the
+    substrate ends, and the line 2/3 of a cell out of it is in the air. On
+    the patch of `rig_probe`, the rule on the edges of the ground only (the
+    edges of the board) read -13.5%, against -8.3% with no rule and -3.7%
+    with the rule on the patch only. It also made the cells of a board 44%
+    more, and on the microstrip of `run_headless_openems.py` a timestep 20%
+    smaller: the lines at the edges of the board are graded to `res`.
+    """
+    d = EDGE_THIRDS * res
+    br = model["board_rect"]
+    keep = {0: set(), 1: set()}
+    spans = {0: [], 1: []}
+    for g in ports:
+        if g["type"] in TL_PORTS and g.get("direction"):
+            k = 0 if g["direction"][0] else 1
+            s = g["direction"][k]
+            # behind the box: 2 cells, or the pad of the port and one cell
+            back = max(2.0 * res,
+                       0.5 * (g["length"] if k == 0 else g["width"]) + res)
+            a, b = g["start"][k] - s * back, g["stop"][k]
+            spans[k].append((min(a, b), max(a, b)))
+    r = model["region"]
+    keep[0].update((r["x0"], r["x1"]))
+    keep[1].update((r["y0"], r["y1"]))
+    for g in ports:
+        for k in (0, 1):
+            keep[k].update((g["start"][k], g["stop"][k]))
+        keep[0].add(g["x"])
+        keep[1].add(g["y"])
+    for v in model["vias"]:
+        keep[0].update((v["x"] - v["r"], v["x"], v["x"] + v["r"]))
+        keep[1].update((v["y"] - v["r"], v["y"], v["y"] + v["r"]))
+    for e in model.get("lumped_elements", []):
+        for k in (0, 1):
+            keep[k].update((e["start"][k], e["stop"][k]))
+    added = {0: [], 1: []}
+    for axis, lines in ((0, xs), (1, ys)):
+        edges = {}
+        for name, polys in model["polygons"].items():
+            for poly in polys:
+                for a, b in zip(poly, poly[1:] + poly[:1]):
+                    if (abs(a[axis] - b[axis]) < FLAT_MM
+                            and abs(a[1 - axis] - b[1 - axis]) > FLAT_MM):
+                        edges.setdefault(round(a[axis], 7), []).append(
+                            (name, a[axis], 0.5 * (a[1 - axis] + b[1 - axis]),
+                             abs(a[1 - axis] - b[1 - axis])))
+        for items in edges.values():
+            c = items[0][1]
+            if any(abs(c - q) < tol for q in keep[axis]) or any(
+                    lo <= c <= hi for lo, hi in spans[axis]):
+                continue
+            side, total, ok = None, 0.0, True
+            board = (br["x0"], br["x1"]) if axis == 0 else (br["y0"], br["y1"])
+            for name, cc, mid, length in items:
+                polys = model["polygons"][name]
+
+                def at(o):
+                    return (cc + o, mid) if axis == 0 else (mid, cc + o)
+                lo, hi = _inside(polys, *at(-1e-4)), _inside(polys, *at(1e-4))
+                if lo == hi:
+                    continue                 # a slit, or no edge
+                s = -1 if lo else 1          # the side of the copper
+                if not board[0] <= cc - s * d <= board[1]:
+                    ok = False                   # the board ends at the edge
+                    break
+                if side not in (None, s) or not (
+                        _clear_for(polys, *at(s * 1e-4), axis, s, True, res)
+                        and _clear_for(polys, *at(-s * 1e-4), axis, -s,
+                                       False, res)):
+                    ok = False
+                    break
+                side = s
+                total += length
+            if not ok or side is None or total < res:
+                continue
+            new = (c + side * d / 3.0, c - side * 2.0 * d / 3.0)
+            lines.discard(c)
+            lines.update(new)
+            added[axis] += new
+    return added[0], added[1]
 
 
 def _mesh(model, ports, res, notes=None):
@@ -1248,6 +1430,20 @@ def _mesh(model, ports, res, notes=None):
                     pos += side * step
                     across.add(pos)
                     step *= 1.4
+        elif g.get("coax"):
+            # **The gap of a coaxial feed is a ring, and the mesh must hold
+            # it on the two axes.** openEMS makes an edge copper when the
+            # copper holds the edge, thus an edge that crosses all the gap
+            # joins the pad to the ground. A pad of 1.7 mm in a clearance
+            # of r 1.1 mm read a short circuit with the lines of the box
+            # only. Lines at the pad, at the middle of the gap and at the
+            # ground, on each side of the axis of the hole, make each edge
+            # across the gap half of the gap or less.
+            b = g["coax"]
+            for k, lines in ((0, xs), (1, ys)):
+                for r in (b["r_in"], 0.5 * (b["r_in"] + b["r_out"]),
+                          b["r_out"]):
+                    lines.update((b["centre"][k] - r, b["centre"][k] + r))
     for e in model.get("lumped_elements", []):
         # Hold the box of the element. A part that is less than 1 mm long
         # must not move with the cells.
@@ -1361,6 +1557,12 @@ def _mesh(model, ports, res, notes=None):
     for e in model.get("lumped_elements", []):
         le_x += [e["start"][0], e["stop"][0]]
         le_y += [e["start"][1], e["stop"][1]]
+    # The box of a coaxial feed has the same rule. Its faces on the pad and
+    # on the copper around it are the gap, and the merge must not close it.
+    for g in ports:
+        if g.get("coax"):
+            le_x += [g["start"][0], g["stop"][0]]
+            le_y += [g["start"][1], g["stop"][1]]
     boxes = [abs(b - a) for a, b in zip(le_x[::2], le_x[1::2])]
     boxes += [abs(b - a) for a, b in zip(le_y[::2], le_y[1::2])]
     boxes = [b for b in boxes if b > 0]
@@ -1443,8 +1645,16 @@ def _mesh(model, ports, res, notes=None):
             print("[rfsim] WARNING: %s" % line, flush=True)
     else:
         notes += chose
-    anchor_x = [(v, RANK_FACE) for v in le_x] + via_x
-    anchor_y = [(v, RANK_FACE) for v in le_y] + via_y
+    # The 1/3 - 2/3 rule of each long copper edge comes after all the other
+    # lines, because the lines of a port, a via or an element must hold
+    # their edge. Its two lines are anchors: a merge to the mean of an
+    # adjacent line can put the edge back on a line, or make one line out
+    # of the copper (EDGE_THIRDS).
+    th_x, th_y = _edge_thirds(model, xs, ys, res, ports, tol)
+    anchor_x = ([(v, RANK_FACE) for v in le_x] + via_x
+                + [(v, RANK_FACE) for v in th_x])
+    anchor_y = ([(v, RANK_FACE) for v in le_y] + via_y
+                + [(v, RANK_FACE) for v in th_y])
     return (_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
             _merge_close(zs, tol_z))
 
@@ -1561,6 +1771,18 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         for poly in polys:
             pts = np.array(poly).T  # shape (2, N)
             prop.AddLinPoly(pts, "z", c["z"], 0, priority=10)
+    # The tab of each coaxial feed: copper from the axis of the hole to the
+    # face of the box, thus the edge of a round pad is straight at the box
+    # (`solverenv.coax_box`). The box itself has a higher priority than the
+    # copper. Thus where the box goes onto the copper around the pad, the
+    # box wins, and the face of that copper is straight as well.
+    for g in ports_geo:
+        box = g.get("coax")
+        if box and g["coax_side"] in copper_prop:
+            x0, y0, x1, y1 = box["tab"]
+            copper_prop[g["coax_side"]].AddBox([x0, y0, box["z"]],
+                                               [x1, y1, box["z"]],
+                                               priority=10)
 
     if model["vias"]:
         via_metal = csx.AddMetal("vias")
@@ -1758,6 +1980,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                 g["number"], s["z0"], g["start"], g["stop"],
                 g.get("exc_dir", "z"),
                 excite=1.0 if excite else 0, priority=20))
+            if g.get("coax"):
+                note = "on %s, across a gap of %.3f mm on the %s axis" % (
+                    g["coax_side"], g["coax"]["gap"], g["exc_dir"])
         say("[rfsim] port %d: %s at (%.2f, %.2f)%s" % (
             g["number"], g["type"], g["x"], g["y"],
             " " + note if note else ""), flush=True)
@@ -1872,16 +2097,25 @@ def _field_norm(sim_path, port, f_hz, z0):
     of the power does not make the fields very large. The factor goes into
     field.json, adjacent to the dumps.
     """
-    port.CalcPort(sim_path, np.array([f_hz]), ref_impedance=z0)
-    p_inc = float(port.P_inc[0])
-    u_inc = complex(port.uf_inc[0])
-    c = np.sqrt(0.5 / p_inc) * np.conj(u_inc) / abs(u_inc)
+    c, p_inc = _inc_scale(port, sim_path, f_hz, z0)
     with open(os.path.join(sim_path, "field.json"), "w") as fh:
         json.dump({"f_hz": float(f_hz), "P_inc_W": p_inc,
                    "scale": [float(c.real), float(c.imag)]}, fh, indent=1)
 
 
-def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
+def _inc_scale(port, sim_path, f_hz, z0):
+    """Give (the factor of `_field_norm`, the incident power in W) at f_hz.
+
+    It calls CalcPort at f_hz only, thus it replaces the values of the
+    port for the full sweep.
+    """
+    port.CalcPort(sim_path, np.array([f_hz]), ref_impedance=z0)
+    p_inc = float(port.P_inc[0])
+    u_inc = complex(port.uf_inc[0])
+    return np.sqrt(0.5 / p_inc) * np.conj(u_inc) / abs(u_inc), p_inc
+
+
+def _farfield(outdir, ff, sim_path, port1, freq, suffix="", z0=None):
     """Calculate the NF2FF far field at the recorded frequency.
 
     The recorded frequency is the "Define at" value. The result goes into
@@ -1889,6 +2123,11 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
     theta sweeps at phi=0 and phi=90, and an azimuth sweep at theta=90.
     Each cut is in absolute dBi. The peak of each slice is the Dmax of
     the engine for that grid of angles.
+
+    Each cut and the 3D grid also get the co-pol and the cross-pol of
+    Ludwig 3, and the complex field (`solverenv.polarization`). `z0`
+    gives the scale of that field: rE in V (the engine gives E at r =
+    1 m). With no `z0`, the field has the scale of the engine.
     """
     f_ff = ff.freq[0]
     print("[rfsim] NF2FF%s at %.3f GHz..." % (suffix, f_ff / 1e9), flush=True)
@@ -1914,26 +2153,46 @@ def _farfield(outdir, ff, sim_path, port1, freq, suffix=""):
     i_f = int(np.argmin(np.abs(freq - f_ff)))
     P_in = float(0.5 * np.real(port1.uf_tot[i_f] * np.conj(port1.if_tot[i_f])))
     eff = 100.0 * Prad / P_in if P_in > 0 else None
+    cuts = {
+        "Phi=0": {"angle_deg": theta.tolist(), "D_dBi": D[:, 0].tolist(),
+                  "_et": res.E_theta[0][:, 0], "_ep": res.E_phi[0][:, 0],
+                  "_phi": 0.0},
+        "Phi=90": {"angle_deg": theta.tolist(), "D_dBi": D[:, 1].tolist(),
+                   "_et": res.E_theta[0][:, 1], "_ep": res.E_phi[0][:, 1],
+                   "_phi": 90.0},
+        "Theta=90": {"angle_deg": phi_az.tolist(), "D_dBi": D_az.tolist(),
+                     "_et": res_az.E_theta[0][0], "_ep": res_az.E_phi[0][0],
+                     "_phi": phi_az},
+    }
+    grid = {"theta_deg": theta3.tolist(), "phi_deg": phi3.tolist(),
+            "D_dBi": d_dbi(res3).tolist(), "_et": res3.E_theta[0],
+            "_ep": res3.E_phi[0], "_phi": phi3[None, :]}
+    out = {"f_hz": f_ff, "cuts": cuts, "grid3d": grid,
+           "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
+           "P_in_W": P_in, "efficiency_pct": eff}
+    try:
+        # This comes after P_in: CalcPort at one frequency replaces the
+        # values of the port for the sweep.
+        scale = _inc_scale(port1, sim_path, f_ff, z0)[0] if z0 else 1.0
+        ref, xpd, th, ph = solverenv.polarization(grid, cuts, phi3, scale)
+        out.update(ludwig3_ref_deg=ref, xpd_dB=xpd,
+                   main_lobe_deg=[th, ph],
+                   E_scale="rE in V at 1 m, for 1 sqrt(W) peak incident"
+                   if z0 else "the engine")
+    except Exception as e:
+        print("[rfsim] WARNING: the co-pol and the cross-pol of the far "
+              "field%s are not available: %s" % (suffix, e), flush=True)
+        for g in [grid] + list(cuts.values()):
+            for k in ("_et", "_ep", "_phi"):
+                g.pop(k, None)
     with open(os.path.join(outdir, "farfield%s.json" % suffix), "w") as fh:
-        json.dump({
-            "f_hz": f_ff,
-            "cuts": {
-                "Phi=0": {"angle_deg": theta.tolist(),
-                          "D_dBi": D[:, 0].tolist()},
-                "Phi=90": {"angle_deg": theta.tolist(),
-                           "D_dBi": D[:, 1].tolist()},
-                "Theta=90": {"angle_deg": phi_az.tolist(),
-                             "D_dBi": D_az.tolist()},
-            },
-            "grid3d": {"theta_deg": theta3.tolist(),
-                       "phi_deg": phi3.tolist(),
-                       "D_dBi": d_dbi(res3).tolist()},
-            "Dmax_dBi": 10.0 * np.log10(Dmax), "Prad_W": Prad,
-            "P_in_W": P_in, "efficiency_pct": eff,
-        }, fh, indent=1)
+        json.dump(out, fh, indent=1)
     print("[rfsim] far field: Dmax %.1f dBi, radiated power %.1f%% of "
-          "the input power"
-          % (10.0 * np.log10(Dmax), eff if eff is not None else -1), flush=True)
+          "the input power%s"
+          % (10.0 * np.log10(Dmax), eff if eff is not None else -1,
+             ", XPD %.1f dB (Ludwig 3 at %g deg)" % (
+                 out["xpd_dB"], out["ludwig3_ref_deg"])
+             if "xpd_dB" in out else ""), flush=True)
 
 
 def _line_data(port, sim_path, freq):
@@ -2222,7 +2481,7 @@ def main(model_path, outdir):
         if ff is not None:
             try:
                 _farfield(outdir, ff, sim_path, ports[k], freq,
-                          "_p%d" % (k + 1))
+                          "_p%d" % (k + 1), z0=s["z0"])
             except Exception as e:
                 print("[rfsim] WARNING: the far field of port %d is not "
                       "available: %s"

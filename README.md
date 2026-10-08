@@ -10,10 +10,11 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
 - Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay. Clear the check box of a trace to hide it.
 - Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
-- Calculate the far field: three polar cuts, a 3D pattern, Dmax and the efficiency.
+- Calculate the far field: three polar cuts, a 3D pattern, Dmax, the efficiency, and the co-polarization, the cross-polarization (Ludwig 3) and the XPD.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
 - Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
-- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
+- Simulate more than one set of part values (the states of a phase shifter), one run each, and compare the magnitude and the phase of S21 of the states.
+- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port, or feed a through-hole pad from a coaxial connector on F.Cu or B.Cu.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones, shapes and text on copper.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
@@ -80,6 +81,12 @@ The dialog gives only the types that the geometry permits:
 | Microstrip (MSL) Port | Feed line on the x or y axis                             |
 | Coplanar (CPW) Port   | Feed line on the x or y axis; Copper on both sides of it |
 | Stripline Port        | Feed line on the x or y axis; Plane above and below it   |
+| Coaxial Feed Port     | Through-hole pad; Copper around it on F.Cu or B.Cu       |
+
+**A through-hole pad gets a coaxial feed and no lumped port.**
+The port goes across the gap between the pad and the surrounding copper, on the side of the connector, and the barrel of the hole takes the signal through the board.
+The type list gives one entry for each side with a gap of 3 mm or less, and the side of the footprint comes first.
+A pad with no such gap and no track stops the run.
 
 > Each excited port costs one full FDTD run. When a port gives out more power than it takes in, the plugin gives a warning: run again at the medium or the fine preset.
 
@@ -168,6 +175,15 @@ A part with an impedance of 200 times the port impedance or more over all the sw
 **"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
 Its row holds R in ohm, L in nH and C in pF, in series, with no parasitics. 0 leaves that component out.
 
+**"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
+The grid has a column for each state and a row for each part with "Model" on. State 1 is the values of the rows, and the reference.
+A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
+An empty cell keeps the value of State 1.
+
+Each state is one run, in the folder `state_N` of the output directory.
+The results window then has a "State" choice for the other views, and four views that compare the states: the magnitude, the phase and the phase difference (to State 1) of S21, and the magnitude of S11.
+A block of text gives the value of each state at "Define at".
+
 ## Examples
 
 The magnitude of S11 against the frequency:
@@ -241,6 +257,10 @@ A zone with a void below the line, against the same board with no void. The void
 An open stub that no port covers, against theory. Its notch in |S21| gives eps_eff, which tests the mesh cells across a narrow feature.
 * **`run_via_openems.py [mesh]`**, **`run_via_emerge.py [mesh]`** (solver Python)  
 The inductance of one via against Goldfarb and Pucel, for four drill sizes. Each is within 20% in openEMS at the medium preset, and within 30% in EMerge. At coarse, openEMS reads a drill of 0.3 mm −16%: use a finer preset for such a via.
+* **`run_probe_openems.py [mesh] [all|single|dual]`**, **`run_probe_emerge.py [mesh] [all|single|dual]`**  
+A patch fed from below through a plated hole (the coaxial feed port). A small pad in a small clearance must give the resonance and the resistance of a probe from the plane to the patch. Two feeds on the same patch must give an isolation of 15 dB and an XPD of 15 dB or more.
+* **`run_states_openems.py [mesh]`**, **`run_states_emerge.py [mesh]`**  
+A series capacitor of 1, 0.5 and 2 pF in a 50 Ω line, as three states. The phase difference of S21 to the first state must agree with the closed form within 3°.
 * **`run_epc_openems.py [mesh]`**, **`run_epc_emerge.py [mesh]`**  
 The self-resonance of an inductor on an 0402 land, against 1/(2π√(LC)). The notch in |S21| must be at that frequency.
 * **`run_headless_openems.py [mesh] [msl|lumped]`**, **`run_headless_emerge.py [mesh] [msl|lumped]`**  

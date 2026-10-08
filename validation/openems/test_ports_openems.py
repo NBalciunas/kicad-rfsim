@@ -544,8 +544,16 @@ def test_a_feature_stays_on_one_layer():
     The same two edges on ONE layer are a gap of 0.775 mm, and that gap
     must get its line. Thus the test cannot be satisfactory with a rule
     that gives no line.
+
+    **The two rectangles are long copper edges** (F8), thus each edge on its
+    own layer gets the lines of the 1/3 - 2/3 rule. The line 2/3 of a cell
+    out of each edge can be between the two edges. That is no feature: the
+    test refuses the line of the MIDDLE and each line that is not a line of
+    the rule.
     """
     lo, hi = -20.775, -20.000
+    third = runner.EDGE_THIRDS * RES * 2.0 / 3.0
+    rule = (lo + third, hi - third)   # out of the F.Cu edge, of the B.Cu edge
 
     def rect(y0, y1):
         return [[10.0, y0], [30.0, y0], [30.0, y1], [10.0, y1]]
@@ -562,7 +570,8 @@ def test_a_feature_stays_on_one_layer():
             assert near(got, 0.5 * (lo + hi)), \
                 "a gap of %.3f mm on %s got no line: %s" % (hi - lo, below, got)
         else:
-            assert not got, \
+            assert not near(got, 0.5 * (lo + hi)) and all(
+                near(rule, y) for y in got), \
                 "an edge on %s and an edge on %s made a feature: lines %s" \
                 % (below, above, got)
     print("a feature stays on one layer OK (F.Cu + B.Cu: no line; "
@@ -977,7 +986,167 @@ def test_the_mesh_says_what_it_chose():
     print("the mesh says what it chose OK (a thin via)")
 
 
+def coax_model(side="B.Cu", direction=(1, 0)):
+    """Give a model with ONE coaxial feed: a through-hole pad of 4.286 mm
+    with a drill of 1.27 mm at (7, -10), in a clearance of r 3.5 mm on
+    B.Cu, which is the geometry of the probe of a patch."""
+    m = model("coax", x=7.0, y=-10.0, layer="F.Cu", ref_layer="In1.Cu",
+              ref_layer2=None, height=None, direction=None,
+              track_width=None, width=4.286, length=4.286, drill=1.27,
+              coax_side=side,
+              coax={"B.Cu": {"dir": list(direction), "r_in": 2.143,
+                             "r_out": 3.5, "cx": 7.0, "cy": -10.0}})
+    m["ports"] = m["ports"][:1]
+    m["vias"] = [{"x": 7.0, "y": -10.0, "r": 0.635, "z0": 0.0, "z1": 1.46}]
+    m["polygons"] = {"B.Cu": [[[-0.05, -20.05], [40.05, -20.05],
+                               [40.05, 0.05], [-0.05, 0.05]]],
+                     "F.Cu": [[[-5.0, -24.0], [19.0, -24.0], [19.0, 4.0],
+                               [-5.0, 4.0]]]}
+    return m
+
+
+def test_a_coaxial_feed_is_flat_in_the_gap():
+    """A through-hole pad is fed ACROSS the gap on its side, and not from
+    the pad to the adjacent layer.
+
+    The box goes from the copper around the pad (the start) to the pad
+    (the stop), flat on B.Cu, on the axis of the measured gap. openEMS
+    measures V(stop) - V(start), thus the pad is positive, as for the
+    lumped port of an SMD pad. Its width is the barrel: the box and the via
+    share their surface lines, thus the barrel keeps its three lines. The
+    faces of the gap are anchors, thus the merge does not close it.
+    """
+    vs = runner.VIA_SURFACE
+    r = 0.635 * vs
+    g = runner._port_geometry(coax_model(), RES)[0]
+    assert g["type"] == "coax" and g["exc_dir"] == "x", g
+    assert g["start"] == [7.0 + 3.5, -10.0 - r, 0.0], g["start"]
+    assert g["stop"] == [7.0 + 2.143, -10.0 + r, 0.0], g["stop"]
+    assert g["coax"]["sign"] == -1, "the pad is not the positive end"
+    assert g["coax"]["tab"] == (7.0, -10.0 - r, 7.0 + 2.143, -10.0 + r)
+    # the -y side: the axis is y, and the start is below the pad
+    g = runner._port_geometry(coax_model(direction=(0, -1)), RES)[0]
+    assert g["exc_dir"] == "y" and g["start"][1] == -10.0 - 3.5 \
+        and g["stop"][1] == -10.0 - 2.143, g
+    m = coax_model()
+    ports = runner._port_geometry(m, RES)
+    xs, ys, zs = runner._mesh(m, ports, RES, [])
+    for want in (7.0 + 2.143, 7.0 + 3.5, 7.0 - r, 7.0, 7.0 + r):
+        assert near(xs, want), "x line %g is gone" % want
+    for want in (-10.0 - r, -10.0, -10.0 + r):
+        assert near(ys, want), "y line %g of the barrel is gone" % want
+    # The ring of the gap on the two axes: the pad, the middle and the
+    # ground, on each side of the axis of the hole.
+    for k, (c, lines) in enumerate(((7.0, xs), (-10.0, ys))):
+        for d in (2.143, 2.8215, 3.5):
+            assert near(lines, c - d) and near(lines, c + d), \
+                "axis %d: no line at %g from the hole" % (k, d)
+    assert near(zs, 0.0)
+    # The decisions name the feed, and the current views add its side.
+    got = runner._decisions(dict(m, settings=dict(
+        m["settings"], f_start=1e9, f_stop=6e9, z0=50.0, mesh="coarse",
+        max_timesteps=1000, lumped=True)), RES)
+    assert any(t.startswith("Port 1 is a coaxial feed on B.Cu: a lumped "
+                            "port across the gap of 1.357 mm") for t in got), got
+    assert solverenv.current_layers(m["ports"][0]) == [
+        "F.Cu", "In1.Cu", "B.Cu"], solverenv.current_layers(m["ports"][0])
+    # A side with no gap gives a lumped port, and the run says so.
+    g = runner._port_geometry(coax_model(side="F.Cu"), RES, quiet=True)[0]
+    assert g["type"] == "lumped" and g["fallback"].startswith("coax"), g
+    # A narrow gap: a pad of 1.7 mm in r 1.1 mm. The box is narrower than
+    # the drill, thus its corners stay in the middle of the gap.
+    m = coax_model()
+    m["ports"][0]["coax"]["B.Cu"].update(r_in=0.85, r_out=1.1)
+    b = runner._port_geometry(m, RES)[0]["coax"]
+    half = 0.5 * b["width"]
+    assert half < 0.635 and abs(math.hypot(0.85, half) - 0.975) < 1e-5, b
+    print("a coaxial feed is flat in the gap OK (x and -y, the barrel "
+          "keeps its lines)")
+
+
+def test_a_coaxial_feed_in_the_xml():
+    """`build` gives the feed as a lumped port on x, flat on B.Cu, and the
+    tab as copper on B.Cu. No engine runs."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+    m = coax_model()
+    m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9, z0=50.0,
+                         mesh="coarse", max_timesteps=1000,
+                         end_criteria=1e-4, lumped=True)
+    fdtd = runner.build(m, 0, RES, quiet=True)[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "csx.xml")
+        fdtd.GetCSX().Write2XML(path)
+        root = ET.parse(path).getroot()
+    resist = [p for p in root.iter() if p.get("Name") == "port_resist_1"]
+    assert resist and resist[0].get("Direction") == "0", \
+        [dict(p.attrib) for p in resist]
+    boxes = [b for p in root.iter() if p.get("Name") == "cu_B.Cu"
+             for b in p.iter("Box")]
+    assert len(boxes) == 1, "the tab is not on B.Cu: %d boxes" % len(boxes)
+    print("a coaxial feed in the XML OK (a lumped port on x, a tab on B.Cu)")
+
+
+def test_a_long_edge_gets_the_thirds():
+    """F8: a long copper edge has no line ON it, but one line 1/3 of a cell
+    in the copper and one 2/3 of a cell out of it, with a cell of
+    EDGE_THIRDS * res. A narrow strip keeps the lines on its edges (the
+    rules of the features and of the ports hold them), and so does an edge
+    that a port box holds. The two lines are anchors: the merge keeps
+    them on their coordinates."""
+    d = runner.EDGE_THIRDS * RES
+    m = model("msl")
+    # x 15 to 25: the boxes of the two ports end at x 14 and 26.
+    patch = [[15.0, -18.0], [25.0, -18.0], [25.0, -2.0], [15.0, -2.0]]
+    m["polygons"] = dict(m["polygons"], **{"F.Cu": [patch]})
+    xs, ys, _ = runner._mesh(m, runner._port_geometry(m, RES), RES, [])
+    for lines, lo, hi, name in ((xs, 15.0, 25.0, "x"), (ys, -18.0, -2.0, "y")):
+        assert not near(lines, lo) and not near(lines, hi), \
+            "%s: a line stays on the edge of the patch" % name
+        for c, s in ((lo, 1), (hi, -1)):     # s: the side of the copper
+            assert near(lines, c + s * d / 3.0) \
+                and near(lines, c - s * 2.0 * d / 3.0), \
+                "%s: no lines of the rule at the edge %g" % (name, c)
+    # The strip of 0.6 mm on In1.Cu keeps its edges: the port box holds
+    # them, and it is narrower than res.
+    assert near(ys, -10.3) and near(ys, -9.7), "the strip lost its edges"
+    print("a long edge gets the thirds OK (%g mm in, %g mm out; the strip "
+          "keeps its edges)" % (d / 3.0, 2.0 * d / 3.0))
+
+
+def test_a_state_changes_the_values():
+    """F30: `solverenv.apply_state` gives a copy of the model with the
+    values of a state, and the model itself does not change. A state keeps
+    the type and the body of each part. The EPC of an inductor follows its
+    inductance, because the SRF stays: 10 nH to 20 nH halves it."""
+    m = model("msl")
+    m["lumped_elements"] = [
+        dict(lumped(0.5, 0.6), ref="C1", type="C", value=1e-12, esl=3e-10),
+        dict(lumped(0.5, 0.6, x0=25.0), ref="L1", type="L", value=10e-9,
+             epc=0.28e-12),
+        dict(lumped(0.5, 0.6, x0=30.0), ref="D1", type="RLC", value=None,
+             r=2.0, l=5e-10, c=None)]
+    st = {"name": "off", "parts": {"C1": {"value": 2e-12},
+                                   "L1": {"value": 20e-9},
+                                   "D1": {"r": None, "l": 5e-10,
+                                          "c": 1.5e-13}}}
+    got = {e["ref"]: e for e in solverenv.apply_state(m, st)[
+        "lumped_elements"]}
+    assert got["C1"]["value"] == 2e-12 and got["C1"]["esl"] == 3e-10, got
+    assert abs(got["L1"]["epc"] - 0.14e-12) < 1e-20, got["L1"]
+    assert (got["D1"]["r"], got["D1"]["l"], got["D1"]["c"]) == (
+        None, 5e-10, 1.5e-13), got["D1"]
+    assert m["lumped_elements"][0]["value"] == 1e-12, "the model changed"
+    same = solverenv.apply_state(m, {"name": "State 1", "parts": {}})
+    assert same == m, "State 1 must be the model"
+    print("a state changes the values OK (C, L with its EPC, Series RLC)")
+
+
 if __name__ == "__main__":
+    test_a_long_edge_gets_the_thirds()
+    test_a_state_changes_the_values()
+    test_a_coaxial_feed_is_flat_in_the_gap()
+    test_a_coaxial_feed_in_the_xml()
     test_via_center_line()
     test_via_lines_are_anchors()
     test_flat_and_vertical_ports()

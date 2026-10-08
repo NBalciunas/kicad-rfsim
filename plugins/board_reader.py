@@ -43,7 +43,12 @@ except ImportError:                      # run as a top-level module
 #      version 2 puts a band of margin/8 at the edge of such a region.
 #      The absorber is then in an incorrect position, and the mesh is
 #      not the mesh of the numbers of the rigs.
-MODEL_VERSION = 3
+#   4  2026-10-06  a port of type "coax" (a through-hole pad, fed across
+#      the gap on one side of the board). A runner of version 3 reads it
+#      as a lumped port from the pad to the adjacent layer. That port
+#      drives the pad against its own ring on that layer, and the run
+#      gives a number with no message.
+MODEL_VERSION = 4
 
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
@@ -112,6 +117,12 @@ MAX_CPW_GAP = 2.0
 # port whose two sides differ by more than this part, |a - b| / (a + b),
 # gets a warning.
 ASYM_WARN = 0.25
+# The largest gap of a coaxial feed: between a through-hole pad and the
+# copper around it, on the side of the connector. The port is a lumped
+# port across that gap, thus the gap must be small against the
+# wavelength. 3 mm is 0.13 of a wavelength in FR-4 at 6 GHz. The usual
+# clearance of an SMA pin is 0.2 mm to 1.5 mm.
+MAX_COAX_GAP = 3.0
 
 
 def _parse_value(text, kind):
@@ -742,6 +753,113 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
     return None
 
 
+def _is_through(pad):
+    """Tell if `pad` is a plated through-hole pad: a pad with a barrel."""
+    return pad.GetAttribute() == pcbnew.PAD_ATTRIB_PTH and pad.HasHole()
+
+
+def _barrels(board, region, z_top, z_bottom):
+    """Give the barrel of each plated through-hole pad in `region`, in the
+    format of a via: x, y, r, z0, z1.
+
+    **A plated hole is a barrel of copper from the top layer to the bottom
+    layer.** Before this, the model had the barrels of the vias only. The
+    rings of a through-hole pad were then pieces of copper on each layer
+    that touch nothing: the pin of a connector did not connect its two
+    sides, and the ground pins of a connector did not connect the planes.
+
+    The barrel is a cylinder of the drill. A slot gets the smaller of its
+    two dimensions. The hole is at the position of the pad: the offset of
+    a pad moves its copper and not its hole.
+    """
+    out = []
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if not _is_through(pad):
+                continue
+            if not pad.GetBoundingBox().Intersects(region):
+                continue
+            drill = pad.GetDrillSize()
+            pos = pad.GetPosition()
+            out.append({
+                "x": _mm(pos.x), "y": -_mm(pos.y),
+                "r": _mm(min(drill.x, drill.y)) / 2.0,
+                "z0": z_bottom, "z1": z_top,
+            })
+    return out
+
+
+def _coax_gap(polys, x, y, direction, reach):
+    """Give (r_in, r_out) of the gap around a through-hole pad, or None.
+
+    The ray starts at the axis of the hole (x, y) and goes along
+    `direction`. r_in is where it goes out of the copper of the pad, and
+    r_out is where it gets to the next copper. That copper is the outer
+    conductor of the connector: a plane, a pour or a ground pad.
+
+    **The pad must end on this axis in `reach`**, which is half of the
+    pad on the axis. When the copper goes farther, the pad is a part of a
+    track, a patch or a pour on that layer. That is not a gap, thus a
+    connector cannot be on that axis. The gap must also be
+    `MAX_COAX_GAP` or less.
+
+    KiCad gives the copper of a pad with no hole in it. A layer that has
+    a hole at the axis is also correct: the first hit is then the edge of
+    the hole.
+    """
+    if not polys:
+        return None
+    axis = 0 if direction[0] else 1
+    sign = direction[0] or direction[1]
+    hits = _ray_hits(x, y, axis, sign, polys)
+    i = 0
+    if len(hits) % 2 == 0:  # the axis is not on copper: a hole
+        if not hits or hits[0] > reach:
+            return None
+        i = 1
+    if len(hits) < i + 2 or hits[i] > reach:
+        return None
+    r_in, r_out = hits[i], hits[i + 1]
+    if not 1e-6 < r_out - r_in <= MAX_COAX_GAP:
+        return None
+    return round(r_in, 5), round(r_out, 5)
+
+
+def _coax_sides(cx, cy, half, polygons, outer, centre):
+    """Give the coaxial feed of each outer layer of a through-hole pad:
+    {layer: {"dir", "r_in", "r_out", "cx", "cy"}}.
+
+    (cx, cy) is the axis of the hole, and `half` is half of the pad in x
+    and in y. `outer` has the names of the top and the bottom copper
+    layer, and `centre` is the centre of the board. On each layer, the
+    four directions of the axes get a gap from `_coax_gap`, and the
+    smallest gap wins. **Two gaps that are almost the same (5%) are a
+    tie**, and the direction AWAY from the centre of the board wins. A
+    round clearance gives a tie on the four axes. The rule then gives the
+    two feeds of a dual-polarized patch the same geometry in their own
+    axis.
+    """
+    out = {}
+    for layer in outer:
+        best = None
+        for d in ([1, 0], [-1, 0], [0, 1], [0, -1]):
+            axis = 0 if d[0] else 1
+            got = _coax_gap(polygons.get(layer, []), cx, cy, d,
+                            half[axis] + 0.05)
+            if not got:
+                continue
+            gap = got[1] - got[0]
+            away = (d[0] * (cx - centre[0]) + d[1] * (cy - centre[1])) > 0
+            key = (gap, not away)
+            if best is None or gap < 0.95 * best[0][0] or (
+                    gap <= 1.05 * best[0][0] and key[1] < best[0][1]):
+                best = (key, d, got)
+        if best:
+            out[layer] = {"dir": best[1], "r_in": best[2][0],
+                          "r_out": best[2][1], "cx": cx, "cy": cy}
+    return out
+
+
 def _reference_at_pad(p, names, polygons, box):
     """Give (ref_layer, ref_layer2) of the port `p`, with a reference layer
     that has copper at the pad.
@@ -947,10 +1065,13 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
+            # The barrels of the pads are in the model (`_barrels`), but
+            # a lumped element is a box on ONE copper layer, between two
+            # pads on that layer.
             if kind:
                 warnings.append("%s: not an SMD part, thus RFsim does "
-                                "not model it (the model has no THT "
-                                "barrel)" % ref)
+                                "not model it (a lumped element is on one "
+                                "copper layer)" % ref)
             continue
         layer = _pad_layer(pads[0])
         if layer not in z_of or _pad_layer(pads[1]) != layer:
@@ -1084,6 +1205,13 @@ def _port(board, pad, number, copper_layers):
         "direction": direction,
         "track_width": track_w,
         "type": "lumped",  # the settings dialog writes a new value here
+        # A through-hole pad: the drill in mm, else None. extract() gives
+        # such a pad the gap of each side in "coax", and the side of its
+        # coaxial feed in "coax_side" (refer to `solverenv.coax_box`).
+        "drill": (_mm(min(pad.GetDrillSize().x, pad.GetDrillSize().y))
+                  if _is_through(pad) else None),
+        "coax": {},
+        "coax_side": None,
     }
 
 
@@ -1188,9 +1316,34 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 "z0": z_of.get(bot, 0.0),
                 "z1": z_of.get(top, copper_layers[0]["z"]),
             })
+    vias += _barrels(board, region, copper_layers[0]["z"],
+                     copper_layers[-1]["z"])
 
     ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
     names = [c["name"] for c in copper_layers]
+    # **A through-hole pad is a coaxial feed** (`solverenv.coax_box`). Its
+    # port goes across the gap between the pad and the copper around it,
+    # on the side of the connector. The default side is the side of the
+    # footprint, when that side has a gap. The dialog lets the user select
+    # the other side.
+    brect = rect_mm(diel_box)
+    centre = (0.5 * (brect["x0"] + brect["x1"]),
+              0.5 * (brect["y0"] + brect["y1"]))
+    for p, pad in zip(ports, pads):
+        if not p["drill"]:
+            continue
+        pos, bb = pad.GetPosition(), pad.GetBoundingBox()
+        p["coax"] = _coax_sides(
+            _mm(pos.x), -_mm(pos.y),
+            (0.5 * _mm(bb.GetWidth()), 0.5 * _mm(bb.GetHeight())),
+            polygons, (names[0], names[-1]), centre)
+        own = names[-1] if pad.GetParentFootprint().IsFlipped() else names[0]
+        if p["coax"]:
+            p["coax_side"] = own if own in p["coax"] else next(
+                iter(p["coax"]))
+            p["type"] = "coax"
+        elif p["direction"]:
+            p["type"] = "msl"  # not "lumped": refer to the guard below
     ref_notes = []
     # Measure the coplanar gap of each port. The copper of the layer must
     # be available first. Thus this operation comes after the extraction of
@@ -1255,6 +1408,26 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # point-in-polygon test if pours with unusual shapes give incorrect
     # results.
     for p, pad in zip(ports, pads):
+        if p["drill"]:
+            # **A through-hole pad has no port to the adjacent layer.** On
+            # that layer, the copper at the pad is the ring of the pad, and
+            # the barrel connects it to the pad. Thus the test above always
+            # finds copper, and a port there drives the pad against itself.
+            # The port is a coaxial feed, or a line port on a track.
+            if p["coax"] or p["direction"]:
+                continue
+            raise ValueError(
+                "Port %d (%s): a through-hole pad, and no side has a gap "
+                "for a coaxial feed.\nThe port of a through-hole pad goes "
+                "across the gap between the pad and the copper around it "
+                "(the ground), on %s or on %s. On these layers, no copper "
+                "is around the pad at %g mm or less, on the x axis or on "
+                "the y axis.\nAdd a ground plane or a pour with a "
+                "clearance around the pad on the side of the connector, "
+                "and run again. A pad with a track can also use a line "
+                "port."
+                % (p["number"], p["label"], names[0], names[-1],
+                   MAX_COAX_GAP))
         if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
             # The return current of a CPW is on the coplanar ground of its
             # own layer. Thus a board with no plane below the pad is
@@ -1561,6 +1734,65 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
     assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
     print("geometry OK (%d cases)" % (len(_GEO) + 15))
+
+    # The gap of a coaxial feed. A round pad of r 2.143 (36 points) in a
+    # round clearance of r 3.5, in a plane of 20 x 20 mm. The plane is
+    # FRACTURED as KiCad gives it: the hole joins the outline through a
+    # slit with no width, at y = 0 to the left. A ray along -x goes ON
+    # that slit.
+    import math
+
+    def _ring(r, start_deg, step_deg):
+        return [[r * math.cos(math.radians(start_deg + step_deg * i)),
+                 r * math.sin(math.radians(start_deg + step_deg * i))]
+                for i in range(36)]
+
+    _DISC = _ring(2.143, 0.0, 10.0)
+    _HOLE = _ring(3.5, 180.0, -10.0)       # the other direction: a hole
+    _PLANE_HOLE = ([[-10.0, 0.0], [-10.0, -10.0], [10.0, -10.0],
+                    [10.0, 10.0], [-10.0, 10.0], [-10.0, 0.0]]
+                   + _HOLE + [_HOLE[0]])
+    _SMA = [_DISC, _PLANE_HOLE]
+    for _d in ([1, 0], [-1, 0], [0, 1], [0, -1]):
+        _got = _coax_gap(_SMA, 0.0, 0.0, _d, 2.2)
+        assert _got and abs(_got[0] - 2.143) < 1e-4 \
+            and abs(_got[1] - 3.5) < 1e-4, (_d, _got)
+    # The pad is a part of a patch: no gap on this layer.
+    assert _coax_gap([_rect(-14.0, -14.0, 14.0, 14.0)], 0.0, 0.0, [1, 0],
+                     2.2) is None
+    # A pad with a track to +x, and ground at +y, -y and -x at 1 mm.
+    _TRACK = [_rect(-1.0, -1.0, 20.0, 1.0), _rect(-10.0, 2.0, 20.0, 10.0),
+              _rect(-10.0, -10.0, 20.0, -2.0), _rect(-10.0, -2.0, -2.0, 2.0)]
+    assert _coax_gap(_TRACK, 0.0, 0.0, [1, 0], 1.05) is None, "on the track"
+    assert _coax_gap(_TRACK, 0.0, 0.0, [0, 1], 1.05) == (1.0, 2.0)
+    assert _coax_gap(_TRACK, 0.0, 0.0, [-1, 0], 1.05) == (1.0, 2.0)
+    # A clearance that is too large, and a pad with no copper around it.
+    assert _coax_gap([_ring(1.0, 0.0, 10.0), _rect(5.0, -9.0, 9.0, 9.0)],
+                     0.0, 0.0, [1, 0], 1.1) is None, "gap of 4 mm"
+    assert _coax_gap([_DISC], 0.0, 0.0, [1, 0], 2.2) is None, "no ground"
+    # The sides of a dual-polarized patch: the pad at +x of the centre of
+    # the board gets +x on B.Cu (the four gaps tie, and +x goes away from
+    # the centre). F.Cu is the patch, thus it has no side.
+    _shift = [[[x + 7.0, y] for x, y in q] for q in _SMA]
+    _sides = _coax_sides(7.0, 0.0, (2.143, 2.143),
+                         {"F.Cu": [_rect(-14.0, -14.0, 14.0, 14.0)],
+                          "B.Cu": _shift}, ("F.Cu", "B.Cu"), (0.0, 0.0))
+    assert list(_sides) == ["B.Cu"], _sides
+    assert _sides["B.Cu"]["dir"] == [1, 0], _sides
+    _shift = [[[x, y - 7.0] for x, y in q] for q in _SMA]
+    _sides = _coax_sides(0.0, -7.0, (2.143, 2.143), {"B.Cu": _shift},
+                         ("F.Cu", "B.Cu"), (0.0, 0.0))
+    assert _sides["B.Cu"]["dir"] == [0, -1], _sides
+    # Three gaps of 1 mm tie, and -x goes away from the centre at +x. A
+    # smaller gap at +y wins against that direction.
+    _sides = _coax_sides(0.0, 0.0, (1.0, 1.0), {"F.Cu": _TRACK},
+                         ("F.Cu", "B.Cu"), (5.0, 0.0))
+    assert _sides["F.Cu"]["dir"] == [-1, 0], _sides
+    _NEAR = _TRACK[:1] + [_rect(-10.0, 1.5, 20.0, 10.0)] + _TRACK[2:]
+    _sides = _coax_sides(0.0, 0.0, (1.0, 1.0), {"F.Cu": _NEAR},
+                         ("F.Cu", "B.Cu"), (5.0, 0.0))
+    assert _sides["F.Cu"]["dir"] == [0, 1], _sides
+    print("coaxial feed OK (15 cases)")
 
     # (the name, the code, does it give a warning?). A name that has the
     # metric code is not ambiguous, also when the imperial code is 0402 or

@@ -773,24 +773,30 @@ def _write_farfield(data, model, faces, origin, outdir, f_hz, power, raw,
         fe.excite_port(p["number"])
 
         def u_of(theta_deg, phi_deg):
-            E, _, ptot = fe.farfield(np.asarray(theta_deg) * rad,
-                                     np.asarray(phi_deg) * rad, faces,
-                                     origin=origin)
-            return np.sum(np.abs(E) ** 2, axis=0).real, float(ptot)
+            """Give U, E_theta and E_phi at the angles (in degrees)."""
+            th = np.asarray(theta_deg, float)
+            ph = np.asarray(phi_deg, float)
+            E, _, _ = fe.farfield(th * rad, ph * rad, faces, origin=origin)
+            return (np.sum(np.abs(E) ** 2, axis=0).real,) + _spherical(
+                E, th * rad, ph * rad)
 
         g3 = fe.farfield_3d(faces, th3 * rad, ph3 * rad, origin=origin)
         u3 = np.sum(np.abs(g3._E) ** 2, axis=0).real.T     # (Ntheta, Nphi)
+        P3, T3 = np.meshgrid(ph3 * rad, th3 * rad)         # (Ntheta, Nphi)
+        et3, ep3 = _spherical(np.transpose(g3._E, (0, 2, 1)), T3, P3)
         total = np.trapezoid(np.trapezoid(u3 * np.sin(th3 * rad)[:, None],
                                           ph3 * rad, axis=1), th3 * rad)
         cuts = {}
         for name, phi_pos in (("Phi=0", 0.0), ("Phi=90", 90.0)):
-            u, _ = u_of(np.abs(cut), np.where(cut >= 0, phi_pos,
-                                              phi_pos + 180.0))
+            ph = np.where(cut >= 0, phi_pos, phi_pos + 180.0)
+            u, et, ep = u_of(np.abs(cut), ph)
             cuts[name] = {"angle_deg": cut.tolist(),
-                          "D_dBi": _directivity(u, total).tolist()}
-        u, _ = u_of(np.full_like(az, 90.0), az)
+                          "D_dBi": _directivity(u, total).tolist(),
+                          "_et": et, "_ep": ep, "_phi": ph}
+        u, et, ep = u_of(np.full_like(az, 90.0), az)
         cuts["Theta=90"] = {"angle_deg": az.tolist(),
-                            "D_dBi": _directivity(u, total).tolist()}
+                            "D_dBi": _directivity(u, total).tolist(),
+                            "_et": et, "_ep": ep, "_phi": az}
         d3 = _directivity(u3, total)
         # |E|^2 / (2 Z0) is U, thus the integral also gives the radiated
         # power.
@@ -798,16 +804,40 @@ def _write_farfield(data, model, faces, origin, outdir, f_hz, power, raw,
         dmax = float(d3.max())
         p_in = power * (1.0 - abs(raw[i_f, i, i]) ** 2)
         eff = 100.0 * prad / p_in if p_in > 0 else None
+        grid = {"theta_deg": th3.tolist(), "phi_deg": ph3.tolist(),
+                "D_dBi": d3.tolist(), "_et": et3, "_ep": ep3,
+                "_phi": ph3[None, :]}
+        res = {"f_hz": f_got, "cuts": cuts, "grid3d": grid,
+               "Dmax_dBi": dmax, "Prad_W": prad, "P_in_W": p_in,
+               "efficiency_pct": eff}
+        # The far field gets the scale of the field views (Stratton-Chu
+        # gives rE in V): `solverenv.polarization`.
+        try:
+            ref, xpd, th, ph = solverenv.polarization(
+                grid, cuts, ph3, np.sqrt(0.5 / power))
+            res.update(ludwig3_ref_deg=ref, xpd_dB=xpd,
+                       main_lobe_deg=[th, ph],
+                       E_scale="rE in V, for 1 sqrt(W) peak incident")
+        except Exception as e:
+            say("WARNING: the co-pol and the cross-pol of the far field of "
+                "port %d are not available: %s" % (i + 1, e))
+            for g in [grid] + list(cuts.values()):
+                for k in ("_et", "_ep", "_phi"):
+                    g.pop(k, None)
         with open(os.path.join(outdir, "farfield_p%d.json" % (i + 1)),
                   "w") as fh:
-            json.dump({
-                "f_hz": f_got, "cuts": cuts,
-                "grid3d": {"theta_deg": th3.tolist(),
-                           "phi_deg": ph3.tolist(), "D_dBi": d3.tolist()},
-                "Dmax_dBi": dmax, "Prad_W": prad, "P_in_W": p_in,
-                "efficiency_pct": eff}, fh, indent=1)
-        out.append((i + 1, dmax, eff))
+            json.dump(res, fh, indent=1)
+        out.append((i + 1, dmax, eff, res.get("xpd_dB"),
+                    res.get("ludwig3_ref_deg")))
     return f_got, out
+
+
+def _spherical(E, th, ph):
+    """Give (E_theta, E_phi) of the Cartesian far field E (3, ...) at the
+    angles `th` and `ph` (in radians, with the shape of E[0])."""
+    ct, st, cp, sp = np.cos(th), np.sin(th), np.cos(ph), np.sin(ph)
+    return (E[0] * ct * cp + E[1] * ct * sp - E[2] * st,
+            -E[0] * sp + E[1] * cp)
 
 
 def main(model_path, outdir):
@@ -905,6 +935,26 @@ def main(model_path, outdir):
         elif got:
             notes.append("Port %d is a lumped port, because %s"
                          % (p["number"], got))
+    # **A through-hole pad is a coaxial feed** (`solverenv.coax_box`): a
+    # plate in the gap around the pad, on the layer of its side.
+    coax, coax_on = {}, {}
+    for p in ports:
+        if p.get("type") != "coax":
+            continue
+        box = solverenv.coax_box(p, z_of)
+        if not box:
+            notes.append("Port %d is a lumped port, and not a coax, because "
+                         "it has no gap on %s"
+                         % (p["number"], p.get("coax_side") or "a side"))
+            continue
+        coax[p["number"]] = box
+        coax_on.setdefault(p["coax_side"], []).append(box)
+        notes.append("Port %d is a coaxial feed on %s: a lumped port across "
+                     "the gap of %.3f mm between the through-hole pad and "
+                     "the copper around it, on the %s axis and %.3f mm "
+                     "wide"
+                     % (p["number"], p["coax_side"], box["gap"], box["exc"],
+                        box["width"]))
 
     def overlaps(a, b):
         return all(a[i] < b[i + 3] and b[i] < a[i + 3] for i in range(3))
@@ -977,6 +1027,20 @@ def main(model_path, outdir):
                     layer = em.geo.remove(layer, hole)
                 except Exception:
                     pass
+        # The tab and the slot of each coaxial feed on this layer. The tab
+        # makes the edge of a round pad straight at the plate of the port,
+        # and the slot removes the copper around the pad from the plate. The
+        # plate then touches the copper along its two faces, and it is on
+        # no copper.
+        for box in coax_on.get(name, []):
+            x0, y0, x1, y1 = box["tab"]
+            layer = em.geo.add(layer, em.geo.XYPlate(
+                (x1 - x0) * MM, (y1 - y0) * MM, position=(x0 * MM, y0 * MM,
+                                                          z)))
+            (a0, b0, _), (a1, b1, _) = box["start"], box["stop"]
+            layer = em.geo.remove(layer, em.geo.XYPlate(
+                abs(a1 - a0) * MM, abs(b1 - b0) * MM,
+                position=(min(a0, a1) * MM, min(b0, b1) * MM, z)))
         # **Copper with its conductivity, and not PEC** (5.8e7 S/m, as the
         # sheets of openEMS). EMerge gives a conducting sheet in the model
         # a ThinConductor: each side has the surface impedance of copper,
@@ -1010,11 +1074,24 @@ def main(model_path, outdir):
                              p["number"], p["type"],
                              np.linalg.norm(u), np.linalg.norm(v)))
             continue
+        box = coax.get(p["number"])
+        if box:
+            # A plate in the gap, flat on the copper of its side. `width`
+            # is across the current, and `height` is along it.
+            (x0, y0, z), (x1, y1, _) = box["start"], box["stop"]
+            plate = em.geo.XYPlate(abs(x1 - x0) * MM, abs(y1 - y0) * MM,
+                                   position=(min(x0, x1) * MM,
+                                             min(y0, y1) * MM, z * MM))
+            k = "xy".index(box["exc"])
+            port_geo.append((plate, box["width"], box["gap"],
+                             tuple(box["sign"] if i == k else 0
+                                   for i in range(3))))
+            continue
         o, u, v, w, h, sign = _port_plate(p, z_of)
         plate = em.geo.Plate(tuple(c * MM for c in o),
                              tuple(c * MM for c in u),
                              tuple(c * MM for c in v))
-        port_geo.append((plate, w, h, sign))
+        port_geo.append((plate, w, h, (0, 0, sign)))
 
     elements = []
     shorts = []
@@ -1105,7 +1182,7 @@ def main(model_path, outdir):
 
     # ------------------------------------------------ boundary conditions
     lports = []
-    for i, (plate, w, h, sign) in enumerate(port_geo):
+    for i, (plate, w, h, direction) in enumerate(port_geo):
         if w is None:
             # quasi-TEM: the line has air and dielectric on its face, thus
             # the mode is solved again at each frequency
@@ -1113,9 +1190,11 @@ def main(model_path, outdir):
                 plate, ports[i]["number"], modetype="TEM",
                 mixed_materials=True))
             continue
+        # `direction` goes from the reference to the pad: up from the
+        # plane for a pad port, and across the gap for a coaxial feed.
         lports.append(sim.mw.bc.LumpedPort(
             plate, ports[i]["number"], width=w * MM, height=h * MM,
-            direction=(0, 0, sign), Z0=s["z0"]))
+            direction=direction, Z0=s["z0"]))
     for _, plate, w, h, zf in elements:
         sim.mw.bc.LumpedElement(plate, zf, width=w * MM, height=h * MM)
     # **The absorber is on the six outer faces only.** The faces of a void
@@ -1183,10 +1262,12 @@ def main(model_path, outdir):
         f_got, got = _write_farfield(data, model, outer, centre, outdir,
                                      f_field, lports[0].power, raw,
                                      np.squeeze(g.freq))
-        for num, dmax, eff in got:
+        for num, dmax, eff, xpd, ref in got:
             say("far field of port %d: Dmax %.1f dBi, radiated power %.1f%% "
-                "of the input power" % (num, dmax,
-                                        eff if eff is not None else -1))
+                "of the input power%s"
+                % (num, dmax, eff if eff is not None else -1,
+                   ", XPD %.1f dB (Ludwig 3 at %g deg)" % (xpd, ref)
+                   if xpd is not None else ""))
         notes.append("The far field is at %g GHz, from the fields on the "
                      "faces of the air box (Stratton-Chu)" % (f_got / 1e9))
     except Exception as e:
