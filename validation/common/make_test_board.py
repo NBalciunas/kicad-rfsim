@@ -218,6 +218,88 @@ def make_zone_holes(path, void=True):
     return board, [pad1, pad2]
 
 
+# The probe-fed patch of kicad-rfgen ("Microstrip Patch Antenna (Dual
+# Coaxial Feed)", its defaults): a square patch on F.Cu, a square ground
+# on B.Cu, and the pin of an SMA through a plated hole. The pad is 4.286 mm
+# with a drill of 1.27 mm (the pin), and the ground keeps a clearance of r
+# 3.5 mm around it. The feed is 7.286 mm from the centre.
+PATCH, GROUND = 28.314, 37.914
+PROBE_PAD, PROBE_DRILL, PROBE_CLEAR = 4.286, 1.27, 3.5
+PROBE_OFFSET = 7.286
+PATCH_C = (30.0, 30.0)  # the centre of the board, in the mm of KiCad
+
+
+def make_probe_patch(path, feed="coax", dual=False, ground=True,
+                     pad=PROBE_PAD, clear=PROBE_CLEAR):
+    """The patch of kicad-rfgen, with a probe feed from below.
+
+    `feed` is "coax": the pad is a through-hole pad of `pad` mm, and the
+    ground keeps a clearance of radius `clear` around it. Or it is "pad":
+    an SMD pad of the pin dimension on F.Cu and a SOLID ground below it,
+    which is the probe of the openEMS tutorial of a patch: a lumped port
+    from the plane to the patch. A coaxial feed with a small pad and a
+    small clearance is almost that probe. `dual` adds the second feed, on
+    the y axis. `ground=False` leaves out the ground, for the guard.
+
+    The patch is a filled shape with no net, as the copper of the
+    footprint of kicad-rfgen. The ground is a zone of GND, thus the filler
+    makes the clearance around each pad of the RF nets.
+    """
+    board = pcbnew.NewBoard(path)
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    board.Add(gnd)
+    cx, cy = PATCH_C
+    # KiCad has y down: the second feed of kicad-rfgen is at +7.286 in y,
+    # below the centre on the screen.
+    feeds = [(cx + PROBE_OFFSET, cy)] + ([(cx, cy + PROBE_OFFSET)]
+                                         if dual else [])
+    size = pad
+    pads = []
+    for i, (x, y) in enumerate(feeds):
+        net = pcbnew.NETINFO_ITEM(board, "RF%d" % (i + 1))
+        board.Add(net)
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference("J%d" % (i + 1))
+        fp.SetPosition(VECTOR2I(FromMM(x), FromMM(y)))
+        pad = pcbnew.PAD(fp)
+        pad.SetNumber("1")
+        pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+        if feed == "coax":
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+            pad.SetLayerSet(pad.PTHMask())
+            pad.SetSize(VECTOR2I(FromMM(size), FromMM(size)))
+            pad.SetDrillSize(VECTOR2I(FromMM(PROBE_DRILL),
+                                      FromMM(PROBE_DRILL)))
+        else:
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+            pad.SetLayerSet(pad.SMDMask())
+            pad.SetSize(VECTOR2I(FromMM(PROBE_DRILL), FromMM(PROBE_DRILL)))
+        pad.SetPosition(fp.GetPosition())
+        pad.SetNetCode(net.GetNetCode())
+        fp.Add(pad)
+        board.Add(fp)
+        pads.append(pad)
+
+    patch = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_RECT)
+    patch.SetStart(VECTOR2I(FromMM(cx - PATCH / 2), FromMM(cy - PATCH / 2)))
+    patch.SetEnd(VECTOR2I(FromMM(cx + PATCH / 2), FromMM(cy + PATCH / 2)))
+    patch.SetFilled(True)
+    patch.SetWidth(0)
+    patch.SetLayer(pcbnew.F_Cu)
+    board.Add(patch)
+
+    h = GROUND / 2
+    corners = [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h),
+               (cx - h, cy + h)]
+    _edge_cuts(board, corners)
+    if ground:
+        z = _zone(board, pcbnew.B_Cu, gnd, corners)
+        z.SetLocalClearance(FromMM(clear - size / 2))
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    pcbnew.SaveBoard(path, board)
+    return board, pads
+
+
 def make_cpw(path, length=X1 - X0, fence=False):
     """Make the grounded CPW board: a line of 30 mm with a ground at each
     side, and a full plane on B.Cu. `length` gives a different line.

@@ -259,7 +259,7 @@ def pml_depth(res):
 # The newest version of model.json that the runners can read. It must
 # agree with `board_reader.MODEL_VERSION`. board_reader imports pcbnew,
 # thus it keeps its own copy.
-MODEL_VERSION = 3
+MODEL_VERSION = 4
 
 
 def parasitic_components(e):
@@ -324,6 +324,43 @@ def components(e, para, s=None):
     return comp
 
 
+# ------------------------------------------------ the states of the parts
+# F30: the parts of the board get more than one set of values, for example
+# the states of a phase shifter. Each state is a run of its own in the
+# folder STATE_DIR % k of the output directory, and STATES_FILE in the
+# output directory lists them. State 1 is the values of the rows of the
+# dialog, and it is the reference of the views.
+STATES_FILE = "states.json"
+STATE_DIR = "state_%d"
+
+
+def apply_state(model, state):
+    """Give a copy of `model` with the part values of `state`.
+
+    `state["parts"]` has an entry for each part that the state changes:
+    {"value": SI} for an R, an L or a C, or {"r", "l", "c": SI or None}
+    for a Series RLC. **A state does not change the type of a part, or its
+    body**: the package parasitics of the row stay. The EPC of an inductor
+    comes from its SRF, thus it changes with the inductance:
+    EPC = 1 / ((2 pi SRF)^2 L), and the SRF stays.
+    """
+    import copy
+    out = copy.deepcopy(model)
+    parts = state.get("parts") or {}
+    for e in out.get("lumped_elements", []):
+        v = parts.get(e.get("ref"))
+        if not v:
+            continue
+        if e.get("type") == "RLC":
+            e.update(r=v.get("r"), l=v.get("l"), c=v.get("c"))
+            continue
+        old = e.get("value")
+        e["value"] = v["value"]
+        if e.get("type") == "L" and e.get("epc") and old and v["value"]:
+            e["epc"] = e["epc"] * old / v["value"]
+    return out
+
+
 # The name of a current view in each excN folder is this prefix, the copper
 # layer and ".h5" (F4): the current of the sheet in A/m, in the format of
 # Ef.h5. The two runners write it, and the results window reads it.
@@ -333,9 +370,177 @@ CURRENT_PREFIX = "Jf_"
 def current_layers(p):
     """Give the copper layers of the current views of the port `p`: its
     layer and its reference planes, with no copy. The reference planes
-    carry the return path."""
+    carry the return path. A coaxial feed adds the layer of its gap."""
+    side = p.get("coax_side") if p.get("type") == "coax" else None
     return list(dict.fromkeys(
-        l for l in (p["layer"], p["ref_layer"], p.get("ref_layer2")) if l))
+        l for l in (p["layer"], p["ref_layer"], p.get("ref_layer2"), side)
+        if l))
+
+
+# ------------------------------------------------ the coaxial feed port
+def coax_box(p, z_of, surface=1.0):
+    """Give the geometry of the coaxial feed of the through-hole pad `p`.
+
+    A coaxial connector, for example an SMA, has its pin in the plated hole
+    of the pad. Its outer conductor touches the copper around the pad, on
+    the side of the board where the connector is. That side is
+    `p["coax_side"]`. **The port is a lumped port ACROSS the gap between
+    the pad and that copper**, flat on the layer of that side. Thus the
+    current goes from the copper around the pad into the pad, and then
+    through the barrel of the hole to the other layers. A port from the pad
+    to the adjacent layer cannot model this: on that layer, the copper
+    below the pad is the ring of the pad itself.
+
+    `board_reader` measures the gap on each outer layer (`p["coax"]`). The
+    box is on the axis of that measurement. It goes from the edge of the
+    pad (`r_in`) to the edge of the copper around it (`r_out`), and it is
+    as wide as the hole, which is the pin. `surface` makes the width a
+    little smaller: openEMS gives it the factor that puts the surface lines
+    of a via in the barrel, thus the box and the barrel share those lines.
+
+    **A narrow gap makes the box narrower.** The corners of the box (and of
+    the tab below) must stay in the middle of the gap, at r_in + gap / 2 or
+    less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm,
+    and a box as wide as its drill of 1.27 mm put the corner of the tab
+    0.04 mm from the ground. One cell of the mesh then joined the pin to
+    the ground, and the port read a short circuit.
+
+    **The start is on the copper around the pad, and the stop is on the
+    pad.** openEMS measures the voltage of a lumped port as V(stop) -
+    V(start). Thus the pad is positive against the copper around it, as it
+    is for the lumped port of an SMD pad, which goes from the reference
+    plane up to the pad.
+
+    The result is None when the port has no gap on its side. Else it is a
+    dict: `start` and `stop` (x, y, z in mm), `exc` ("x" or "y"), `sign`
+    (+1 or -1: from the copper around the pad to the pad, along `exc`),
+    `tab` (x0, y0, x1, y1: a strip of copper from the axis of the hole to
+    the box), `z`, `gap`, `width`, `centre` (the axis of the hole), `r_in`
+    and `r_out`.
+
+    **The tab makes the edge of the pad straight at the box.** A round pad
+    touches the face of the box at ONE point: at the corners of the box,
+    the edge of the pad is a little nearer to the axis. The tab is copper
+    from the axis to the face, as wide as the box, thus the box touches the
+    pad along all its face. The tab adds 0.1 mm or less of copper at the
+    corners of a pad of 4.3 mm.
+    """
+    side = p.get("coax_side")
+    geo = (p.get("coax") or {}).get(side)
+    if not geo or not p.get("drill"):
+        return None
+    dx, dy = geo["dir"]
+    k = 0 if dx else 1                 # the axis of the box
+    sign = dx or dy
+    c = (geo["cx"], geo["cy"])         # the axis of the hole
+    gap = geo["r_out"] - geo["r_in"]
+    hw = min(0.5 * p["drill"],
+             math.sqrt(gap * geo["r_in"] + 0.25 * gap * gap)) * surface
+    z = z_of[side]
+    pad = c[k] + sign * geo["r_in"]    # the face on the pad
+    gnd = c[k] + sign * geo["r_out"]   # the face on the copper around it
+    lo, hi = c[1 - k] - hw, c[1 - k] + hw
+
+    def xy(along, across):
+        return [along, across] if k == 0 else [across, along]
+
+    tab = xy(c[k], lo) + xy(pad, hi)
+    return {"start": xy(gnd, lo) + [z], "stop": xy(pad, hi) + [z],
+            "exc": "xy"[k], "sign": -sign,
+            "tab": (min(tab[0], tab[2]), min(tab[1], tab[3]),
+                    max(tab[0], tab[2]), max(tab[1], tab[3])),
+            "z": z, "gap": gap, "width": 2.0 * hw, "centre": c,
+            "r_in": geo["r_in"], "r_out": geo["r_out"]}
+
+
+# ------------------------------------------------ the polarization
+def ludwig3_ref(e_theta, e_phi, phi_deg):
+    """Give the reference angle of Ludwig 3 for the field at one direction.
+
+    The field (`e_theta`, `e_phi`, complex) is the field at the main lobe.
+    The major axis of its ellipse is the polarization of the antenna. The
+    reference is the axis or the diagonal that is nearest to it: 0, 45, 90
+    or 135 degrees from +x. **It is not the major axis itself.** A patch
+    with a feed that also excites the orthogonal mode has a TILTED
+    polarization. A reference on the tilt gives no cross-pol, and the
+    reference of the design (x or y) shows it. A design on an other angle
+    gets the nearest of the four, and the side block of the view names it.
+    """
+    a, b = complex(e_theta), complex(e_phi)
+    # |a cos(t) - b sin(t)|^2 has its largest value at this t.
+    t = 0.5 * math.atan2(-2.0 * (a * b.conjugate()).real,
+                         abs(a) ** 2 - abs(b) ** 2)
+    psi = phi_deg - math.degrees(t)
+    return (round(psi / 45.0) * 45.0) % 180.0
+
+
+def ludwig3(e_theta, e_phi, phi_deg, ref_deg):
+    """Give (co, cross) of Ludwig 3, with the reference `ref_deg` from +x.
+
+    The arrays have the same shape, or they broadcast. With a reference
+    of 0, co is the x component of the field at the main lobe, and cross
+    is the y component. |co|^2 + |cross|^2 = |E_theta|^2 + |E_phi|^2. Only
+    the runners call it, and they have numpy.
+    """
+    import numpy as np
+    t = np.radians(np.asarray(phi_deg, float) - ref_deg)
+    c, s = np.cos(t), np.sin(t)
+    return e_theta * c - e_phi * s, e_theta * s + e_phi * c
+
+
+def pol_split(d_dbi, co, cross):
+    """Give (D_co, D_cross) in dBi from the total directivity `d_dbi` and
+    the two components of Ludwig 3. Each one is a part of the total, thus
+    each one has the floor of the total."""
+    import numpy as np
+    tot = np.abs(co) ** 2 + np.abs(cross) ** 2
+    tot = np.where(tot > 0, tot, 1.0)
+    d = np.asarray(d_dbi, float)
+    return (d + 10.0 * np.log10(np.maximum(np.abs(co) ** 2 / tot, 1e-12)),
+            d + 10.0 * np.log10(np.maximum(np.abs(cross) ** 2 / tot, 1e-12)))
+
+
+def complex_json(a, scale=1.0):
+    """Give a complex array as {"re": [...], "im": [...]} for a JSON file."""
+    import numpy as np
+    a = np.asarray(a) * scale
+    return {"re": a.real.tolist(), "im": a.imag.tolist()}
+
+
+def polarization(grid, cuts, phi3, scale):
+    """Add the co-pol and the cross-pol of Ludwig 3 to a far field, in
+    place.
+
+    `grid` (the 3D grid) and each cut are the dicts of farfield_pN.json.
+    Each one holds the complex E_theta and E_phi in "_et" and "_ep", and
+    the phi of its points in "_phi". `phi3` is the phi of the columns of
+    the 3D grid. The reference comes from the field at the largest D of
+    the 3D grid (`ludwig3_ref`). Each dict gets D_co_dBi and D_cross_dBi,
+    and E_theta and E_phi times `scale`. The function gives (the
+    reference in degrees, the XPD at that direction in dB, its theta, its
+    phi).
+
+    **The two runners give the far field of each port the scale of its
+    field views**: rE in V, for a wave of 1 sqrt(W) peak (0.5 W)
+    incident at the port. Thus the complex fields of two ports add: a
+    feed of the two in phase, or with 90 degrees between them, is possible
+    with no new run.
+    """
+    import numpy as np
+    d3 = np.asarray(grid["D_dBi"], float)
+    i, j = np.unravel_index(int(np.argmax(d3)), d3.shape)
+    ref = ludwig3_ref(grid["_et"][i, j], grid["_ep"][i, j], float(phi3[j]))
+    for g in [grid] + list(cuts.values()):
+        et, ep = g.pop("_et"), g.pop("_ep")
+        co, cross = ludwig3(et, ep, g.pop("_phi"), ref)
+        d_co, d_cross = pol_split(g["D_dBi"], co, cross)
+        g["D_co_dBi"] = d_co.tolist()
+        g["D_cross_dBi"] = d_cross.tolist()
+        g["E_theta"] = complex_json(et, scale)
+        g["E_phi"] = complex_json(ep, scale)
+    xpd = float(np.asarray(grid["D_co_dBi"])[i, j]
+                - np.asarray(grid["D_cross_dBi"])[i, j])
+    return ref, xpd, float(grid["theta_deg"][i]), float(phi3[j])
 
 
 def write_touchstone(path, freq, S, z0):

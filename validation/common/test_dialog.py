@@ -1329,8 +1329,162 @@ def test_each_refusal_names_its_field():
     print("each refusal names its field OK (7 fields)")
 
 
+def test_a_through_hole_pad_is_a_coaxial_feed():
+    """A through-hole pad gets a coaxial feed for each side with a gap,
+    the default side first, and NO lumped port. The value names the side,
+    and the dialog does not ask a coaxial feed for a feed direction.
+
+    The board is the dual-polarized patch of `rig_probe`: two pads in the
+    patch on F.Cu, each in a clearance of the ground on B.Cu.
+    """
+    import make_test_board
+    path = os.path.join(HERE, "out_dialog", "probe.kicad_pcb")
+    board, pads = make_test_board.make_probe_patch(path, dual=True)
+    pre = board_reader.extract(board, pads, 1.0)
+    d = gui.SettingsDialog(None, pre["ports"], HERE, [], preview=pre,
+                           packages=board_reader.package_presets(),
+                           esr=board_reader.esr_presets())
+    for ch in d.port_choices:
+        got = ch.GetStrings()
+        assert len(got) == 1 and got[0].startswith(
+            "Coaxial Feed Port [Side: B.Cu, Gap: 1.36"), got
+        assert not ch.IsEnabled(), "one entry, thus the choice is off"
+    assert d.get_settings()["port_types"] == ["coax:B.Cu"] * 2
+    stopped = []
+    old_box = wx.MessageBox
+    wx.MessageBox = lambda msg, *a, **k: stopped.append(msg)
+    try:
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+    finally:
+        wx.MessageBox = old_box
+    assert not stopped, stopped
+    d.Destroy()
+    # Two sides and a track: the default side first, then the other side
+    # and the line types. A pad with no drill keeps the lumped port.
+    side = {"dir": [1, 0], "r_in": 1.0, "r_out": 1.3, "cx": 0, "cy": 0}
+    got = gui._port_choices({"drill": 1.0, "coax_side": "B.Cu",
+                             "coax": {"F.Cu": dict(side, r_out=1.5),
+                                      "B.Cu": side},
+                             "direction": [1, 0]})
+    assert [v for _, v in got] == ["coax:B.Cu", "coax:F.Cu", "msl"], got
+    assert got[1][0] == "Coaxial Feed Port [Side: F.Cu, Gap: 0.500 mm]", got
+    assert [v for _, v in gui._port_choices({"direction": None})] == [
+        "lumped"]
+    print("a through-hole pad is a coaxial feed OK (no lumped port, the "
+          "side in the value)")
+
+
+def test_the_states_of_the_parts():
+    """F30: the states editor and the settings that it gives.
+
+    The grid has a column for each state and a row for each part that is
+    on. State 1 is the rows, read-only. A new state is a copy of the last
+    one. A Series RLC cell is "R / L / C". A bad cell, or two states with
+    one name, keeps the grid open. The settings give each state with the
+    parts that it changes, in SI. A part that changed its type after the
+    edit stops the run. The timestep counts the inductance of each state.
+    """
+    d = dialog(extra=[unknown("D1")])
+    r = rlc_row(d)
+    for k, v in zip("RLC", ("2", "0.5", "0")):
+        r["rlc"][k].ChangeValue(v)
+    rows = d._state_rows()
+    assert rows == [("R1", "R", "50"), ("D1", "RLC", "2 / 0.5 / 0")], rows
+    s = gui.StatesDialog(d, rows, [])
+    g = s.grid
+    assert g.GetNumberCols() == 2 and g.IsReadOnly(1, 0) \
+        and g.GetCellValue(2, 1) == "2 / 0.5 / 0", "a new state is a copy"
+    s._on_add(None)
+    assert g.GetNumberCols() == 3 and g.GetCellValue(0, 2) == "State 3"
+    g.SetCellValue(0, 1, "off")
+    g.SetCellValue(2, 1, "0 / 0.5 / 0.15")
+    g.SetCellValue(1, 2, "")             # follows the row
+    g.SetCellValue(2, 2, "1 / 0 / 0")
+    stopped = []
+    old_box = wx.MessageBox
+    wx.MessageBox = lambda msg, *a, **k: stopped.append(msg)
+    try:
+        g.SetCellValue(2, 2, "1 / 0")     # two numbers, not three
+        s._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert stopped and 'element "D1": give R / L / C' in stopped[-1], \
+            stopped
+        g.SetCellValue(2, 2, "1 / 0 / 0")
+        g.SetCellValue(0, 2, "off")
+        s._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert 'Two states have the name "off"' in stopped[-1], stopped
+        g.SetCellValue(0, 2, "series R")
+        n = len(stopped)
+        s._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert len(stopped) == n, stopped[n:]
+        states = s.get_states()
+        s.Destroy()
+        assert [st["name"] for st in states] == ["State 1", "off",
+                                                "series R"], states
+        assert states[2]["cells"] == {"D1": "1 / 0 / 0"}, states[2]
+        d._states = states
+        d._state_kinds = {ref: kind for ref, kind, _ in rows}
+        d._refresh_states_label()
+        assert d.states_lbl.GetLabel().startswith("3 states"), \
+            d.states_lbl.GetLabel()
+        got = d.get_settings()["states"]
+        assert got[0] == {"name": "State 1", "parts": {}}, got[0]
+        assert got[1]["parts"]["D1"] == {"r": None, "l": 0.5e-9,
+                                         "c": 0.15e-12}, got[1]
+        assert got[1]["parts"]["R1"] == {"value": 50.0}, got[1]
+        assert got[2]["parts"] == {"D1": {"r": 1.0, "l": None, "c": None}}
+        # The timestep counts a state: 20 nH in "off" costs more than the
+        # 0.5 nH of the row.
+        d._states[1]["cells"]["D1"] = "0 / 20 / 0.15"
+        factor, source, value, _ = d._lumped_limit()
+        assert source == 'The L of D1 in "off"' and value == "20 nH", \
+            (source, value)
+        # A part that changed its type stops the run.
+        d.part_rows[0]["kind"].SetSelection(gui.KIND_ORDER.index("C"))
+        fire(d.part_rows[0]["kind"], wx.EVT_CHOICE)
+        del stopped[:]
+        d._on_ok(wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK))
+        assert stopped and stopped[0].startswith(
+            'Element "R1" has a different type'), stopped
+    finally:
+        wx.MessageBox = old_box
+    d.Destroy()
+    print("the states of the parts OK (the grid, the refusals, SI, and the "
+          "timestep of a state)")
+
+
+def test_the_run_window_runs_each_state():
+    """F30: the run window runs a list of (title, command) one after the
+    other, with each title in the log, and it stops at the first error."""
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "run.log")
+    steps = [("State %d of 3: S%d" % (k, k),
+              [sys.executable, "-c", "print('run %d')" % k])
+             for k in (1, 2, 3)]
+    d = gui.RunDialog(None, steps, log_path=path)
+    assert d.ShowModal() == wx.ID_OK
+    d.Destroy()
+    text = open(path, encoding="utf-8").read()
+    for k in (1, 2, 3):
+        assert "===== State %d of 3: S%d =====" % (k, k) in text, text
+        assert "run %d" % k in text, text
+    steps[1] = ("State 2 of 3: S2", [sys.executable, "-c",
+                                     "import sys; sys.exit(4)"])
+    d = gui.RunDialog(None, steps, log_path=path)
+    wx.CallLater(1500, lambda: d.EndModal(wx.ID_CANCEL))
+    d.ShowModal()
+    d.Destroy()
+    text = open(path, encoding="utf-8").read()
+    assert "exit code 4" in text and "run 3" not in text, text
+    print("the run window runs each state OK (titles, and a stop at an "
+          "error)")
+
+
 if __name__ == "__main__":
     app = wx.App(False)
+    test_the_states_of_the_parts()
+    test_the_run_window_runs_each_state()
+    test_a_through_hole_pad_is_a_coaxial_feed()
     test_preset_holds_the_package()
     test_edit_gives_custom_and_not_no_parasitics()
     test_no_parasitics_shows_zero_and_greys_the_fields()

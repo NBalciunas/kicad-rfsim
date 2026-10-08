@@ -18,7 +18,9 @@ Run it with the python of KiCad 10:
 It uses `validation/openems/out_coarse`, which `run_headless_openems.py coarse`
 makes.
 """
+import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -190,6 +192,109 @@ def test_the_far_field_views_say_directivity():
     f.Destroy()
 
 
+def test_the_far_field_views_give_the_polarization():
+    """A cut shows Abs, Co and Cross of Ludwig 3, each with a check box,
+    and its block gives the reference and the XPD at the main lobe. The 3D
+    balloon gives the XPD of the runner. A far field from before the
+    polarization has Abs only, with its title of before."""
+    import copy
+    f = frame()
+    names = list(f.choice.GetStrings())
+    cut = next(n for n in names if n.startswith("Farfield") and "(Phi=0)" in n)
+    f.choice.SetStringSelection(cut)
+    f._plot()
+    assert list(f.traces.GetStrings()) == ["Abs", "Co", "Cross"], \
+        "run `run_headless_openems.py coarse msl` again: %s" % (
+            list(f.traces.GetStrings()),)
+    t = texts(f.figure)
+    for want in ("farfield directivity (phi=0)", "ludwig 3 ref.",
+                 "xpd (main lobe)"):
+        assert want in t, "%r is not in the cut: %s" % (want, t)
+    ball = next(n for n in names if n.startswith("Farfield")
+                and "(Phi=" not in n and "(Theta=" not in n)
+    f.choice.SetStringSelection(ball)
+    f._plot()
+    t = texts(f.figure)
+    assert "xpd :" in t and "ludwig 3 ref. :" in t, t
+    for k in list(f._ff):
+        old = copy.deepcopy(f._ff[k])
+        old.pop("xpd_dB", None)
+        for c in old["cuts"].values():
+            c.pop("D_co_dBi", None)
+            c.pop("D_cross_dBi", None)
+        f._ff[k] = old
+    f.choice.SetStringSelection(cut)
+    f._plot()
+    t = texts(f.figure)
+    assert "farfield directivity abs (phi=0)" in t and "xpd" not in t, t
+    assert not f.side.IsShown(), "a far field of before shows check boxes"
+    print("the far-field views give the polarization OK (Abs, Co, Cross, "
+          "and the XPD)")
+    f.Destroy()
+
+
+def test_the_states_are_compared():
+    """F30: a run of states gives four views that compare them, a choice
+    of the state for the other views, and the value of each state at
+    "Define at" in a block of text.
+
+    The states are made from `out_coarse`: State 2 is the same run with
+    S21 times 0.9 at -45 degrees. Thus its phase difference is -45.00
+    degrees and its magnitude -0.92 dB, at each frequency.
+    """
+    import shutil
+    import tempfile
+    import numpy as np
+    import skrf
+    sys.path.insert(0, os.path.join(ROOT, "plugins"))
+    import solverenv
+    root = tempfile.mkdtemp()
+    net = skrf.Network(os.path.join(OUT, "results.s2p"))
+    for k, factor in ((1, 1.0), (2, 0.9 * np.exp(-1j * np.pi / 4))):
+        d = os.path.join(root, solverenv.STATE_DIR % k)
+        os.makedirs(d)
+        shutil.copy(os.path.join(OUT, "model.json"), d)
+        S = net.s.copy()
+        S[:, 1, 0] *= factor
+        solverenv.write_touchstone(os.path.join(d, "results.s2p"), net.f, S,
+                                   50.0)
+    with open(os.path.join(root, solverenv.STATES_FILE), "w") as fh:
+        json.dump({"states": [{"name": "State 1", "dir": "state_1"},
+                              {"name": "off", "dir": "state_2"}]}, fh)
+    f = gui.ResultsFrame(None, os.path.join(root, "state_1", "results.s2p"))
+    names = list(f.choice.GetStrings())
+    want = ["States: S21 [Magnitude]", "States: S21 [Phase]",
+            "States: S21 [Phase difference]", "States: S11 [Magnitude]"]
+    assert all(w in names for w in want), names
+    assert f.state_choice.GetStrings() == ["State 1", "off"]
+    f.choice.SetStringSelection("States: S21 [Phase difference]")
+    f._plot()
+    assert list(f.traces.GetStrings()) == ["State 1", "off"]
+    t = texts(f.figure)
+    assert "off = -45.00" in t and "state 1 = 0.00" in t, t
+    f.choice.SetStringSelection("States: S21 [Magnitude]")
+    f._plot()
+    vals = [float(x) for x in re.findall(r"= (-?\d+\.\d+) db", texts(
+        f.figure))]
+    # The block gives 2 decimals of each value, thus the difference of two
+    # of them is 20 log10(0.9) = -0.915 dB to +-0.01.
+    assert len(vals) == 2 and abs(vals[1] - vals[0] + 0.915) <= 0.011, vals
+    # The other views follow the State choice, and the view stays.
+    f.choice.SetStringSelection("S-Parameters [Magnitude]")
+    f.state_choice.SetSelection(1)
+    f._on_state(None)
+    assert f.choice.GetStringSelection() == "S-Parameters [Magnitude]"
+    assert f.outdir.endswith("state_2"), f.outdir
+    f.Destroy()
+    # One run of its own has no states and no State choice.
+    f = frame()
+    assert f.state_choice is None and not any(
+        n.startswith("States:") for n in f.choice.GetStrings())
+    f.Destroy()
+    print("the states are compared OK (4 views, -45.00 deg, -0.92 dB, and "
+          "the State choice)")
+
+
 def test_the_ports_are_on_the_field_views():
     """The field views are the pictures that go out of the tool.
 
@@ -309,6 +414,8 @@ if __name__ == "__main__":
     test_the_field_views_say_what_they_show()
     test_the_current_views_say_what_they_show()
     test_the_far_field_views_say_directivity()
+    test_the_far_field_views_give_the_polarization()
+    test_the_states_are_compared()
     test_the_ports_are_on_the_field_views()
     test_the_field_views_have_the_scale_of_cst()
     print("PASS")
