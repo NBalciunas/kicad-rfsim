@@ -96,6 +96,16 @@ L_BOARD_RANGE = (0.2e-9, 5e-9)  # the pads, the gap and a via of 1.6 mm
 # of the same model give notches that are up to 0.2% different, and an ESL
 # that is about 0.01 nH different. Do not read more than that from the
 # result.
+# **The run with no ESL uses the series path too** (B78). openEMS models a
+# lone C on its classic path (`_le_topology`), and a C with a body on the
+# series path. The two paths do not give the same loop. Measured on
+# 2026-10-08 on the 2512 land of `packages`: the lone C gave an L_board of
+# 1.9853 nH, and the same C with a body of 1 pH on the series path gave
+# 2.2458 nH. The difference of the two runs then held the change of the
+# path, and 2512 read +28.7%. Thus the run with no ESL gets a body of
+# ESL_REF, which no notch can see, and `keep_idle_body` keeps it (P21 keeps
+# out a body that does not change its part).
+ESL_REF = 1e-18
 CONTROL_TOL = 0.10      # L_board must not follow the value of the capacitor
 ESL_TOL = 0.15          # of the nominal value
 ESL_FLOOR_H = 0.03e-9  # ...but not a tolerance smaller than this
@@ -216,16 +226,18 @@ def simulate(tag, cval, esl, mesh, pkg=None):
     assert len(les) == 1 and les[0]["type"] == "C" and les[0]["ny"] == "y", les
     _check_gap_is_open(model, pkg)
     # The value and the body come from this file, and not from the board.
-    # The runs must be different ONLY in the ESL. The ESR stays 0, thus the
-    # depth of the notch also stays a property of the board only.
+    # The runs must be different ONLY in the ESL, thus they use the same
+    # path of openEMS (ESL_REF). The ESR stays 0, thus the depth of the
+    # notch also stays a property of the board only.
     les[0]["value"] = cval
-    les[0]["esl"] = esl
+    les[0]["esl"] = esl or ESL_REF
     les[0]["esr"] = 0.0
     les[0]["package"] = "Custom"
     model["settings"] = {
         "f_start": F_START, "f_stop": F_STOP, "z0": Z0, "margin_mm": margin,
         "mesh": mesh, "n_freq": N_FREQ, "max_timesteps": 300000,
         "end_criteria": 1e-4, "lumped": True, "parasitics": True,
+        "keep_idle_body": True,
         "excite": [1],  # port 1 only: this test uses only S11 and S21
     }
     return _solve(outdir, model, tag)

@@ -16,6 +16,7 @@ the full S-matrix.
 import bisect
 import glob
 import json
+import math
 import os
 import shutil
 import sys
@@ -205,6 +206,29 @@ POLY_FEATURE_CELLS = 2
 # merge made ONE line out of the copper: -14.3%. Thus the two lines are
 # anchors, and res / 4 is 2 times the largest `tol`.
 EDGE_THIRDS = 0.25
+# **The feed of a line port must stay before the probes of its plane**
+# (B77, `_port_planes`). openEMS puts the feed on the mesh line nearest to
+# `FeedShift` from the start of the port. It puts the voltage probes on the
+# line nearest to `MeasPlaneShift` and on the line at each side of it, and
+# the current probes between them. A short port at the coarse preset holds
+# some cells only. On a port of 9 mm with cells of 1.9 to 2.6 mm (a sweep to
+# 4 GHz), `res` and half the port gave the SAME line. The source was then
+# between the two current probes. Measured on 2026-10-08 on the series board
+# of `rig_states` (1 pF), the lines counted from the start of the port:
+#
+#   feed, plane                 sum|S|^2       S21 at 1 GHz (theory -5.44 dB)
+#   2, 2 (res, half the port)   2.72 to 8.33   +0.65 dB
+#   1, 2                        0.93 to 1.02   -6.11 dB
+#   1, 3                        0.94 to 1.01   -6.03 dB
+#   a sweep to 6 GHz, 1, 3      0.91 to 1.01   -6.16 dB
+#
+# A feed on the first probe (1, 2) gives the same S-parameters, because
+# the current probes are after it. 114 ports of the boards of `validation/`
+# have it, and no port has the feed on the middle probe.
+#
+# The start, the feed and the three probes must have PORT_CELLS cells. A
+# port with fewer cells gets equal cells (`_port_room`).
+PORT_CELLS = 3
 # The margin and the law of the timestep rule are in `solverenv`. The
 # DIALOG shows the cost of an inductor before a run, and it must not import
 # this module. An import of the runner replaces `warnings.showwarning` for
@@ -535,8 +559,19 @@ def _decisions(model, res, rlc=True):
     # "category: text". The log puts "[rfsim] optimization: " in front of
     # it, and two labels in one line read badly.
     mesh = []
-    _mesh(model, ports, res, mesh)
+    lines = _mesh(model, ports, res, mesh)
     out += mesh
+    for g in ports:
+        if g["type"] not in TL_PORTS or "prop_dir" not in g:
+            continue
+        feed, plane, moved = _port_planes(
+            g, _smooth(lines["xyz".index(g["prop_dir"])], res), res)
+        if moved:
+            out.append(
+                "Port %d has its feed %.3f mm and its plane %.3f mm from "
+                "its start, because on the mesh of the %.3f mm port the "
+                "feed was on the line of the plane or after it"
+                % (g["number"], feed, plane, g["msl_len"]))
     if not s.get("lumped", True):
         out.append("No lumped element is modelled (all Model boxes are "
                    "clear), thus all gaps stay open")
@@ -1655,8 +1690,104 @@ def _mesh(model, ports, res, notes=None):
                 + [(v, RANK_FACE) for v in th_x])
     anchor_y = ([(v, RANK_FACE) for v in le_y] + via_y
                 + [(v, RANK_FACE) for v in th_y])
-    return (_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
-            _merge_close(zs, tol_z))
+    out = [_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
+           _merge_close(zs, tol_z)]
+    # A short line port gets its cells last, because only the lines of all
+    # the other rules tell how many it holds. The added lines go into the
+    # merge as all the other lines do.
+    room = _port_room(ports, out, res)
+    if room:
+        added = []
+        for g, k, vals in room:
+            (xs if k == 0 else ys).update(vals)
+            added.append("Port %d holds fewer than %d mesh cells along its "
+                         "line, thus it gets %d equal cells of %.3f mm"
+                         % (g["number"], PORT_CELLS, PORT_CELLS,
+                            g["msl_len"] / PORT_CELLS))
+        if notes is None:
+            for line in added:
+                print("[rfsim] WARNING: %s" % line, flush=True)
+        else:
+            notes += added
+        out[:2] = [_merge_close(xs, tol, anchor_x),
+                   _merge_close(ys, tol, anchor_y)]
+    return tuple(out)
+
+
+def _smooth(lines, res):
+    """Give the mesh lines of one axis of the grid, from the fixed lines.
+
+    `SmoothMeshLines` adds the lines between them. The rounding keeps a
+    line ON a copper sheet: a line at 1.5300000000000002 does not touch a
+    sheet with no thickness at 1.53, and openEMS then gives "unused
+    primitive".
+    """
+    from CSXCAD.SmoothMeshLines import SmoothMeshLines
+    return np.round(SmoothMeshLines(lines, res, 1.4), 9)
+
+
+def _port_span(g, lines):
+    """Give (the index of the start line, the direction, the cells) of a
+    line port on the mesh lines of its axis."""
+    k = "xyz".index(g["prop_dir"])
+    a, b = g["start"][k], g["stop"][k]
+    d = 1 if b > a else -1
+    i0 = int(np.argmin(np.abs(lines - a)))
+    i1 = int(np.argmin(np.abs(lines - b)))
+    return i0, d, (i1 - i0) * d
+
+
+def _port_room(ports, lines, res):
+    """Give (the port, the axis, the lines) for each short line port.
+
+    A line port must hold PORT_CELLS cells along its line: the feed, and
+    the three probes of its plane after the feed. A port with fewer cells
+    gets the lines of PORT_CELLS equal cells.
+
+    `lines` holds the fixed lines, and not the smooth ones, because a rig
+    calls `_mesh` in the Python of KiCad, which has no CSXCAD.
+    `SmoothMeshLines` makes no cell larger than `res`, thus an interval
+    of the fixed lines gives ceil(interval / res) cells or more. That
+    count is the count of the port.
+    """
+    out = []
+    for g in ports:
+        if g["type"] not in TL_PORTS or "prop_dir" not in g:
+            continue
+        k = "xyz".index(g["prop_dir"])
+        a, b = g["start"][k], g["stop"][k]
+        lo, hi = sorted((a, b))
+        span = sorted({lo, hi} | {v for v in lines[k] if lo < v < hi})
+        cells = sum(math.ceil((v1 - v0) / res - 1e-9)
+                    for v0, v1 in zip(span, span[1:]))
+        if cells >= PORT_CELLS:
+            continue
+        out.append((g, k, [a + (b - a) * i / PORT_CELLS
+                           for i in range(1, PORT_CELLS)]))
+    return out
+
+
+def _port_planes(g, lines, res):
+    """Give (FeedShift, MeasPlaneShift, moved) of a line port.
+
+    `lines` is the grid on the axis of the port. The port asks for the feed
+    at `res` and for the plane at half its length. openEMS puts each one on
+    the nearest mesh line, and that rule stays when the plane is after the
+    feed. When the two get the same line, or the feed comes after the
+    plane, the feed goes to the first line after the start. The plane goes
+    to the third line, or to the second when the port has PORT_CELLS cells.
+    Refer to PORT_CELLS for the measurement.
+    """
+    feed, plane = res, 0.5 * g["msl_len"]
+    k = "xyz".index(g["prop_dir"])
+    a = g["start"][k]
+    i0, d, cells = _port_span(g, lines)
+    kf = (int(np.argmin(np.abs(lines - (a + d * feed)))) - i0) * d
+    km = (int(np.argmin(np.abs(lines - (a + d * plane)))) - i0) * d
+    if km > kf or cells < PORT_CELLS:
+        return feed, plane, False
+    km = min(max(km, 3), cells - 1)
+    return (abs(lines[i0 + d] - a), abs(lines[i0 + d * km] - a), True)
 
 
 def _epc_split(grid, e):
@@ -1742,13 +1873,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
     grid.SetDeltaUnit(1e-3)  # the unit of the geometry: mm
 
     ports_geo = _port_geometry(model, res, quiet=quiet)
-    from CSXCAD.SmoothMeshLines import SmoothMeshLines
-    # Round the smooth mesh lines. A line at 1.5300000000000002 does not
-    # touch a copper sheet with no thickness at 1.53, and openEMS then
-    # gives "unused primitive".
     for axis, lines in zip("xyz", _mesh(model, ports_geo, res,
                                             [] if quiet else None)):
-        grid.AddLine(axis, np.round(SmoothMeshLines(lines, res, 1.4), 9))
+        grid.AddLine(axis, _smooth(lines, res))
 
     br = model["board_rect"]
     for i, d in enumerate(model["dielectric_layers"]):
@@ -1956,8 +2083,10 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             # as the direction from the strip to the plane. A CPW port and
             # a stripline port use it only to find the plane of the strip.
             # Their probes go across the gaps, or up and down.
+            feed, plane, moved = _port_planes(
+                g, np.asarray(grid.GetLines(g["prop_dir"])), res)
             kw = dict(excite=(-1 if g["type"] == "msl" else 1) if excite else 0,
-                      FeedShift=res, MeasPlaneShift=0.5 * g["msl_len"],
+                      FeedShift=feed, MeasPlaneShift=plane,
                       Feed_R=s["z0"], priority=20)
             metal = copper_prop[g["layer"]]
             args = (g["number"], metal, g["start"], g["stop"], g["prop_dir"],
@@ -1971,6 +2100,9 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
                 ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
                 note = ", %.3f mm to each plane" % g["height"]
             note = "direction " + g["prop_dir"] + note
+            if moved:
+                note += (", the feed %.3f mm and the plane %.3f mm from its "
+                         "start" % (feed, plane))
         else:
             # **The axis comes from the port.** A lumped port of the board
             # is between a pad and the plane below it, thus its axis is z.
