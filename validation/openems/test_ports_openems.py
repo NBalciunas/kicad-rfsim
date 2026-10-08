@@ -15,6 +15,8 @@ import math
 import os
 import sys
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # the repository
 sys.path.insert(0, os.path.join(ROOT, "plugins"))
@@ -233,6 +235,72 @@ def test_port_length_is_capped_by_the_copper_run():
     assert abs(g["msl_len"] - free) < 1e-9, \
         "a long copper run must not shorten the port: %.3f" % g["msl_len"]
     print("port length cap by the copper run OK (5 mm run -> 4.0 mm port)")
+
+
+def test_the_feed_of_a_short_port_stays_before_its_plane():
+    """The feed of a line port must not get the line of its plane (B77).
+
+    openEMS puts the feed on the line nearest to `res` from the start, and
+    the plane on the line nearest to half the port. The lines are those of
+    the series board of `rig_states` with a sweep to 4 GHz: the two got
+    9.5 mm, and S21 read +7.8 dB. With a sweep to 6 GHz the plane is after
+    the feed, and the rule must change nothing.
+    """
+    def port(a, b):
+        return {"prop_dir": "x", "start": [a, -10.3, 1.53],
+                "stop": [b, -9.7, 0.0], "msl_len": abs(b - a)}
+
+    lines = np.array([1.2, 3.1, 5.0, 6.875, 9.5, 12.125, 14.0, 16.4])
+    feed, plane, moved = runner._port_planes(port(5.0, 14.0), lines, 3.533)
+    assert moved and abs(feed - 1.875) < 1e-9 and abs(plane - 7.125) < 1e-9, \
+        (feed, plane, moved)
+    # The same rule in the other direction: the port of the far end.
+    lines = np.array([23.6, 26.0, 28.188, 31.25, 33.438, 35.0, 36.9])
+    feed, plane, moved = runner._port_planes(port(35.0, 26.0), lines, 3.533)
+    assert moved and abs(feed - 1.562) < 1e-9 and abs(plane - 6.812) < 1e-9, \
+        (feed, plane, moved)
+    # A port of PORT_CELLS cells: the plane goes to its second line.
+    lines = np.array([2.0, 5.0, 8.0, 11.0, 14.0, 17.0])
+    feed, plane, moved = runner._port_planes(port(5.0, 14.0), lines, 3.5)
+    assert moved and abs(feed - 3.0) < 1e-9 and abs(plane - 6.0) < 1e-9, \
+        (feed, plane, moved)
+    # The sweep to 6 GHz: openEMS puts the plane after the feed.
+    lines = np.array([3.1, 5.0, 6.476, 8.357, 10.238, 12.119, 14.0])
+    feed, plane, moved = runner._port_planes(port(5.0, 14.0), lines, 2.355)
+    assert not moved and feed == 2.355 and plane == 4.5, (feed, plane)
+    print("the feed of a short port OK")
+
+
+def test_a_short_port_gets_its_cells():
+    """A line port with fewer than PORT_CELLS cells gets equal cells.
+
+    A copper run of 3 mm caps the port at 2.4 mm, which is less than one
+    cell of RES. The feed, the plane and the probes then have no lines of
+    their own.
+    """
+    m = model("msl", copper_run=3.0)
+    m["ports"] = [m["ports"][0]]
+    ports = runner._port_geometry(m, RES)
+    g = ports[0]
+    assert abs(g["msl_len"] - 2.4) < 1e-9, g["msl_len"]
+    notes = []
+    xs = runner._smooth(runner._mesh(m, ports, RES, notes)[0], RES)
+    i0, d, cells = runner._port_span(g, xs)
+    assert cells >= runner.PORT_CELLS, (cells, xs)
+    for want in (5.8, 6.6):
+        assert near(xs, want), "no line at %.1f: %s" % (want, xs)
+    assert any("Port 1 holds fewer than" in n for n in notes), notes
+    feed, plane, _ = runner._port_planes(g, xs, RES)
+    kf = int(np.argmin(np.abs(xs - (5.0 + feed)))) - i0
+    km = int(np.argmin(np.abs(xs - (5.0 + plane)))) - i0
+    assert 0 < kf < km < cells, (kf, km, cells)
+
+    # A long port gets no line: the free port of `model`.
+    m = model("msl")
+    notes = []
+    runner._mesh(m, runner._port_geometry(m, RES), RES, notes)
+    assert not any("holds fewer" in n for n in notes), notes
+    print("a short port gets its cells OK (%d cells of 0.8 mm)" % cells)
 
 
 def test_strip_cells():
@@ -1143,6 +1211,8 @@ def test_a_state_changes_the_values():
 
 
 if __name__ == "__main__":
+    test_the_feed_of_a_short_port_stays_before_its_plane()
+    test_a_short_port_gets_its_cells()
     test_a_long_edge_gets_the_thirds()
     test_a_state_changes_the_values()
     test_a_coaxial_feed_is_flat_in_the_gap()
