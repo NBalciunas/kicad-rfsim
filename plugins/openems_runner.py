@@ -234,6 +234,26 @@ PORT_CELLS = 3
 # this module. An import of the runner replaces `warnings.showwarning` for
 # all the process. The name stays here for the rigs that read it.
 LE_STAB_MARGIN = solverenv.LE_STAB_MARGIN
+# **A lone C of C_SERIES_MIN or more uses the series path** (B79,
+# `_le_topology`). The two paths of openEMS do not give the same loop to a
+# C on a wide land. On the 2512 land of `run_shunt_openems.py packages`, a
+# lone C of 10 pF gave an L_board of 1.9901 nH on the classic path and
+# 2.2456 nH on the series path, and EMerge gave 2.5067 nH. A C with a body
+# uses the series path. Thus a body that P21 kept out moved the loop by
+# more than the body. Measured on 2026-10-08, against EMerge:
+#
+#   the board                      the classic path   the series path
+#   the 8 lands of `packages`      -4.3% to -20.6%    -4.5% to -11.1%
+#   `rig_states`, 0.5 to 2 pF      0.55 to 1.09 dB    0.47 to 1.01 dB
+#
+# **A small C on the series path diverges** at the full step. 0.01 pF got
+# to NaN on 4 of the 8 geometries of `run_stability_openems.py`, and
+# 0.015 pF on the boards of 3.2 and 6.4 mm. 0.02 pF to 1 nF stayed stable
+# on all 8. In 45000 steps, 1 pF and 10 pF did not grow more on the series
+# path than on the classic path. Thus a C below 0.1 pF, 5 times that
+# limit, stays on the classic path. The series path costs no timestep: the
+# branch has no inductance and no resistance.
+C_SERIES_MIN = 0.1e-12
 # `_diverged` calls a run NOT STABLE when the largest |u| of the last tenth
 # of the port data is too large. The limit is this multiple of the SMALLEST
 # point of the envelope of that trace.
@@ -345,7 +365,7 @@ def _open_parts(model):
 
     The EPC of an inductor stays. At GHz, a choke on a board is much above
     its own self-resonance, and there it IS that capacitance. A C without
-    other components uses the classic path, and it costs no timestep.
+    other components costs no timestep on the two paths (`_le_topology`).
 
     `settings["open_as_gap"]` = False puts all parts into the grid as
     before, for a rig that must measure the element itself.
@@ -519,9 +539,9 @@ def _decisions(model, res, rlc=True):
 
     - for each lumped element, if it goes into the grid (an open at all
       frequencies of the sweep does not: `_open_parts`);
-    - the path of openEMS that it uses (`_le_topology`). An R or a C with
-      no other component uses the classic path. An inductance, or more than
-      one component, uses the series path;
+    - the path of openEMS that it uses (`_le_topology`). An R with no other
+      component, or a C below C_SERIES_MIN with no other component, uses
+      the classic path. All the other elements use the series path;
     - the parasitics that go in with it;
     - the timestep of all the board, and its cause.
 
@@ -631,8 +651,9 @@ def _decisions(model, res, rlc=True):
                     "timestep"
                     % (ref, parts, body, band, _si(z, "ohm"), z / z0,
                        solverenv.OPEN_Z_RATIO,
-                       "only its EPC of %s stays, on the classic path"
-                       % _si(epc, "F") if epc > 0
+                       "only its EPC of %s stays, on the %s path"
+                       % (_si(epc, "F"), "series" if _le_topology(
+                           {"C": epc}, rlc) else "classic") if epc > 0
                        else "its gap stays open"))
                 continue
             if _le_topology(comp, rlc):
@@ -641,11 +662,14 @@ def _decisions(model, res, rlc=True):
                 why = ("it has an inductance" if e.get("type") in (
                     "L", "RLC") and "L" in comp else
                        "the ESL of its body is an inductance" if "L" in comp
-                       else "it has %d components" % len(comp))
+                       else "it has %d components" % len(comp)
+                       if len(comp) > 1
+                       else "it is one C of %g pF or more"
+                       % (C_SERIES_MIN * 1e12))
                 path = "the series path (LEtype 1), because %s" % why
             else:
-                path = ("the classic path (LEtype 0), because it is one R "
-                        "or one C")
+                path = ("the classic path (LEtype 0), because it is one R, "
+                        "or one C below %g pF" % (C_SERIES_MIN * 1e12))
             out.append("%s (%s%s) is in the grid, on %s. Its smallest |Z| "
                        "from %s is %s (%.2g times z0), thus it is not an "
                        "open"
@@ -776,10 +800,12 @@ def _le_topology(comp, rlc):
     and C. It removes an L with the message "Lumped Element R or C not
     specified! skipping", and that models an open circuit.
 
-    **A branch with ONE R, or ONE C, must NOT use it.** The series extension
-    integrates the current of the branch. A branch with no inductance gives
-    that integrator no opposition, and it then diverges. A larger resistance
-    diverges sooner. A measurement on the board of `run_rlc_openems.py` at the
+    **A branch with ONE R, or ONE C below C_SERIES_MIN, must NOT use it.**
+    The series extension integrates the current of the branch. A branch
+    with no inductance gives that integrator no opposition, and it then
+    diverges. A larger resistance, and a smaller capacitance, diverge
+    sooner. A lone C of C_SERIES_MIN or more uses the series path: refer to
+    C_SERIES_MIN. A measurement on the board of `run_rlc_openems.py` at the
     coarse preset, on 2026-09-22, at the full Courant step, gave this result.
     10, 50, 75 and 100 ohm are stable, and 150, 200, 500 and 1000 ohm all get
     to NaN. The 1000 ohm run used 9.5 minutes and all of the step limit of
@@ -794,7 +820,10 @@ def _le_topology(comp, rlc):
     The classic path is a small distance NEARER to the closed formula of
     `run_rlc_openems.py`: -3.81 dB against -3.84 dB, for -3.52 dB in theory.
     """
-    return {"LEtype": 1} if rlc and (len(comp) > 1 or "L" in comp) else {}
+    if rlc and (len(comp) > 1 or "L" in comp
+                or comp.get("C", 0.0) >= C_SERIES_MIN):
+        return {"LEtype": 1}
+    return {}
 
 
 def _run_length(sim_path):
@@ -1947,7 +1976,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             # board keeps the mesh that it has with the part. The EPC of an
             # inductor goes in WITHOUT the part, across all the box. At
             # GHz, a choke on a board is that capacitance, and a C without
-            # other components uses the classic path.
+            # other components costs no timestep.
             if e.get("ref") in opens:
                 comp = _components(e, para, s)
                 z = solverenv.smallest_z(comp.get("R"), comp.get("L"),

@@ -785,8 +785,7 @@ def test_an_open_part_leaves_the_grid():
     Such a part gives NO element in the XML of `build`, and its gap stays
     open. The element in the grid read S21 about 5 dB BELOW the bare gap at
     1/600 of the Courant step. An inductor with an EPC keeps only the EPC,
-    on the classic path, because at GHz a choke on a board is that
-    capacitance. A part that is not an open goes into the grid as before.
+    as a lone C, because at GHz a choke on a board is that capacitance. A part that is not an open goes into the grid as before.
     With `open_as_gap` = False, all parts go into the grid as before. The
     timestep rule must not use the same parts that `build` does not use.
     """
@@ -833,8 +832,11 @@ def test_an_open_part_leaves_the_grid():
     got, tsf = elements(type="L", value=90e-6, epc=0.2e-12)
     assert set(got) == {"epc_X1"} and tsf is None, \
         "an open choke keeps its EPC alone, got %s" % sorted(got)
+    assert float(got["epc_X1"].get("LEtype", 0)) == 1.0, \
+        "a lone C of 0.1 pF or more takes the series path: %s" % got["epc_X1"]
+    got, tsf = elements(type="L", value=90e-6, epc=0.05e-12)
     assert float(got["epc_X1"].get("LEtype", 0)) == 0.0, \
-        "a lone C takes the classic path (LEtype 0): %s" % got["epc_X1"]
+        "a lone C below 0.1 pF takes the classic path: %s" % got["epc_X1"]
     got, tsf = elements(type="L", value=10e-9)
     assert set(got) == {"le_X1"} and tsf is not None, \
         "10 nH carries the signal and stays in the grid"
@@ -918,7 +920,16 @@ def test_the_run_says_what_it_chose():
     assert ("0.3, from the Timestep field of the settings, which is more "
             "important than the rule (the rule gives 0.1581") in got[1], got
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
-    assert "only its EPC of 2.81 pF stays, on the classic path" in got[0], got
+    assert "only its EPC of 2.81 pF stays, on the series path" in got[0], got
+    # **B79**: a lone C of 0.1 pF or more uses the series path, and a
+    # smaller one the classic path. Neither one gets a factor.
+    got = lines(dict(type="C", value=1e-12), parasitics=False)
+    assert ("the series path (LEtype 1), because it is one C of 0.1 pF or "
+            "more") in got[0], got
+    assert "the full Courant step" in got[-1], got
+    got = lines(dict(type="C", value=0.05e-12), parasitics=False)
+    assert ("the classic path (LEtype 0), because it is one R, or one C "
+            "below 0.1 pF") in got[0], got
     got = lines(dict(type="L", value=10e-9), port={"direction": None})
     assert got[0].startswith("Port 1 is a lumped port, and not a msl, because it has "
                              "no track"), got
@@ -968,7 +979,7 @@ def test_a_body_that_changes_nothing_stays_out():
     than the body models: 1.67 dB at 200 ohm and 5.47 dB at 1 kohm. The ESL
     of an 0603 body changes S21 by 0.017 and 0.0013 dB. Thus a body that
     moves |Z| by `PARASITIC_MIN` or less in the sweep stays out. The part
-    then uses the classic path.
+    is then one component: a resistor uses the classic path.
 
     **The rule is accurate at a resonance.** A capacitor can have its
     series resonance with its ESL in the sweep. It then has |Z| = ESR
@@ -990,7 +1001,7 @@ def test_a_body_that_changes_nothing_stays_out():
     assert effect(cap, "C", 2.2e9, 2.3e9) > 0.9
     assert not idle(cap, "C", 1e9, 6e9)
     # 1 pF with an ESR of 0.1 ohm and no ESL: the ESR is 0.4% of |Z| at
-    # 6 GHz. Thus the capacitor uses the classic path.
+    # 6 GHz. Thus the capacitor is one component.
     assert idle({"C": 1e-12, "R": 0.1}, "C", 1e9, 6e9)
     # An inductor always uses the series path. A part with no body has
     # nothing to remove.

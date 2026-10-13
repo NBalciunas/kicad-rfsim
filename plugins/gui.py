@@ -1433,7 +1433,7 @@ class SettingsDialog(wx.Dialog):
         if kind in ("C", "L") and body_r > 0:
             comp["R"] = body_r
         # **A body that does not change its part stays out**, as in
-        # `solverenv.components`: the part then uses the classic path.
+        # `solverenv.components`: the part is then one component.
         sweep = None if whole else self._sweep()
         if sweep and solverenv.body_is_idle(comp, kind, *sweep[:2]):
             return {kind: val}

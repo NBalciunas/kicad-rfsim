@@ -193,7 +193,8 @@ def body_is_idle(comp, own, f_start, f_stop):
 
     That is a resistor or a capacitor with a body that changes |Z| by
     `PARASITIC_MIN` or less in all the sweep. The part is then ONE
-    component, thus it uses the classic path of openEMS. **All the body
+    component. Thus a resistor uses the classic path of openEMS, and a
+    capacitor gets no timestep factor from the ESL. **All the body
     goes out, or all the body stays**: a part that keeps one parasitic uses
     the series path. The other parasitics then cost no more. An inductor
     always uses the series path, thus its DCR always stays.
@@ -298,8 +299,10 @@ def components(e, para, s=None):
 
     `s` is the settings of the run. With a sweep in it, **a body that does
     not change its part stays out** (`body_is_idle`). The part is
-    then one R or one C, and it uses the classic path of openEMS. It does
-    not use the series path, which costs more than the body models.
+    then one R or one C. A lone R uses the classic path of openEMS, and not
+    the series path, which costs more than the body models. A lone C of
+    0.1 pF or more uses the series path (`openems_runner._le_topology`),
+    with no timestep factor.
     `settings["keep_idle_body"]` = True keeps all bodies, for a rig that
     must measure the series path itself. With no `s`, the body always
     stays. `_decisions` compares against that result.
