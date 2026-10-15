@@ -1,12 +1,17 @@
+# Editors and tools
 .idea/
 .claude/settings.local.json
-NOTES.md
-docs/port-geometry.png
+
+# Python
 __pycache__/
 .venv/
+
+# Notes for the developer
+NOTES.md
+
+# Generated files
+docs/port-geometry.png
 validation/*/out_*/
-# make_test_board.py writes the board, and KiCad writes the .kicad_pro
-# and .kicad_prl beside it.
 validation/*/*.kicad_pcb
 validation/*/*.kicad_pro
 validation/*/*.kicad_prl

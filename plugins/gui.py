@@ -439,7 +439,7 @@ class SettingsDialog(wx.Dialog):
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(self, label="RFsim v1.2")
+        title = wx.StaticText(self, label="RFsim v1.3")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)

@@ -8,7 +8,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 ## Features
 
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
-- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay. Clear the check box of a trace to hide it.
+- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay. Clear the checkbox of a trace to hide it.
 - Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
 - Calculate the far field: three polar cuts, a 3D pattern, Dmax, the efficiency, and the co-polarization, the cross-polarization (Ludwig 3) and the XPD.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
@@ -33,9 +33,9 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
    > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
-5) Install at least one solver (step 6, step 7 or both). The dialog grays out a solver that is not installed.
+5) Install **one solver, at least**: openEMS (step 6), EMerge (step 7) or both. The dialog grays out a solver that is not installed.
 
-6) Install openEMS (tested with v0.37.0-rc1). Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases) and extract the `openEMS` folder to `C:\openEMS`. Install [Python 3.14](https://www.python.org/downloads/), then make the venv of openEMS:
+6) (optional) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases) and extract the `openEMS` folder to `C:\openEMS`. Install [Python 3.14](https://www.python.org/downloads/), then make the venv of openEMS:
 
    ```bat
    py -3.14 -m venv C:\openEMS\venv
@@ -45,7 +45,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
    > The last command must print `ok`. A warning about the version of HDF5 is not a problem. For a different folder, set `OPENEMS_PATH`.
 
-7) Install EMerge (tested with 2.8.9). Make its venv with the Python of KiCad:
+7) (optional) Install EMerge. See the [EMerge releases](https://github.com/FennisRobert/EMerge/releases) for the newest version. Make its venv with the Python of KiCad:
 
    ```bat
    "C:\Program Files\KiCad\10.0\bin\python.exe" -m venv C:\emerge\venv
@@ -56,12 +56,20 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
 8) Restart KiCad. The plugin is now installed.
 
+### Tested versions
+
+| Software | Version                        |
+|----------|--------------------------------|
+| KiCad    | 10.0.5                         |
+| openEMS  | v0.37.0-rc1, CSXCAD v0.7.0-rc1 |
+| EMerge   | 2.8.9                          |
+
 ## Usage
 
 ![RFsim GUI](docs/example-1.png)
 
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
-2. Click the **RFsim** icon in the toolbar.
+2. Click the **RFsim** icon in the toolbar, or open Tools > External Plugins and click RFsim.
 3. Look at the preview at the top of the dialog: the ports, the R/L/C parts and the domain.
 4. Select the solver.
 5. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin (or only the area around the ports, for a large board), the run limits and the output directory.
@@ -94,8 +102,6 @@ A pad with no such gap and no track stops the run.
 
 The microstrip, the coplanar and the stripline ports measure their own line. The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds it with the effective permittivity. A lumped port has no line.
 
-The coarse preset reads a little low: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.6 ohm at fine, against 49.8 ohm from the theory.
-
 ### The substrate and the domain
 
 "KiCad's Stackup" takes εr, tanδ and the thickness of each layer from Board Setup > Physical Stackup.
@@ -117,8 +123,7 @@ The other presets make a uniform stackup. They fill εr and tanδ, and "Custom" 
 Rogers gives two εr for each grade: a stripline value and a larger design value for a microstrip.
 
 **The loss of the substrate is correct at one frequency only**, the center of the sweep.
-Over a sweep of 1 to 6 GHz, the model gave 3.1 times the real loss at 1 GHz and 0.66 times at 5.5 GHz.
-When the loss is important, put the center of the sweep at the frequency that matters, or keep the sweep narrow.
+Put the center of the sweep at the frequency that matters, or keep the sweep narrow.
 
 The domain is the board, the margin of air around it, and an absorber 8 cells deep. Copper that crosses the outer edge ends in the absorber and does not reflect.
 
@@ -166,7 +171,7 @@ Any other name gives "Custom", and "No parasitics" makes an ideal element.
 The run leaves out a body that changes |Z| of its part by 2% or less over the sweep, for example the ESL of a 1 kohm pull-up. The Optimizations view of the results names these parts.
 
 **An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet. The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
-The resonance reads about 1% high on a wide land and about 9% high on an 0402 land. A land of one mesh cell cannot hold the capacitance, and the run says so.
+A land of one mesh cell cannot hold the capacitance, and the run says so.
 
 **An inductance makes the run longer.** 0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well.
 The label under the rows of the parts gives the number before you start the run.
