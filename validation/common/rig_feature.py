@@ -2,7 +2,7 @@
 
 The rule gives N cells across a copper feature that is narrower than `res`
 and that is not in a port. **Before this file, no board of `validation/`
-could see it.** Each line of all the other boards has a port.
+saw it.** Each line of all the other boards has a port.
 `_feature_lines` does not divide a feature that has a mesh line. Thus the
 port rule (`MSL_STRIP_CELLS`) made those cells, and not this rule.
 

@@ -2,9 +2,9 @@
 series capacitor gives a line, for three values of it.
 
 A phase shifter is a set of states of its parts: a varactor at more than
-one bias, or PIN diodes that are on and off. The plugin runs each state as
-a run of its own (`solverenv.apply_state`), in a folder of its own, and the
-results window shows the phase of each state LESS the phase of State 1.
+one bias, or PIN diodes on and off. The plugin runs each state as a run of
+its own (`solverenv.apply_state`), in a folder of its own. The results
+window shows the phase of each state LESS the phase of State 1.
 The line, the pads and the ports are the same in each state, thus their
 phase goes out of that difference.
 
@@ -44,7 +44,7 @@ Z0 = 50.0
 STATES = [("1 pF", 1e-12), ("0.5 pF", 0.5e-12), ("2 pF", 2e-12)]
 # The sweep of `rig_rlc`, which that rig validates on this board. A sweep
 # to 4 GHz at coarse gave sum|S|^2 = 8.3 on this board with no state at
-# all: the microstrip ports of 9 mm (0.3 of the distance between them)
+# all. The microstrip ports of 9 mm (0.3 of the distance between them)
 # then have the plane of the measurement 1 mm after the feed (B77).
 CHECK_F = (1e9, 2e9, 3e9)
 # The limit against the closed form, in degrees. Measured on 2026-10-06 at

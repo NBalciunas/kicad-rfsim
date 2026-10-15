@@ -685,9 +685,14 @@ def test_a_series_rlc_part_is_one_element():
     cap = element(type="C", value=1e-11, esl=1e-9, esr=0.5)
     assert rlc == cap, "the series RLC %s against the capacitor %s" % (rlc, cap)
     assert float(rlc.get("LEtype", "nan")) == 1.0, rlc
-    rl = element(type="RLC", value=None, r=0.5, l=1e-9, c=None)
-    ind = element(type="L", value=1e-9, esr=0.5)
+    # A DCR of 5 ohm changes |Z| of 1 nH by 28% at 1 GHz, thus it stays in
+    # the element. 0.5 ohm changes it by 0.3%, and the inductor loses it.
+    rl = element(type="RLC", value=None, r=5.0, l=1e-9, c=None)
+    ind = element(type="L", value=1e-9, esr=5.0)
     assert rl == ind, "the series RL %s against the inductor %s" % (rl, ind)
+    bare = element(type="L", value=1e-9, esr=0.5)
+    assert "R" not in bare and float(bare["L"]) == 1e-9, \
+        "an idle DCR stays in the inductor: %s" % bare
     factor = runner._time_step_factor(
         {"settings": {"lumped": True, "parasitics": True},
          "lumped_elements": [{"type": "RLC", "value": None, "l": 100e-9}]})
@@ -922,7 +927,7 @@ def test_the_run_says_what_it_chose():
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
     assert "only its EPC of 2.81 pF stays, on the series path" in got[0], got
     # **B79**: a lone C of 0.1 pF or more uses the series path, and a
-    # smaller one the classic path. Neither one gets a factor.
+    # smaller one the classic path. The two get no factor.
     got = lines(dict(type="C", value=1e-12), parasitics=False)
     assert ("the series path (LEtype 1), because it is one C of 0.1 pF or "
             "more") in got[0], got
@@ -1003,9 +1008,22 @@ def test_a_body_that_changes_nothing_stays_out():
     # 1 pF with an ESR of 0.1 ohm and no ESL: the ESR is 0.4% of |Z| at
     # 6 GHz. Thus the capacitor is one component.
     assert idle({"C": 1e-12, "R": 0.1}, "C", 1e9, 6e9)
-    # An inductor always uses the series path. A part with no body has
-    # nothing to remove.
-    assert not idle({"L": 10e-9, "R": 1e-6}, "L", 1e9, 6e9)
+    # An inductor loses a DCR that changes nothing (B82): the series path
+    # of openEMS can grow on an L with a small R. 10 nH is 62.8 ohm at
+    # 1 GHz, thus 1 ohm is 0.013% and 20 ohm is 4.9%. A low start of the
+    # sweep keeps the DCR. A part with no body has nothing to remove.
+    assert idle({"L": 10e-9, "R": 1.0}, "L", 1e9, 6e9)
+    assert not idle({"L": 10e-9, "R": 20.0}, "L", 1e9, 6e9)
+    assert not idle({"L": 10e-9, "R": 1.0}, "L", 1e7, 6e9)
+    assert abs(effect({"L": 2e-9, "R": 0.1}, "L", 0.5e9, 5e9)
+               - 1.266e-4) < 1e-6
+    # With an EPC the DCR is the loss of the tank, thus it stays.
+    coil = dict(lumped(0.5, 0.6), ref="X1", type="L", value=10e-9,
+                package="Custom", esl=0.0, esr=1.0)
+    sweep = {"f_start": 1e9, "f_stop": 6e9}
+    assert solverenv.components(coil, True, sweep) == {"L": 10e-9}
+    assert solverenv.components(dict(coil, epc=0.28e-12), True, sweep) \
+        == {"L": 10e-9, "R": 1.0}
     assert not idle({"R": 1000.0}, "R", 1e9, 6e9)
 
     # The timestep rule and the element of `build` read the same branch.
@@ -1038,6 +1056,35 @@ def test_a_body_that_changes_nothing_stays_out():
           "resonance inside the sweep keeps it)")
 
 
+def test_the_warnings_name_the_inductors():
+    """B81 and B82: the advice of a warning names the branches that cause it.
+
+    An inductor with no C in series can ramp after the pulse
+    (`_dc_inductors`). A C in the branch blocks DC. An L with an R and no C
+    can diverge (`_lr_branches`), and a resistor with an ESL is such a
+    branch as well. A part that is an open stays out of the grid.
+    """
+    def run_of(*parts):
+        s = {"f_start": 1e9, "f_stop": 6e9, "z0": 50.0, "lumped": True,
+             "parasitics": True}
+        es = []
+        for i, p in enumerate(parts):
+            e = lumped(0.5, 0.6)
+            e.update(dict(dict(ref="X%d" % (i + 1), package="Custom",
+                               esl=0.0, esr=0.0), **p))
+            es.append(e)
+        return {"settings": s, "lumped_elements": es, "ports": []}
+    m = run_of(dict(type="L", value=10e-9),
+               dict(type="L", value=10e-9, esr=20.0),
+               dict(type="C", value=10e-12, esl=0.5e-9, esr=0.05),
+               dict(type="R", value=50.0, esl=0.5e-9),
+               dict(type="L", value=90e-6))
+    assert runner._dc_inductors(m) == ["X1", "X2"], runner._dc_inductors(m)
+    assert runner._lr_branches(m) == ["X2", "X4"], runner._lr_branches(m)
+    print("the warnings name the inductors OK (a C blocks DC; 90 uH is an "
+          "open)")
+
+
 def test_the_mesh_says_what_it_chose():
     """B56: the decisions of the mesh also go into `_decisions`.
 
@@ -1068,7 +1115,7 @@ def test_the_mesh_says_what_it_chose():
 def coax_model(side="B.Cu", direction=(1, 0)):
     """Give a model with ONE coaxial feed: a through-hole pad of 4.286 mm
     with a drill of 1.27 mm at (7, -10), in a clearance of r 3.5 mm on
-    B.Cu, which is the geometry of the probe of a patch."""
+    B.Cu. That is the geometry of the probe of a patch."""
     m = model("coax", x=7.0, y=-10.0, layer="F.Cu", ref_layer="In1.Cu",
               ref_layer2=None, height=None, direction=None,
               track_width=None, width=4.286, length=4.286, drill=1.27,
@@ -1089,7 +1136,7 @@ def test_a_coaxial_feed_is_flat_in_the_gap():
     the pad to the adjacent layer.
 
     The box goes from the copper around the pad (the start) to the pad
-    (the stop), flat on B.Cu, on the axis of the measured gap. openEMS
+    (the stop). It is flat on B.Cu, on the axis of the measured gap. openEMS
     measures V(stop) - V(start), thus the pad is positive, as for the
     lumped port of an SMD pad. Its width is the barrel: the box and the via
     share their surface lines, thus the barrel keeps its three lines. The
@@ -1129,7 +1176,7 @@ def test_a_coaxial_feed_is_flat_in_the_gap():
                             "port across the gap of 1.357 mm") for t in got), got
     assert solverenv.current_layers(m["ports"][0]) == [
         "F.Cu", "In1.Cu", "B.Cu"], solverenv.current_layers(m["ports"][0])
-    # A side with no gap gives a lumped port, and the run says so.
+    # A side with no gap gives a lumped port, and the run tells it.
     g = runner._port_geometry(coax_model(side="F.Cu"), RES, quiet=True)[0]
     assert g["type"] == "lumped" and g["fallback"].startswith("coax"), g
     # A narrow gap: a pad of 1.7 mm in r 1.1 mm. The box is narrower than
@@ -1167,12 +1214,12 @@ def test_a_coaxial_feed_in_the_xml():
 
 
 def test_a_long_edge_gets_the_thirds():
-    """F8: a long copper edge has no line ON it, but one line 1/3 of a cell
-    in the copper and one 2/3 of a cell out of it, with a cell of
-    EDGE_THIRDS * res. A narrow strip keeps the lines on its edges (the
-    rules of the features and of the ports hold them), and so does an edge
-    that a port box holds. The two lines are anchors: the merge keeps
-    them on their coordinates."""
+    """F8: a long copper edge has no line ON it. It has one line 1/3 of a
+    cell in the copper and one 2/3 of a cell out of it, with a cell of
+    EDGE_THIRDS * res. A narrow strip keeps the lines on its edges, because
+    the rules of the features and of the ports hold them. The same is true
+    for an edge that a port box holds. The two lines are anchors: the merge
+    keeps them on their coordinates."""
     d = runner.EDGE_THIRDS * RES
     m = model("msl")
     # x 15 to 25: the boxes of the two ports end at x 14 and 26.
@@ -1247,5 +1294,6 @@ if __name__ == "__main__":
     test_an_open_part_leaves_the_grid()
     test_the_run_says_what_it_chose()
     test_a_body_that_changes_nothing_stays_out()
+    test_the_warnings_name_the_inductors()
     test_the_mesh_says_what_it_chose()
     print("PASS")

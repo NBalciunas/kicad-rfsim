@@ -1,7 +1,7 @@
-"""The location of openEMS and EMerge, the Python that must run each
-solver, the timestep rule of a lumped inductor, and the rules that the
-two runners share: the version of model.json, the R, L and C of a part,
-and the Touchstone writer.
+"""The location of openEMS and EMerge, and the Python that must run each
+solver. Also the timestep rule of a lumped inductor. Also the rules that
+the two runners share: the version of model.json, the R, L and C of a
+part, and the Touchstone writer.
 
 Two processes import this module: the pcbnew plugin, and the runner in its
 own Python. Thus it must not import pcbnew, wx or numpy. Each value that
@@ -155,8 +155,9 @@ def parasitic_effect(comp, own, f_start, f_stop):
     """Give the largest change of |Z| in the sweep that the body causes.
 
     `comp` has the R, the L and the C of the branch in SI. `own` is the key
-    of the part itself: "R" or "C". The value is a part of |Z| of the part
-    ONLY, thus 0.02 is 2%.
+    of the part itself: "R", "L" or "C". The value is a part of |Z| of the
+    part ONLY, thus 0.02 is 2%. The DCR of an inductor changes |Z| most at
+    the start of the sweep, where wL is smallest.
 
     The value is accurate, and it uses no samples. The ratio of the two |Z|
     has its largest and smallest values at the edges of the sweep. For a
@@ -176,7 +177,7 @@ def parasitic_effect(comp, own, f_start, f_stop):
 
     def ratio(w):
         x = w * l - (1.0 / (w * c) if c else 0.0)
-        alone = comp[own] if own == "R" else 1.0 / (w * c)
+        alone = {"R": comp[own], "L": w * l}.get(own) or 1.0 / (w * c)
         return math.hypot(r, x) / alone
 
     ws = [2 * math.pi * f_start, 2 * math.pi * f_stop]
@@ -191,15 +192,33 @@ def parasitic_effect(comp, own, f_start, f_stop):
 def body_is_idle(comp, own, f_start, f_stop):
     """Give True when the body of a part can stay out of its element.
 
-    That is a resistor or a capacitor with a body that changes |Z| by
-    `PARASITIC_MIN` or less in all the sweep. The part is then ONE
-    component. Thus a resistor uses the classic path of openEMS, and a
-    capacitor gets no timestep factor from the ESL. **All the body
-    goes out, or all the body stays**: a part that keeps one parasitic uses
-    the series path. The other parasitics then cost no more. An inductor
-    always uses the series path, thus its DCR always stays.
+    That is a part with a body that changes |Z| by `PARASITIC_MIN` or less
+    in all the sweep. The part is then ONE component. Thus a resistor uses
+    the classic path of openEMS, and a capacitor gets no timestep factor
+    from the ESL. **All the body goes out, or all the body stays**: a part
+    that keeps one parasitic uses the series path. The other parasitics
+    then cost no more.
+
+    **An inductor loses a DCR that changes nothing** (B82, 2026-10-14). An
+    inductor always uses the series path, and the series path of openEMS
+    does not hold an L with a small R and no C. On the board of
+    `rig_shunt two` (C 4.7 pF and L 2 nH in series to ground, coarse), at
+    the factor of the inductor rule, 15 ns, the verdict of `_diverged`:
+
+        the DCR of 2 nH    0      0.01   0.1         1 ohm
+        the result         ok     ok     DIVERGES    DIVERGES
+
+    With 0.1 ohm and 1e-4, the energy gets to -33.5 dB only and then goes
+    to inf at 33 ns. With 0.1 ohm the limit of the factor on that board is
+    near 0.33, against 0.354 of the rule; 0 ohm is stable at 0.5. The
+    same L with C1 as copper diverges. A C with its ESL and ESR, and a
+    resistor of 50 ohm with an ESL, are stable on the same board. The same
+    is true for 2 nH + 0.1 ohm on the one-part shunt board and in series
+    in a line (to 3 ohm). The DCR of 0.1 ohm changes |Z| of 2 nH by 0.01%
+    from 0.5 GHz, thus the run loses nothing that it can show. An
+    inductor with an EPC keeps its DCR (`components`).
     """
-    if own not in ("R", "C") or len(comp) < 2:
+    if own not in ("R", "L", "C") or len(comp) < 2:
         return False
     return parasitic_effect(comp, own, f_start, f_stop) <= PARASITIC_MIN
 
@@ -299,7 +318,7 @@ def components(e, para, s=None):
 
     `s` is the settings of the run. With a sweep in it, **a body that does
     not change its part stays out** (`body_is_idle`). The part is
-    then one R or one C. A lone R uses the classic path of openEMS, and not
+    then one R, one L or one C. A lone R uses the classic path of openEMS, and not
     the series path, which costs more than the body models. A lone C of
     0.1 pF or more uses the series path (`openems_runner._le_topology`),
     with no timestep factor.
@@ -320,7 +339,12 @@ def components(e, para, s=None):
     comp = {e["type"]: e["value"]}
     if para:
         comp.update(parasitic_components(e))
-    if (s and not s.get("keep_idle_body") and s.get("f_start")
+    # **The DCR of an inductor with an EPC stays**: it is the loss of the
+    # tank at the self-resonance. |Z| of the branch does not show that loss.
+    # A tank with no loss rings for hundreds of nanoseconds, and a window
+    # that cuts the ring gives more power out than in.
+    tank = e["type"] == "L" and para and e.get("epc")
+    if (s and not s.get("keep_idle_body") and not tank and s.get("f_start")
             and s.get("f_stop") and body_is_idle(
                 comp, e["type"], s["f_start"], s["f_stop"])):
         return {e["type"]: e["value"]}
@@ -330,7 +354,7 @@ def components(e, para, s=None):
 # ------------------------------------------------ the states of the parts
 # F30: the parts of the board get more than one set of values, for example
 # the states of a phase shifter. Each state is a run of its own in the
-# folder STATE_DIR % k of the output directory, and STATES_FILE in the
+# folder STATE_DIR % k of the output directory. STATES_FILE in the
 # output directory lists them. State 1 is the values of the rows of the
 # dialog, and it is the reference of the views.
 STATES_FILE = "states.json"
@@ -365,15 +389,16 @@ def apply_state(model, state):
 
 
 # The name of a current view in each excN folder is this prefix, the copper
-# layer and ".h5" (F4): the current of the sheet in A/m, in the format of
-# Ef.h5. The two runners write it, and the results window reads it.
+# layer and ".h5" (F4). The view is the current of the sheet in A/m, in the
+# format of Ef.h5. The two runners write it, and the results window reads
+# it.
 CURRENT_PREFIX = "Jf_"
 
 
 def current_layers(p):
     """Give the copper layers of the current views of the port `p`: its
     layer and its reference planes, with no copy. The reference planes
-    carry the return path. A coaxial feed adds the layer of its gap."""
+    have the return path. A coaxial feed adds the layer of its gap."""
     side = p.get("coax_side") if p.get("type") == "coax" else None
     return list(dict.fromkeys(
         l for l in (p["layer"], p["ref_layer"], p.get("ref_layer2"), side)
@@ -391,38 +416,43 @@ def coax_box(p, z_of, surface=1.0):
     the pad and that copper**, flat on the layer of that side. Thus the
     current goes from the copper around the pad into the pad, and then
     through the barrel of the hole to the other layers. A port from the pad
-    to the adjacent layer cannot model this: on that layer, the copper
+    to the adjacent layer cannot model this. On that layer, the copper
     below the pad is the ring of the pad itself.
 
     `board_reader` measures the gap on each outer layer (`p["coax"]`). The
     box is on the axis of that measurement. It goes from the edge of the
-    pad (`r_in`) to the edge of the copper around it (`r_out`), and it is
+    pad (`r_in`) to the edge of the copper around it (`r_out`). It is
     as wide as the hole, which is the pin. `surface` makes the width a
     little smaller: openEMS gives it the factor that puts the surface lines
-    of a via in the barrel, thus the box and the barrel share those lines.
+    of a via in the barrel. Thus the box and the barrel share those lines.
 
     **A narrow gap makes the box narrower.** The corners of the box (and of
     the tab below) must stay in the middle of the gap, at r_in + gap / 2 or
-    less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm,
-    and a box as wide as its drill of 1.27 mm put the corner of the tab
+    less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm.
+    A box as wide as its drill of 1.27 mm put the corner of the tab
     0.04 mm from the ground. One cell of the mesh then joined the pin to
     the ground, and the port read a short circuit.
 
     **The start is on the copper around the pad, and the stop is on the
     pad.** openEMS measures the voltage of a lumped port as V(stop) -
-    V(start). Thus the pad is positive against the copper around it, as it
-    is for the lumped port of an SMD pad, which goes from the reference
-    plane up to the pad.
+    V(start). Thus the pad is positive against the copper around it. The
+    same is true for the lumped port of an SMD pad, which goes from the
+    reference plane up to the pad.
 
     The result is None when the port has no gap on its side. Else it is a
-    dict: `start` and `stop` (x, y, z in mm), `exc` ("x" or "y"), `sign`
-    (+1 or -1: from the copper around the pad to the pad, along `exc`),
-    `tab` (x0, y0, x1, y1: a strip of copper from the axis of the hole to
-    the box), `z`, `gap`, `width`, `centre` (the axis of the hole), `r_in`
-    and `r_out`.
+    dict with these keys:
+
+    - `start` and `stop`: x, y, z in mm.
+    - `exc`: "x" or "y".
+    - `sign`: +1 or -1, from the copper around the pad to the pad, along
+      `exc`.
+    - `tab`: x0, y0, x1, y1 of a strip of copper from the axis of the hole
+      to the box.
+    - `z`, `gap`, `width`, `r_in` and `r_out`.
+    - `centre`: the axis of the hole.
 
     **The tab makes the edge of the pad straight at the box.** A round pad
-    touches the face of the box at ONE point: at the corners of the box,
+    touches the face of the box at ONE point. At the corners of the box,
     the edge of the pad is a little nearer to the axis. The tab is copper
     from the axis to the face, as wide as the box, thus the box touches the
     pad along all its face. The tab adds 0.1 mm or less of copper at the
@@ -524,8 +554,8 @@ def polarization(grid, cuts, phi3, scale):
     phi).
 
     **The two runners give the far field of each port the scale of its
-    field views**: rE in V, for a wave of 1 sqrt(W) peak (0.5 W)
-    incident at the port. Thus the complex fields of two ports add: a
+    field views**. That is rE in V, for a wave of 1 sqrt(W) peak (0.5 W)
+    incident at the port. Thus the complex fields of two ports add. A
     feed of the two in phase, or with 90 degrees between them, is possible
     with no new run.
     """
@@ -641,12 +671,12 @@ def solver_python():
 
 
 # **The solvers of the plugin**, in the sequence of the dialog. Each one has
-# the name that the dialog shows, its runner in this folder, the modules
-# that the runner imports, and the function that finds its Python (None:
-# the Python of KiCad). The plugin needs one of them, not all: the dialog
-# greys out a solver whose Python does not have its modules. A new solver
-# is one more entry here, and a runner that reads model.json and writes
-# results.sNp. A model with no "solver" key uses openEMS.
+# the name that the dialog shows, its runner in this folder and the modules
+# that the runner imports. It also has the function that finds its Python
+# (None: the Python of KiCad). The plugin must have one of them, not all:
+# the dialog greys out a solver if its Python does not have its modules. A
+# new solver is one more entry here, and a runner that reads model.json and
+# writes results.sNp. A model with no "solver" key uses openEMS.
 SOLVER_INFO = {
     "openems": {"name": "openEMS (FDTD)",
                 "runner": "openems_runner.py",

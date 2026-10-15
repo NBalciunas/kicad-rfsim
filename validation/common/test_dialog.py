@@ -27,7 +27,7 @@ import board_reader  # noqa: E402
 import gui  # noqa: E402
 
 # The board of the dialog comes from `make_lumped_board.make`. The
-# tests make it when it is not there, thus they need no solver run.
+# tests make it when it is not there, thus no solver run is necessary.
 BOARD = os.path.join(HERE, "out_dialog", "series_r.kicad_pcb")
 if not os.path.isfile(BOARD):
     import make_lumped_board  # noqa: E402
@@ -117,7 +117,7 @@ def test_edit_gives_custom_and_not_no_parasitics():
 
     _on_para_edit selected `GetCount() - 1`, and the LAST entry of that
     choice is "No parasitics"; "Custom" is the entry before it. Thus a
-    value that the user typed became an IDEAL element: _para_value gives
+    value that the user typed became an IDEAL element. _para_value gives
     0 for "No parasitics", and model.json then held 0 and 0 with no
     message.
     """
@@ -625,7 +625,7 @@ def test_the_run_window_keeps_its_log():
     """RunDialog writes each line that it shows to run.log.
 
     The window closes immediately when a run succeeds. Thus before this
-    file, its log was gone. Nobody could read again the decisions of the
+    file, its log was gone. Nobody was able to read again the decisions of the
     run, the thread count and how each excitation ended. The file must be
     complete and CLOSED when ShowModal returns. A run that stops with an
     error must also tell it in the file.
@@ -783,7 +783,7 @@ def test_the_solver_choice_reaches_the_settings():
     s = d.get_settings()
     assert s["solver"] == "openems", s["solver"]
     assert not d.fem_points.IsEnabled() and d.max_steps.IsEnabled()
-    # The body of R1 (0.4 nH) costs openEMS run time, and the label says so.
+    # The body of R1 (0.4 nH) costs openEMS run time, and the label tells it.
     assert "times longer" in d.lumped_warn.GetLabel(), d.lumped_warn.GetLabel()
     d.solver.SetSelection(gui.SOLVERS.index("emerge"))
     fire(d.solver, wx.EVT_RADIOBOX)
@@ -795,7 +795,7 @@ def test_the_solver_choice_reaches_the_settings():
     d.fem_points.SetValue(15)
     s = d.get_settings()
     assert s["solver"] == "emerge" and s["fem_points"] == 15, s
-    # A wx.SpinCtrl got a size of 0 x 0 when the dialog moved it into its
+    # A wx.SpinCtrl got the dimensions 0 x 0 when the dialog moved it into its
     # scrolled body, thus the row showed a label and no field.
     d.Show()
     wx.Yield()
@@ -823,7 +823,7 @@ def test_the_solver_choice_reaches_the_settings():
 
 
 def test_a_missing_solver_is_greyed_out():
-    """The plugin needs one solver, not all. A solver that is not installed
+    """The plugin must have one solver, not all. A solver that is not installed
     stays in the list, greyed out, with its cause in the tooltip and in the
     line below. The first solver that can run is the default. With no
     solver that can run, Run refuses."""
@@ -864,7 +864,7 @@ def test_a_missing_solver_is_greyed_out():
 
 def test_the_subregion_crops_the_domain():
     """F20: "Only the area around the ports" is off by default, and it
-    reaches the settings. `extract` then makes the domain the box of the
+    gets to the settings. `extract` then makes the domain the box of the
     port pads plus the margin and the band, and not the full board."""
     d = dialog()
     assert d.get_settings()["subregion"] is False
@@ -1180,9 +1180,9 @@ def test_the_srf_field_belongs_to_an_inductor():
 
 
 def test_open_parts_have_one_line():
-    """The parts that are open over the sweep share one line: their names
-    up to 3 parts, and "Multiple components (N)" above 3, with the names
-    in the tooltip."""
+    """The parts that are open across the sweep share one line. It has
+    their names up to 3 parts, and "Multiple components (N)" above 3. The
+    tooltip then has the names."""
     d = dialog([unknown("D%d" % k) for k in range(1, 5)])
     for n in range(1, 5):
         r = rlc_row(d, n)
@@ -1454,7 +1454,7 @@ def test_the_states_of_the_parts():
 
 def test_the_run_window_runs_each_state():
     """F30: the run window runs a list of (title, command) one after the
-    other, with each title in the log, and it stops at the first error."""
+    other, with each title in the log. It stops at the first error."""
     import tempfile
     tmp = tempfile.mkdtemp()
     path = os.path.join(tmp, "run.log")

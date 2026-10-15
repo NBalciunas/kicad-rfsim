@@ -38,7 +38,7 @@ def _solver_env(solver):
 def _solver_state():
     """Give {solver: None when it can run, or the cause when it cannot}.
 
-    The plugin needs one solver and not all, thus the dialog greys out a
+    The plugin must have one solver and not all, thus the dialog greys out a
     solver with a cause. A subprocess for each solver uses find_spec, which
     does not import the extensions: a missing openEMS DLL does not look like
     a missing package. The subprocesses run at the same time, thus the

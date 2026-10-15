@@ -219,8 +219,8 @@ def make_zone_holes(path, void=True):
 
 
 # The probe-fed patch of kicad-rfgen ("Microstrip Patch Antenna (Dual
-# Coaxial Feed)", its defaults): a square patch on F.Cu, a square ground
-# on B.Cu, and the pin of an SMA through a plated hole. The pad is 4.286 mm
+# Coaxial Feed)", its defaults). It has a square patch on F.Cu, a square
+# ground on B.Cu, and an SMA pin through a plated hole. The pad is 4.286 mm
 # with a drill of 1.27 mm (the pin), and the ground keeps a clearance of r
 # 3.5 mm around it. The feed is 7.286 mm from the centre.
 PATCH, GROUND = 28.314, 37.914
@@ -235,8 +235,8 @@ def make_probe_patch(path, feed="coax", dual=False, ground=True,
 
     `feed` is "coax": the pad is a through-hole pad of `pad` mm, and the
     ground keeps a clearance of radius `clear` around it. Or it is "pad":
-    an SMD pad of the pin dimension on F.Cu and a SOLID ground below it,
-    which is the probe of the openEMS tutorial of a patch: a lumped port
+    an SMD pad of the pin dimension on F.Cu and a SOLID ground below it.
+    That is the probe of the openEMS tutorial of a patch: a lumped port
     from the plane to the patch. A coaxial feed with a small pad and a
     small clearance is almost that probe. `dual` adds the second feed, on
     the y axis. `ground=False` leaves out the ground, for the guard.
@@ -307,7 +307,7 @@ def make_cpw(path, length=X1 - X0, fence=False):
     `fence` puts a row of vias along each coplanar ground, down to B.Cu.
     **The board of EMerge must have it.** A lumped port refers to B.Cu
     only. Without the vias, the two coplanar grounds float, and the line
-    carries a mode between a microstrip and a CPW: EMerge read eps_eff
+    has a mode between a microstrip and a CPW. EMerge read eps_eff
     3.21 against 2.88 for a CPW. The CPW port of openEMS drives the mode
     of a CPW itself, and there the vias do not change Z0.
 

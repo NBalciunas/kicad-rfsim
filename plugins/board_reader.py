@@ -112,10 +112,10 @@ _AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 # a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
 # than this limit is not a coplanar ground.
 MAX_CPW_GAP = 2.0
-# The line port of openEMS is symmetric: a stripline strip at the center
-# between its two planes, and a CPW with the same gap on its two sides. A
-# port whose two sides differ by more than this part, |a - b| / (a + b),
-# gets a warning.
+# The line port of openEMS is symmetric. A stripline strip is at the center
+# between its two planes, and a CPW has the same gap on its two sides. A
+# port with two sides that are different by more than this part,
+# |a - b| / (a + b), gets a warning.
 ASYM_WARN = 0.25
 # The largest gap of a coaxial feed: between a through-hole pad and the
 # copper around it, on the side of the connector. The port is a lumped
@@ -535,14 +535,15 @@ def _add_outline(ps, pts):
 def _copper_polys(board, layer_id, region):
     """Give the copper of one layer in `region`: (polygons, n_clipped).
 
-    **KiCad makes the copper** (B3 F10 P9):
+    **KiCad makes the copper** (B3 F10 P9).
     `BOARD.ConvertBrdLayerToPolygonalContours` gives each item of the layer
-    in C++: the tracks, arcs, vias, pads, footprint shapes, zones, board
-    shapes and the text on copper, with the maximum error of the board.
+    in C++, with the maximum error of the board. The items are the tracks,
+    arcs, vias, pads, footprint shapes, zones, board shapes and the text on
+    copper.
     The code before it made the polygons itself. On the boards of the rigs
-    the two agree to 0.13%, and the curves of KiCad are more exact. The
+    the two agree to 0.13%, and the curves of KiCad are more accurate. The
     code before made a non-plated hole into copper (11% of the copper of a
-    board with 4 mounting holes), and a filled shape lost its outline (2%
+    board with 4 mounting holes). Also, a filled shape lost its outline (2%
     of a filled rectangle). **`Simplify` must come after the converter**:
     before it, a track and its pads overlap.
 
@@ -614,7 +615,7 @@ def _ray_hits(px, py, axis, sign, polys):
     direction of `sign`. The polygons are the copper of one layer. Thus
     they are fractured, and one polygon is not on top of a different one.
 
-    The function uses the half-open rule of the standard crossing test.
+    The function uses the half-open rule of the standard even-odd test.
     Thus a ray through a vertex gives one hit, and not two. The parity of
     the hits stays correct: an odd number of hits shows that the start
     point is in the copper.
@@ -721,7 +722,7 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
 
     The function moves along the direction in steps. It gives the distance
     to the LAST point that is on copper. An odd number of ray hits shows
-    that a point is in the copper, which is the standard crossing test. The
+    that a point is in the copper, which is the standard even-odd test. The
     steps are more reliable than one ray. `Fracture` divides the copper
     into polygons that share an edge, thus a single ray can give a hit
     where the copper does not end.
@@ -765,8 +766,8 @@ def _barrels(board, region, z_top, z_bottom):
     **A plated hole is a barrel of copper from the top layer to the bottom
     layer.** Before this, the model had the barrels of the vias only. The
     rings of a through-hole pad were then pieces of copper on each layer
-    that touch nothing: the pin of a connector did not connect its two
-    sides, and the ground pins of a connector did not connect the planes.
+    that touch nothing. Thus the pin of a connector did not connect its two
+    sides, and its ground pins did not connect the planes.
 
     The barrel is a cylinder of the drill. A slot gets the smaller of its
     two dimensions. The hole is at the position of the pad: the offset of
@@ -864,9 +865,9 @@ def _reference_at_pad(p, names, polygons, box):
     """Give (ref_layer, ref_layer2) of the port `p`, with a reference layer
     that has copper at the pad.
 
-    `_port` reads the stackup alone, thus the reference of a pad on an inner
+    `_port` reads only the stackup, thus the reference of a pad on an inner
     layer is always the layer below it. When that layer has no copper at the
-    pad and the layer above has, the two change places: the ground plane of
+    pad and the layer above has, the two change places. The ground plane of
     such a board is above the strip. The layer below then becomes the second
     plane of a stripline, and extract() tests it as it tests each second
     plane. `names` are the copper layers from the top, and `box` is the box
@@ -1008,7 +1009,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
 
     The result is (elements, warnings, notes). A warning is a problem
     that the user must see before the run. A note is a decision that the
-    run made by itself, and it goes to the Optimizations list of the run
+    run made by itself. It goes to the Optimizations list of the run
     and not into a message box. Each element is a box that bridges
     the gap between the two pads of the part. The box is parallel to the
     nearest Cartesian axis, because openEMS lets current flow along one
@@ -1065,7 +1066,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
-            # The barrels of the pads are in the model (`_barrels`), but
+            # The barrels of the pads are in the model (`_barrels`). But
             # a lumped element is a box on ONE copper layer, between two
             # pads on that layer.
             if kind:
@@ -1235,8 +1236,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     of the two is missing, the depth is `margin_mm`. That is the depth that
     the plugin made before 2026-09-20.
 
-    `subregion` (F20) makes the domain the box of the port pads alone, and
-    not the full board. The copper, the vias and the R/L/C parts outside
+    `subregion` (F20) makes the domain only the box of the port pads, and
+    not the full board. The copper, the vias and the R/L/C parts out of
     it are not in the model, because each of them tests `region`.
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate,
@@ -1252,7 +1253,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # boards make this operation too slow.
     #
     # **A subregion (F20) keeps the box of the port pads.** On a 4-layer
-    # board of GitHub PR #6 it took 564 polygons to 142, 258 vias to 98 and
+    # board of GitHub PR #6 it decreased 564 polygons to 142, 258 vias to 98 and
     # 44 parts to 12. The copper that its edge cuts ends in the absorber,
     # as at the edge of the full domain.
     brd = board.GetBoardEdgesBoundingBox()
@@ -1771,8 +1772,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
                      0.0, 0.0, [1, 0], 1.1) is None, "gap of 4 mm"
     assert _coax_gap([_DISC], 0.0, 0.0, [1, 0], 2.2) is None, "no ground"
     # The sides of a dual-polarized patch: the pad at +x of the centre of
-    # the board gets +x on B.Cu (the four gaps tie, and +x goes away from
-    # the centre). F.Cu is the patch, thus it has no side.
+    # the board gets +x on B.Cu. The four gaps tie, and +x goes away from
+    # the centre. F.Cu is the patch, thus it has no side.
     _shift = [[[x + 7.0, y] for x, y in q] for q in _SMA]
     _sides = _coax_sides(7.0, 0.0, (2.143, 2.143),
                          {"F.Cu": [_rect(-14.0, -14.0, 14.0, 14.0)],

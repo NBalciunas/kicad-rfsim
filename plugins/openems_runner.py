@@ -114,9 +114,9 @@ FLAT_MM = 1e-7
 #
 # 1 ppm of the radius is 0.3 nm on a 0.6 mm drill, thus it cannot move the
 # geometry. It moves the node off the boundary and has no other effect. It
-# must stay above the rounding of `build()`, which rounds each mesh line to
+# must stay above the round-off of `build()`, which rounds each mesh line to
 # 1e-9 mm. 1 ppm of a 0.1 mm radius is 0.1 nm, thus 100 times that
-# rounding.
+# round-off.
 #
 # **The three lines of a via are ANCHORS of `_merge_close`**, as the two
 # faces of a lumped element box are. Before, a copper edge near a via line
@@ -182,15 +182,15 @@ RANK_VIA_SURFACE = 0
 # measurement for that.
 POLY_FEATURE_CELLS = 2
 # **The 1/3 - 2/3 rule at a long copper edge** (F8, `_edge_thirds`). A mesh
-# line ON the edge of a copper sheet makes the copper electrically larger:
+# line ON the edge of a copper sheet makes the copper electrically larger.
 # FDTD does not hold the peak of the field at the edge. The rule puts the
 # edge at 1/3 of a cell: one line EDGE_THIRDS * res / 3 in the copper, and
 # one 2/3 of that cell out of it. The tutorials of openEMS use the same
 # rule with a cell of res / 4.
 #
 # Measured on 2026-10-07 on the patch of `rig_probe` (28.314 mm on 1.53 mm
-# of er 4.5), the resonance against the closed form, for the probe, the
-# small coaxial feed and the pad of kicad-rfgen:
+# of er 4.5). The table gives the resonance against the closed form, for
+# the probe, the small coaxial feed and the pad of kicad-rfgen:
 #
 #   no rule, coarse        -8.3%  -9.1%  -9.3%
 #   no rule, medium        -6.6%  -7.3%  -8.0%
@@ -238,7 +238,7 @@ LE_STAB_MARGIN = solverenv.LE_STAB_MARGIN
 # `_le_topology`). The two paths of openEMS do not give the same loop to a
 # C on a wide land. On the 2512 land of `run_shunt_openems.py packages`, a
 # lone C of 10 pF gave an L_board of 1.9901 nH on the classic path and
-# 2.2456 nH on the series path, and EMerge gave 2.5067 nH. A C with a body
+# 2.2456 nH on the series path. EMerge gave 2.5067 nH. A C with a body
 # uses the series path. Thus a body that P21 kept out moved the loop by
 # more than the body. Measured on 2026-10-08, against EMerge:
 #
@@ -630,7 +630,8 @@ def _decisions(model, res, rlc=True):
             if len(full) > len(comp):
                 # **Name what the run left out, and why** (P21).
                 left = " + ".join("%s %s" % (
-                    {"L": "ESL", "R": "ESR"}[k],
+                    {"L": "ESL", "R": "DCR" if e["type"] == "L"
+                     else "ESR"}[k],
                     _si(full[k], {"R": "ohm", "L": "H"}[k]))
                     for k in "LR" if k in full and k not in comp)
                 body = (", without the %s of its %s body, which changes "
@@ -791,6 +792,63 @@ _parasitic_components = solverenv.parasitic_components
 _components = solverenv.components
 
 
+def _grid_inductors(model):
+    """Give (the refdes, the type, the components) of each element in the
+    grid that holds an inductance. The ESL of a body counts.
+
+    **openEMS can make the current of an inductor with no C in series grow
+    after the pulse** (B81): `_dc_inductors`. The series path leaves a
+    constant voltage across the inductance, thus its current ramps. The
+    port data then gets a slow drift, and the transform puts it at the low
+    end of the sweep. A smaller timestep
+    makes it worse, and the inductor rule gives a large L a small timestep.
+    On the board of `rig_shunt two` at the default settings, 20 nH does not
+    get to 1e-4: the energy is back at its peak at 30 ns, and sum|S|^2 is
+    514. 2 to 8 nH stop at 1e-4 before the growth. The same 20 nH is
+    correct on the one-part shunt board and in series in a line. A factor
+    of 0.10 or 0.08 in the place of 0.112 makes it worse (3.2 and 33).
+    """
+    s = model["settings"]
+    if not s.get("lumped", True):
+        return []
+    para = s.get("parasitics", True)
+    skip = _ported_refs(model) | _open_parts(model)
+    out = []
+    for e in model.get("lumped_elements", []):
+        comp = _components(e, para, s)
+        if e.get("ref") not in skip and comp.get("L"):
+            out.append((e.get("ref") or "?", e.get("type"), comp))
+    return out
+
+
+def _dc_inductors(model):
+    """Give the refdes of the inductors in the grid with no C in series.
+
+    Such a branch has a DC current, and its current can ramp (B81). A
+    C in the branch blocks DC: a capacitor with its ESL and ESR stayed
+    correct on the board where 2 nH ramps.
+    """
+    return [ref for ref, kind, comp in _grid_inductors(model)
+            if kind in ("L", "RLC") and not comp.get("C")]
+
+
+def _lr_branches(model):
+    """Give the refdes of the elements in the grid that hold an L and an R
+    and no C.
+
+    The series path of openEMS can grow on such a branch when the R is
+    small. 2 nH with 0.1 ohm diverged on the board of `rig_shunt two` at
+    the factor of the inductor rule, and a smaller factor (0.29 and less)
+    corrected it. `solverenv.body_is_idle` removes a DCR that changes
+    nothing. A DCR that stays is a DCR that is necessary in the sweep, thus the
+    correction is a smaller timestep. A resistor with the ESL of its body
+    is such a branch as well, and a smaller timestep also corrects a
+    large R on it (`solverenv.series_r_factor`).
+    """
+    return [ref for ref, _, comp in _grid_inductors(model)
+            if comp.get("R") and not comp.get("C")]
+
+
 def _le_topology(comp, rlc):
     """Give the LEtype of an element that holds `comp`.
 
@@ -859,7 +917,7 @@ def _run_length(sim_path):
     return steps, dt, max(1, int(round(steps / (len(u) - 1))))
 
 
-def _report_end(sim_path, nrts, end_criteria):
+def _report_end(sim_path, nrts, end_criteria, dc_l=()):
     """Tell how the run ended: the end criteria, or the step limit.
 
     A run that stops at the limit is not complete. Its S-matrix then has
@@ -867,6 +925,10 @@ def _report_end(sim_path, nrts, end_criteria):
     resonance that is not sufficiently deep, or as a ripple. openEMS gives
     no message that the user sees in the log of the plugin. A structure
     with a high Q is the usual cause.
+
+    `dc_l` names the inductors with no C in series (`_dc_inductors`). With
+    one of them, the field can grow after the pulse and never get to the
+    end criteria (B81). More steps then make the result worse.
     """
     end = _run_length(sim_path)
     if not end:
@@ -874,11 +936,19 @@ def _report_end(sim_path, nrts, end_criteria):
     steps, dt, every = end
     ns = steps * dt * 1e9
     if steps + every >= nrts:
+        advice = ("Increase \"Max steps\", or make \"End criteria\" "
+                  "larger.")
+        if dc_l:
+            advice = ("The model has the inductor(s) %s, and openEMS can "
+                      "make the current of an inductor grow after the "
+                      "pulse. Then the field does not decay, and more "
+                      "steps make the result worse: look for sum|S|^2 "
+                      "above 1 at the low end of the sweep."
+                      % ", ".join(dc_l))
         print("[rfsim] WARNING: the run stopped at the step limit of %d "
               "timesteps (%.1f ns), before its end criteria of %.3g. "
-              "Thus the result is not complete. Increase \"Max steps\", "
-              "or make \"End criteria\" larger."
-              % (nrts, ns, end_criteria), flush=True)
+              "Thus the result is not complete. %s"
+              % (nrts, ns, end_criteria, advice), flush=True)
         return ("stopped at the step limit of %d timesteps (%.1f ns), "
                 "before its end criteria" % (nrts, ns))
     print("[rfsim] the run got to its end criteria of %.3g after %d of "
@@ -1106,7 +1176,7 @@ def _port_geometry(model, res, quiet=False):
             # **A coaxial feed is flat in the gap around a through-hole
             # pad**, on the layer of its side (`solverenv.coax_box`). Its
             # width is the barrel: the box and the via share the surface
-            # lines of the barrel, thus the merge moves no line of the two.
+            # lines of the barrel. Thus the merge moves no line of the two.
             box = solverenv.coax_box(p, z_of, VIA_SURFACE)
             if box:
                 g.update(start=box["start"], stop=box["stop"],
@@ -1205,7 +1275,7 @@ def _pml_band(lo, hi, depth):
 
 def _inside(polys, x, y):
     """Tell if the point (x, y) is in the copper `polys`, with the
-    half-open rule of the crossing test."""
+    half-open rule of the even-odd test."""
     n = 0
     for poly in polys:
         prev = poly[-1]
@@ -1236,29 +1306,32 @@ def _edge_thirds(model, xs, ys, res, ports, tol):
     axis, which `_mesh` makes anchors.
 
     A coordinate gets the rule when each straight edge on it, on each
-    layer, is a long edge: copper at one side and none at the other, the
-    same side for each, `res` of copper and of clear board at the two
-    sides, and `res` of edge in all. **A narrow feature keeps its line on
-    the edge**: a track, a gap or a land are the cells of `_feature_lines`
-    and of the ports, and their numbers come from that mesh. A coordinate
-    that a port, a via, a lumped element or the region holds also keeps it.
+    layer, is a long edge. A long edge has copper at one side and none at
+    the other, the same side for each. It has `res` of copper and of clear
+    board at the two sides, and `res` of edge in all. **A narrow feature
+    keeps its line on the edge**: a track, a gap or a land are the cells
+    of `_feature_lines` and of the ports. Their numbers come from that
+    mesh. A coordinate that a port, a via, a lumped element or the region
+    holds also keeps it.
     A slit of `Fracture` has copper at its two sides, thus it is no edge.
 
     **A line port keeps the mesh along its feed**, from 2 cells behind its
-    box (or its pad and one cell, when that is more) to its far end. The open end of a track behind the feed is in the
-    near field of the port. On the boards of `run_shunt_openems.py two`
-    (a sweep to 5 GHz, ports of 9 mm and a plane of measurement 1.67 mm
-    after the feed), the rule at that end gave sum|S|^2 = 11.7, and the
-    board with no rule there gives 0.96 to 1.00.
+    box (or its pad and a cell, if more) to its end. The open end of
+    a track behind the feed is in the near field of the port. The boards
+    of `run_shunt_openems.py two` have a sweep to 5 GHz, ports of 9 mm and
+    a plane of measurement 1.67 mm after the feed. On them, the rule at
+    that end gave sum|S|^2 = 11.7. The board with no rule there gives 0.96
+    to 1.00.
 
     **The board must continue a cell beyond the edge.** The copper of a
     plane or a pour that ends AT the edge of the board ends where the
-    substrate ends, and the line 2/3 of a cell out of it is in the air. On
-    the patch of `rig_probe`, the rule on the edges of the ground only (the
-    edges of the board) read -13.5%, against -8.3% with no rule and -3.7%
-    with the rule on the patch only. It also made the cells of a board 44%
-    more, and on the microstrip of `run_headless_openems.py` a timestep 20%
-    smaller: the lines at the edges of the board are graded to `res`.
+    substrate ends. Thus the line 2/3 of a cell out of it is in the air.
+    On the patch of `rig_probe`, the rule on the edges of the ground only
+    (the edges of the board) read -13.5%. With no rule, it read -8.3%, and
+    with the rule on the patch only, -3.7%. That rule also increased the
+    cells of a board by 44%. On the microstrip of `run_headless_openems.py`,
+    it made the timestep 20% smaller: the lines at the edges of the board
+    are graded to `res`.
     """
     d = EDGE_THIRDS * res
     br = model["board_rect"]
@@ -1500,9 +1573,9 @@ def _mesh(model, ports, res, notes=None):
             # copper holds the edge, thus an edge that crosses all the gap
             # joins the pad to the ground. A pad of 1.7 mm in a clearance
             # of r 1.1 mm read a short circuit with the lines of the box
-            # only. Lines at the pad, at the middle of the gap and at the
-            # ground, on each side of the axis of the hole, make each edge
-            # across the gap half of the gap or less.
+            # only. Thus lines are at the pad, at the middle of the
+            # gap and at the ground, on each side of the axis of the hole.
+            # Each edge across the gap is then half of the gap or less.
             b = g["coax"]
             for k, lines in ((0, xs), (1, ys)):
                 for r in (b["r_in"], 0.5 * (b["r_in"] + b["r_out"]),
@@ -1710,10 +1783,10 @@ def _mesh(model, ports, res, notes=None):
     else:
         notes += chose
     # The 1/3 - 2/3 rule of each long copper edge comes after all the other
-    # lines, because the lines of a port, a via or an element must hold
-    # their edge. Its two lines are anchors: a merge to the mean of an
-    # adjacent line can put the edge back on a line, or make one line out
-    # of the copper (EDGE_THIRDS).
+    # lines. The lines of a port, a via or an element must hold their edge.
+    # The two lines of the rule are anchors. Without them, a merge to the
+    # mean of an adjacent line can put the edge back on a line. It can also
+    # make one line out of the copper (EDGE_THIRDS).
     th_x, th_y = _edge_thirds(model, xs, ys, res, ports, tol)
     anchor_x = ([(v, RANK_FACE) for v in le_x] + via_x
                 + [(v, RANK_FACE) for v in th_x])
@@ -1746,8 +1819,8 @@ def _mesh(model, ports, res, notes=None):
 def _smooth(lines, res):
     """Give the mesh lines of one axis of the grid, from the fixed lines.
 
-    `SmoothMeshLines` adds the lines between them. The rounding keeps a
-    line ON a copper sheet: a line at 1.5300000000000002 does not touch a
+    `SmoothMeshLines` adds the lines between them. The round-off keeps a
+    line ON a copper sheet. A line at 1.5300000000000002 does not touch a
     sheet with no thickness at 1.53, and openEMS then gives "unused
     primitive".
     """
@@ -1928,7 +2001,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             pts = np.array(poly).T  # shape (2, N)
             prop.AddLinPoly(pts, "z", c["z"], 0, priority=10)
     # The tab of each coaxial feed: copper from the axis of the hole to the
-    # face of the box, thus the edge of a round pad is straight at the box
+    # face of the box. Thus the edge of a round pad is straight at the box
     # (`solverenv.coax_box`). The box itself has a higher priority than the
     # copper. Thus where the box goes onto the copper around the pad, the
     # box wins, and the face of that copper is straight as well.
@@ -2181,7 +2254,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             dump.AddBox([r["x0"] + edge, r["y0"] + edge, z_cut],
                         [r["x1"] - edge, r["y1"] - edge, z_cut])
         # **The current on the copper (F4)**: the layer of the port and its
-        # reference planes, which carry the return path. Dump type 13 is
+        # reference planes, which have the return path. Dump type 13 is
         # rot H, the total current density. Type 12 is kappa E, and that is
         # almost zero on a ConductingSheet. `_surface_current` then changes
         # the A/m^2 of the plane into the A/m of the sheet.
@@ -2220,11 +2293,11 @@ def _surface_current(sim_path, zs, model, p):
     """Change each current dump of port `p` from rot H (A/m^2) into the
     current of the copper sheet (A/m), in its own file.
 
-    The sheet has no thickness. On the grid, rot H at the line of the sheet
+    The sheet has no thickness. On the grid, rot H at the sheet line
     is the jump of the tangential H across it, divided by the distance of
-    the two H lines: half of the two cells at the sheet. Thus that distance
-    times rot H is the current of the sheet. `zs` are the z lines of the
-    grid, in mm.
+    the two H lines. That distance is half of the two cells at the sheet.
+    Thus that distance times rot H is the current of the sheet. `zs` are
+    the z lines of the grid, in mm.
     """
     import h5py
     zs = np.asarray(zs, float)
@@ -2535,8 +2608,8 @@ def main(model_path, outdir):
     want = set(s.get("excite") or nums)
     exc = [i for i, num in enumerate(nums) if num in want] or [0]
     lines = {}  # the port number -> the impedance data of its line
-    # The port number -> True when the reading in `lines` comes from the
-    # run that excited that port. Such a reading is the bad one, thus a
+    # The port number -> True when the value in `lines` comes from the
+    # run that excited that port. Such a value is the bad one, thus a
     # subsequent run replaces it.
     line_exc = {}
     for step, k in enumerate(exc):
@@ -2563,7 +2636,7 @@ def main(model_path, outdir):
         fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
                  numThreads=threads)
         end = _report_end(sim_path, _max_timesteps(model),
-                          s["end_criteria"])
+                          s["end_criteria"], _dc_inductors(model))
         if end:
             keep("The excitation of port %d %s" % (k + 1, end))
         bad = _diverged(sim_path)
@@ -2581,6 +2654,19 @@ def main(model_path, outdir):
                     "used a timestep factor of %.3g. Set a smaller "
                     "\"Timestep\" in the dialog (for example %.3g), and "
                     "run again." % (name, tsf, tsf / 2.0))
+            lr = _lr_branches(model)
+            if lr:
+                raise SystemExit(
+                    "[rfsim] ERROR: the FDTD run is not stable. The port "
+                    "data of %s increased again after its lowest point, "
+                    "to more than %g times that point. The S-matrix of "
+                    "such a run is not correct. %s %s an inductance with "
+                    "a series resistance and no capacitance, and openEMS "
+                    "can grow on such a branch. Set a smaller "
+                    "\"Timestep\" in the dialog (this run used %.3g, try "
+                    "%.3g), and run again."
+                    % (name, GROWTH_LIMIT, ", ".join(lr),
+                       "has" if len(lr) == 1 else "have", tsf, tsf / 2.0))
             raise SystemExit(
                 "[rfsim] ERROR: the FDTD run is not stable. The port "
                 "data of %s increased again after its lowest point, to "
@@ -2621,8 +2707,8 @@ def main(model_path, outdir):
             ld = _line_data(p, sim_path, freq)
             if not ld:
                 continue
-            # A reading from a run that did not excite this port wins.
-            # A one-port run has no such reading, thus it keeps its own.
+            # A value from a run that did not excite this port wins.
+            # A one-port run has no such value, thus it keeps its own.
             was_exc = (j == k)
             if j + 1 in lines and (was_exc or not line_exc[j + 1]):
                 continue
@@ -2674,16 +2760,33 @@ def main(model_path, outdir):
     # measurement gave sum|S|^2 = 1.71 at the coarse preset and 1.05 at the
     # medium preset. The CPW board gave 1.08 before it had its cells above
     # and below the plane of the line.
+    #
+    # **An inductor with no C in series gives the excess at the START of
+    # the sweep** (`_grid_inductors`): its current ramps after the pulse.
+    # A finer mesh does not correct that. Thus the advice follows the
+    # frequency of the largest excess.
+    dc_l = _dc_inductors(model)
     for k in exc:
         power = np.sum(np.abs(S[:, :, k]) ** 2, axis=1)
-        if power.max() > 1.05:
-            print("[rfsim] WARNING: port %d gives out more power than it "
-                  "gets (max sum|S|^2 = %.2f). Thus the S-parameters of "
-                  "this port are not reliable. On a CPW port or a "
-                  "stripline port, the usual cause is a mesh that is too "
-                  "coarse across the line. Run again at a finer mesh "
-                  "preset."
-                  % (k + 1, power.max()), flush=True)
+        if power.max() <= 1.05:
+            continue
+        f_max = freq[int(np.argmax(power))]
+        if dc_l and f_max < 0.5 * (s["f_start"] + s["f_stop"]):
+            why = ("The largest excess is at %.3g GHz, at the low end of "
+                   "the sweep, and the model has the inductor(s) %s. "
+                   "openEMS can make the current of an inductor grow after "
+                   "the pulse. A smaller Timestep and a longer run make "
+                   "that worse, and a finer mesh does not correct it. Do "
+                   "not use the low end of this sweep."
+                   % (f_max / 1e9, ", ".join(dc_l)))
+        else:
+            why = ("On a CPW port or a stripline port, the usual cause is a "
+                   "mesh that is too coarse across the line. Run again at a "
+                   "finer mesh preset.")
+        print("[rfsim] WARNING: port %d gives out more power than it "
+              "gets (max sum|S|^2 = %.2f). Thus the S-parameters of this "
+              "port are not reliable. %s" % (k + 1, power.max(), why),
+              flush=True)
 
     out = os.path.join(outdir, "results.s%dp" % n)
     write_touchstone(out, freq, S, s["z0"])

@@ -193,8 +193,8 @@ def test_the_far_field_views_say_directivity():
 
 
 def test_the_far_field_views_give_the_polarization():
-    """A cut shows Abs, Co and Cross of Ludwig 3, each with a check box,
-    and its block gives the reference and the XPD at the main lobe. The 3D
+    """A cut shows Abs, Co and Cross of Ludwig 3, each with a check box.
+    Its block gives the reference and the XPD at the main lobe. The 3D
     balloon gives the XPD of the runner. A far field from before the
     polarization has Abs only, with its title of before."""
     import copy
@@ -234,9 +234,9 @@ def test_the_far_field_views_give_the_polarization():
 
 
 def test_the_states_are_compared():
-    """F30: a run of states gives four views that compare them, a choice
-    of the state for the other views, and the value of each state at
-    "Define at" in a block of text.
+    """F30: a run of states gives four views that compare them, and a
+    choice of the state for the other views. A block of text gives the
+    value of each state at "Define at".
 
     The states are made from `out_coarse`: State 2 is the same run with
     S21 times 0.9 at -45 degrees. Thus its phase difference is -45.00
@@ -356,8 +356,8 @@ def test_the_field_views_have_the_scale_of_cst():
 
 
 def test_a_trace_can_be_hidden():
-    """A check box for each trace: a cleared box takes the trace out of the
-    graph and of its legend, the other traces keep their colours, and the
+    """A check box for each trace: a cleared box removes the trace from the
+    graph and from its legend. The other traces keep their colours, and the
     choice holds in the next view. A field view has no check boxes."""
     f = frame()
 

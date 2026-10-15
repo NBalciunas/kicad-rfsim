@@ -60,7 +60,7 @@ The same runs with the four surface lines 1 ppm IN the barrel give +19% for
 r = 0.30 at coarse and +20% at medium. They give +8% for r = 0.15 at
 medium. Each one has 5 edges. Thus a barrel of 5 edges is +8% to +20% above
 the closed formula, and a barrel of fewer edges is +31% to +158%. VIA_TOL
-is between the two. **This file FAILS at this time, and the cause of the
+is between the two. **This file stops with an error at this time, and the cause of the
 failure is the mesh.** Read the edge count of a row before its number.
 
 Run it with the python of the solver, or with the python of KiCad (it does
@@ -106,7 +106,7 @@ F_BAND = (1e9, 5e9)
 # converges to +26% at r = 0.3 mm (a fine mesh at the barrel), and a
 # barrel of 32 sides or a cylinder moves it by 4% or less. With the same Z0,
 # openEMS reads 2% to 5% less, thus the closed form is low for a via in a
-# strip of 2.9 mm. 30% keeps the converged value of EMerge inside.
+# strip of 2.9 mm. 30% keeps the converged value of EMerge in the limit.
 VIA_TOL = 0.30 if rigsolve.SOLVER == "emerge" else 0.25
 
 
@@ -154,7 +154,7 @@ def solve(tag, model, root):
     z = None
     lines = rigsolve.lines(outdir)
     if lines and "2" in lines["ports"]:
-        # EMerge gives Z0 at its solved points alone, and not at each
+        # EMerge gives Z0 at its solved points only, and not at each
         # point of results.s2p. Thus interpolate Z0 to the rows.
         z = np.interp(rows[:, 0], np.asarray(lines["freq_hz"], float),
                       np.asarray(lines["ports"]["2"]["Z0_real"], float))

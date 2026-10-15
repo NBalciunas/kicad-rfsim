@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # the repository
 PLUGINS = os.path.join(ROOT, "plugins")
 sys.path.insert(0, PLUGINS)
-# the board builders, which need no solver
+# the board builders, which use no solver
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 
 import numpy as np  # noqa: E402
@@ -56,7 +56,7 @@ POWER_MAX = 1.02
 LINE_V_TOL = 0.10
 
 # The patch: FR-4 of 1.53 mm with a low loss, thus the radiation and not
-# the substrate takes the power. W and L come from the transmission-line
+# the substrate gets the power. W and L come from the transmission-line
 # model of the patch for 2.4 GHz (er 4.5), and the inset from
 # R(y0) = R_edge cos^2(pi y0 / L) with R_edge of about 310 ohm.
 PATCH_W, PATCH_L, PATCH_INSET = 37.7, 29.1, 10.7
@@ -193,7 +193,7 @@ def db(x):
 
 def line_voltage(outdir):
     """Give |Ez| * h at the middle of the line of the msl board, from the
-    E-field view of port 1, with the scale that the results window uses."""
+    E-field view of port 1. The scale is that of the results window."""
     import gui  # the loader of the results window
     with open(os.path.join(outdir, "model.json")) as fh:
         model = json.load(fh)

@@ -230,7 +230,7 @@ def main(mesh="coarse"):
         th = alpha_diel(f, W_LINE, H_SUB, ER, TAND, f0=f_mid) + th_c
     else:
         # **The substrate of EMerge has a constant tan d**, thus its
-        # dielectric term is the one of a real substrate at each
+        # dielectric term is the one of an actual substrate at each
         # frequency. Its copper has the conductivity of openEMS.
         th_c = alpha_cond(f, W_LINE, H_SUB, ER)
         th = alpha_diel(f, W_LINE, H_SUB, ER, TAND) + th_c

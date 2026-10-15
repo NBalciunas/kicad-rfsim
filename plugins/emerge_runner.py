@@ -11,26 +11,26 @@ EMerge is a frequency-domain solver. It solves the full S-matrix at each
 frequency in ONE solve, thus there is no run for each port and no timestep.
 It solves at `fem_points` frequencies only, and a vector fit gives the
 `n_freq` points of the sweep. It also solves at the frequency of the field
-views, and it writes the E-field and the H-field of each excited port in the
-format of the openEMS dumps, and the far field in the format of
+views. It writes the E-field and the H-field of each excited port in the
+format of the openEMS dumps. It writes the far field in the format of
 farfield_pN.json.
 
-A port of type msl, cpw or stripline is a WAVE port (`_wave_port`): the
-2D mode of the line on a face of the model, with its Z0 and its eps_eff in
-lines.json. A lumped port, and a line port that has no track, are lumped
+A port of type msl, cpw or stripline is a WAVE port (`_wave_port`). It is
+the 2D mode of the line on a face of the model. Its Z0 and its eps_eff go
+into lines.json. A lumped port, and a line port that has no track, are lumped
 ports.
 
 The limits of this model:
 
 - The copper has no thickness: each side of a sheet has the surface
   impedance of copper. A via is PEC.
-- A wave port of an open line (msl, cpw) still loses a small part of the
+- A wave port of an open line (msl, cpw) also loses a small part of the
   power. A microstrip of 20 mm with PEC copper and no dielectric loss
-  gives |S11|^2 + |S21|^2 = 0.969 to 0.996 from 1 to 6 GHz (0.92 to 0.96
-  with the projection of EMerge, `_power_overlap`), with its lowest value
-  near 1.5 GHz. The same stripline with no loss gives 1.000. The field of
-  the open line is not the mode of the metal box of the face, and the
-  port boundary absorbs the difference: about 1.7% of the power at 1.5
+  gives |S11|^2 + |S21|^2 = 0.969 to 0.996 from 1 to 6 GHz. The lowest
+  value is near 1.5 GHz. The projection of EMerge (`_power_overlap`) gives
+  0.92 to 0.96. The same stripline with no loss gives 1.000. The field of
+  the open line is not the mode of the metal box of the face. The port
+  boundary absorbs the difference: about 1.7% of the power at 1.5
   and 2 GHz. The box also radiates about 1%. A finer mesh, a larger air
   box and a first-order absorber do not change it. A larger face moves
   the lowest value to a lower frequency.
@@ -56,20 +56,20 @@ import numpy as np
 import solverenv
 
 MM = 1e-3
-# The maximum element size, as a part of the wavelength, for each preset.
+# The maximum element dimension, as a part of the wavelength, for each preset.
 # EMerge uses elements of the second order.
 RESOLUTION = {"coarse": 0.25, "medium": 0.2, "fine": 0.15, "ultrafine": 0.1}
-# The element size at the edges of the copper, as a part of the thinnest
+# The element dimension at the edges of the copper, as a part of the thinnest
 # dielectric layer, for each preset.
 EDGE_PART = {"coarse": 0.5, "medium": 0.35, "fine": 0.25, "ultrafine": 0.15}
-# The edge size does not go below this value, thus a thin prepreg does not
+# The edge dimension does not go below this value, thus a thin prepreg does not
 # make a very large mesh on all the board.
 EDGE_MIN_MM = 0.1
-# The size in the box of a narrow gap or strip of a port, as a part of its
+# The dimension in the box of a narrow gap or strip of a port, as a part of its
 # width, for each preset (`_feature_boxes`). The CPW of the rigs (a gap of
 # 0.3 mm) at the coarse preset read Z0 46.0, 47.2 and 47.7 ohm at 1, 0.5
 # and 0.34 of the gap, in 66 k, 128 k and 231 k tetrahedra; openEMS reads
-# 48.3 ohm and the closed form 51.0 ohm. eps_eff read 2.91 at each size.
+# 48.3 ohm and the closed form 51.0 ohm. eps_eff read 2.91 at each dimension.
 FEATURE_PART = {"coarse": 0.5, "medium": 0.34, "fine": 0.25,
                 "ultrafine": 0.2}
 # The default count of solved frequencies for each preset.
@@ -78,7 +78,7 @@ FEM_POINTS = {"coarse": 11, "medium": 21, "fine": 31, "ultrafine": 41}
 # samples come from the FEM solution, thus the count sets only the picture.
 FIELD_POINTS = 60000
 FIELD_STEP_MIN_MM = 0.05
-# The sigma of the smoothing of the field views, as a part of the element
+# The sigma of the Gauss filter of the field views, as a part of the element
 # at the copper edges (`_write_fields`).
 FIELD_BLUR = 0.5
 # The speed of light, in m/s.
@@ -86,12 +86,13 @@ C0_M = 299792458.0
 # The impedance of free space, in ohm.
 Z_FREE = 376.730313668
 # The wave port (`_wave_port`): the largest air above the strip and the
-# largest width at each side, in thicknesses of the substrate, and the
-# depth of the void behind the face. The face also stays narrower and lower
-# than half of the wavelength at f_stop, thus the metal box of the face
-# carries no mode of its own. On the lossless microstrip of 20 mm of the
-# rigs (1 to 6 GHz), a face of 6 x 5 lost 0.9% to 4.8% of the power and a
-# face of 12 x 7.2 lost 0.25% to 2.6%. A face of 3 x 2.5 lost 9.6%.
+# largest width at each side, in thicknesses of the substrate. The third
+# value is the depth of the void behind the face. The face also stays
+# narrower and lower than half of the wavelength at f_stop. Thus the metal
+# box of the face has no mode of its own. On the lossless microstrip of
+# 20 mm of the rigs (1 to 6 GHz), a face of 6 x 5 lost 0.9% to 4.8% of the
+# power. A face of 12 x 7.2 lost 0.25% to 2.6%, and a face of 3 x 2.5 lost
+# 9.6%.
 WAVE_UP, WAVE_SIDE, WAVE_DEPTH_MM = 12.0, 10.0, 1.0
 # The smallest air above the strip and width at each side, in thicknesses
 # of the substrate, when the half wavelength is smaller.
@@ -104,9 +105,9 @@ WAVE_CUTOFF = 1.1
 # (`_neff_guess`). At sqrt(er) itself, the shift of the eigen solve is the
 # eigenvalue of the line.
 WAVE_NEFF_TOP = 1.02
-# The largest Ez/Exy and Hz/Hxy of a mode that is still quasi-TEM.
+# The largest Ez/Exy and Hz/Hxy of a quasi-TEM mode.
 QTEM_LIMIT = 0.25
-# The sides of the prism that stands for a via barrel. `run_via_emerge.py`
+# The sides of the prism that is the model of a via barrel. `run_via_emerge.py`
 # at the coarse preset read +19% to +27% against Goldfarb and Pucel with 8
 # sides, and +15% to +23% with 16 (the limit of the rig is 25%).
 VIA_SIDES = 16
@@ -182,15 +183,15 @@ def _feature_boxes(ports, z_of, edge, box, part=0.5):
 
     **Only the narrow feature gets the fine mesh, and not all its copper.**
     A coplanar gap of a port that is narrower than `edge` gets a slim box
-    along the feed: as wide as the gap and as high as the gap, each with a
+    along the feed. The box is as wide and as high as the gap, with a
     margin of two cells. A strip that is narrower than `edge` gets the same
-    box over the strip. The box goes from the far edge of the pad along the
+    box above the strip. The box goes from the far edge of the pad along the
     copper run of the feed; `box` is the air box, which caps a run that has
     no length.
 
-    Measured on the CPW of the rigs (a gap of 0.3 mm): the size of the gap
-    on all the copper edges of the layer used 24 GB of 32 GB for the line
-    of 60 mm. One box over the strip and the two gaps, 4.3 mm high, gave
+    The CPW of the rigs has a gap of 0.3 mm. On its line of 60 mm, elements
+    as small as the gap on all the copper edges of the layer used 24 GB of
+    32 GB. One box above the strip and the two gaps, 4.3 mm high, gave
     109 k tetrahedra at 0.3 mm and 437 k at 0.15 mm.
     """
     out = []
@@ -235,12 +236,12 @@ def _wave_port(p, z_of, box, f_max, layers):
     cause why the port stays a lumped port.
 
     **A modal port of EMerge must be on a face of the model.** A port of the
-    board is in the board, thus the runner cuts a VOID out of the air and
-    the dielectric behind the port: `WAVE_DEPTH_MM` deep, against the feed
-    direction, from the centre of the pad. The face of the void that looks
-    along the feed is the port. Its other faces stay PEC, which is the
-    default of EMerge for a face with no condition: that is the metal box of
-    a wave port in a commercial FEM tool.
+    board is in the board. Thus the runner cuts a VOID out of the air and
+    the dielectric behind the port. The void goes `WAVE_DEPTH_MM` deep from
+    the centre of the pad, against the feed direction. The face of the void
+    that looks along the feed is the port. Its other faces stay PEC, which
+    is the default of EMerge for a face with no condition. That is the metal
+    box of a wave port in a commercial FEM tool.
 
     The face goes across the strip, from the reference plane to
     `WAVE_UP` substrates above the strip (msl, cpw), or from plane to plane
@@ -249,9 +250,10 @@ def _wave_port(p, z_of, box, f_max, layers):
     the line, and they must not touch copper of an other net.
 
     **The face is also no wider and no higher than half of the wavelength
-    at `WAVE_CUTOFF` x `f_max`**, in air for msl and cpw, and in the
-    dielectric for a stripline, which fills its face. Then the TE10 mode of
-    the metal box of the face is cut off, and the port has one mode.
+    at `WAVE_CUTOFF` x `f_max`.** That wavelength is in air for msl and
+    cpw. For a stripline, which fills its face, it is in the dielectric.
+    Then the TE10 mode of the metal box of the face is cut off, and the
+    port has one mode.
     `WAVE_MIN` substrates is the lower limit.
 
     The result is (x0, y0, z0, x1, y1, z1) of the void in mm, and
@@ -317,13 +319,13 @@ def _port_plate(p, z_of):
     """Give the plate of a board port: (origin, u, v, width, height, sign).
 
     The plate goes from the reference layer to the pad, and it is normal to
-    the feed. A port with a track stands at the edge of the pad that is
+    the feed. A port with a track is at the edge of the pad that is
     opposite to the track. Thus all the copper of the line is on one side
-    of it. A port with no track stands across the centre of the pad.
+    of it. A port with no track goes across the centre of the pad.
     """
     z_top, z_ref = z_of[p["layer"]], z_of[p["ref_layer"]]
     # `width` is the extent of the pad in y, and `length` in x. The plate
-    # is as wide as the pad across the feed, because it stands on the pad.
+    # is as wide as the pad across the feed, because it is on the pad.
     d = p.get("direction") or [0, 0]
     if d[1]:
         w = p["length"]
@@ -353,7 +355,7 @@ def _power_overlap():
     **EMerge projects the field on the mode of the port with E . e***
     (`sparam.py`). That is the orthogonality of the modes of a guide with
     ONE dielectric. A microstrip has two, thus the field of the line is
-    not the 2D mode exactly, and E . e* does not count the power of the
+    not accurately the 2D mode, and E . e* does not count the power of the
     difference. The projection with E x h* . n is the orthogonality of the
     modes of a guide with no loss and any dielectrics:
 
@@ -433,9 +435,10 @@ def _neff_guess(p, z_of, layers):
     closed form: the start of its mode search (`_mode_search`).
 
     msl: Hammerstad and Jensen, static. cpw: (er + 1) / 2, which is not the
-    slowest mode: a grounded CPW with no vias has a mode of the strip and
-    the top grounds against the plane (eps_eff 3.78 on the CPW of the rigs,
-    against 2.88 for the CPW mode). stripline: er, a little above.
+    slowest mode. A grounded CPW with no vias has a mode of the strip and
+    the top grounds against the plane. On the CPW of the rigs, that mode
+    has eps_eff 3.78, and the CPW mode has 2.88. stripline: er, a little
+    above.
     """
     w = p.get("track_width") or (p["width"] if p["direction"][0]
                                  else p["length"])
@@ -466,7 +469,7 @@ def _mode_search(mw, neff):
     and it overwrites the estimate of the port with that value. On a
     microstrip of FR-4 that is 1.66, between the line mode (1.89) and a mode
     of the metal box of the face (1.51 at 6 GHz). Port 1 of the via board
-    then took the box mode at 6 GHz: Z0 3.6 ohm, and S21 = 0.
+    then got the box mode at 6 GHz: Z0 3.6 ohm, and S21 = 0.
     """
     orig = mw.modal_analysis
 
@@ -565,18 +568,19 @@ def _smooth_plane(fe, X, Y, z_cut, blur=0.0):
     z_cut (mm), continuous from one tetrahedron to the next.
 
     **The elements of EMerge keep only the tangential field continuous**
-    across a face. The normal part jumps, thus a cut through the mesh shows
-    each tetrahedron as a triangle of its own, most at the copper edges,
-    where the elements are small and the field changes fast. This gives
-    the field at each vertex of the tetrahedra that the plane cuts, as the
-    mean of the values at the centres of the tetrahedra of that vertex, and
-    then the linear value between the 4 vertices at each point. Thus the
-    detail follows the mesh: small elements keep a narrow gap. The mean is
-    for each material alone, thus the jump of the normal E at a dielectric
-    face stays. A point outside the mesh gives NaN.
+    across a face. The normal part jumps. Thus a cut through the mesh shows
+    each tetrahedron as a triangle of its own. This occurs most at the
+    copper edges, where the elements are small and the field changes fast.
+    This function gives the field at each vertex of the tetrahedra that the
+    plane cuts. That field is the mean of the values at the centres of the
+    tetrahedra of that vertex. Each point then gets the linear value between
+    its 4 vertices. Thus the detail follows the mesh: small elements keep a
+    narrow gap. The mean is
+    for each material only, thus the jump of the normal E at a dielectric
+    face stays. A point out of the mesh gives NaN.
 
     `blur` is the sigma of a Gauss filter at the end, in points of the
-    grid: it takes the facets of the linear values away (`_write_fields`).
+    grid: it removes the facets of the linear values (`_write_fields`).
     """
     from emerge._emerge.const import MU0
     b = fe.basis
@@ -588,7 +592,7 @@ def _smooth_plane(fe, X, Y, z_cut, blur=0.0):
     cut = np.unique(tmap[ok])                       # the cut tetrahedra
     corner = tets[:, cut]                           # (4, T)
     # **The value of each tetrahedron at its centre**, which is its most
-    # accurate point, and not at its vertices: a vertex on a copper edge
+    # accurate point, and not at its vertices. A vertex on a copper edge
     # is singular, and the values of the tetrahedra there left spots.
     cen = nodes[:, corner].mean(axis=1)             # (3, T)
     const = 1 / (-1j * 2 * np.pi * fe.freq * (fe._dur * MU0))
@@ -619,8 +623,8 @@ def _smooth_plane(fe, X, Y, z_cut, blur=0.0):
     # the key of each vertex of the tetrahedron of each point
     k = tets[:, t] * (mat.max() + 1) + mat[ti]
     col = np.searchsorted(ukey, k)                          # (4, P)
-    # **A median of 3 x 3 points** then takes the last spots at a copper
-    # edge away. A median keeps an edge sharp, and it keeps each feature
+    # **A median of 3 x 3 points** then removes the last spots at a copper
+    # edge. A median keeps an edge sharp, and it keeps each feature
     # of 2 points or more. On the patch of the rigs the peak went down by
     # 1.6%.
     from scipy import ndimage
@@ -633,7 +637,7 @@ def _smooth_plane(fe, X, Y, z_cut, blur=0.0):
         g = (ndimage.median_filter(g.real, 3)
              + 1j * ndimage.median_filter(g.imag, 3))
         if blur > 0.3:
-            # The mean of the points IN the mesh alone: a hole (a void
+            # The mean of the points IN the mesh only: a hole (a void
             # or a via) must not pull its edge to 0.
             inside = ndimage.gaussian_filter((~np.isnan(f)).astype(float),
                                              blur)
@@ -655,9 +659,9 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power, edge):
 
     **The view is smoothed by `FIELD_BLUR` of `edge`**, the element at the
     copper edges in mm. The linear values of `_smooth_plane` show each
-    element as a facet: a patch of the owner (27 k tetrahedra, `edge` 0.56
-    mm, a grid of 0.13 mm) had edges that wobbled and a mottled inside.
-    A Gauss of 0.5 `edge` took that away and lowered the peak by 2%; 1
+    element as a facet. A patch of the owner had rough edges and spots in
+    the copper (27 k tetrahedra, `edge` 0.56 mm, a grid of 0.13 mm).
+    A Gauss of 0.5 `edge` removed that and lowered the peak by 2%; 1
     `edge` lowered it by 8%. A sigma in mm, and not in points, is the
     same on a small board and on a large one.
     """
@@ -673,8 +677,8 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power, edge):
     x = np.arange(x0, x1 + 0.5 * step, step)
     y = np.arange(y0, y1 + 0.5 * step, step)
     X, Y = np.meshgrid(x, y, indexing="ij")         # (Nx, Ny)
-    # The planes of the H jump of a current view: a quarter of the element
-    # at the copper edges from the sheet, and inside the thinnest layer.
+    # The planes of the H jump of a current view. They are a quarter of the
+    # element at the copper edges from the sheet, and in the thinnest layer.
     h_min = min(dl["z_top"] - dl["z_bottom"]
                 for dl in model["dielectric_layers"])
     dz = max(min(0.25 * edge, 0.2 * h_min), 0.01)
@@ -695,7 +699,7 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power, edge):
 
         def write(name, comps, z):
             # (3, Nx, Ny, 1), which is the sequence of the axes of openEMS.
-            # A point outside the mesh gives NaN.
+            # A point out of the mesh gives NaN.
             F = np.nan_to_num(np.array(comps))[..., None]
             with h5py.File(os.path.join(d, name), "w") as fh:
                 m = fh.create_group("Mesh")
@@ -709,7 +713,7 @@ def _write_fields(data, model, z_of, box, outdir, f_hz, power, edge):
         # **The current on the copper (F4)**: the sheet current is
         # K = z x (H above - H below), from the smoothed H at `dz` above
         # and below the layer. The layer of the port and its reference
-        # planes, which carry the return path.
+        # planes, which have the return path.
         for layer in solverenv.current_layers(p):
             zc = z_of[layer]
             try:
@@ -740,16 +744,16 @@ def _directivity(u, total):
 def _write_farfield(data, model, faces, origin, outdir, f_hz, power, raw,
                     fs):
     """Write farfield_pN.json for each excited port, in the format of the
-    openEMS runner: three cuts in the style of CST, a grid of 5 degrees
-    for the 3D view, Dmax, the radiated power and the efficiency.
+    openEMS runner. It has three cuts in the style of CST, a grid of 5
+    degrees for the 3D view, Dmax, the radiated power and the efficiency.
 
     `faces` is the boundary of the air box, and the Stratton-Chu integral
     of EMerge goes across it. The directivity is 4 pi U / (the integral
     of U across the sphere), with U = |E|^2 of the far field. The integral
     comes from the grid of the 3D view, and it also gives the radiated
     power. **Do not use `Ptot` of EMerge for it**: that is the Poynting
-    flux across the absorbing faces, and on the msl board it gave -3e-5 W
-    and -1e-3 W, where the pattern gives 6.3e-3 W (openEMS: 1% of the
+    flux across the absorbing faces. On the msl board it gave -3e-5 W and
+    -1e-3 W, where the pattern gives 6.3e-3 W (openEMS: 1% of the
     input). The input power is the incident power less the power that the
     port sends back.
     """
@@ -886,7 +890,7 @@ def main(model_path, outdir):
     # microstrip of the rigs has Hz/Hxy = 0.071 at 3.5 GHz, because the
     # strip has air above it and dielectric below it. EMerge then calls the
     # mode TE (its limit is 0.05), and a TEM port refuses it. A port of a
-    # board carries one mode, thus a larger limit is safe.
+    # board has one mode, thus a larger limit is safe.
     sim.settings.qtem_limit = QTEM_LIMIT
     # One plain line for each message of EMerge, with no colour codes.
     logger.configure(handlers=[{
@@ -902,15 +906,15 @@ def main(model_path, outdir):
     r = model["region"]
     # **The air box is ALL the region: the margin AND the PML band of
     # openEMS, as clear air.** EMerge has an absorbing boundary on the faces
-    # of the box and no band. With the margin alone (4 mm, and 5 board
+    # of the box and no band. With only the margin (4 mm, and 5 board
     # thicknesses above and below), the absorber was in the near field of
-    # the copper and it took power: a line of 100 mm with NO loss lost 3%
+    # the copper and it absorbed power. A line of 100 mm with NO loss lost 3%
     # to 4% of the power at 1 to 3 GHz. The attenuation of `rig_atten` then
     # read 0.80 times the theory, and 0.48 times at 1 GHz. With 20 mm of
     # air, the line with no loss read 0.0 +- 0.3 dB/m, and the line with
     # loss read the theory to 3% from 1 to 5 GHz. The band is 8 cells of
-    # the step of the mesh, about 19 mm at the coarse preset to 6 GHz, and
-    # the dialog shows it as the domain.
+    # the step of the mesh, about 19 mm at the coarse preset to 6 GHz. The
+    # dialog shows it as the domain.
     pml = model.get("pml_mm") or s["margin_mm"]
     ax0, ay0, ax1, ay1 = r["x0"], r["y0"], r["x1"], r["y1"]
     # The field views keep the board and the margin, as the dumps of
@@ -1028,8 +1032,8 @@ def main(model_path, outdir):
                 except Exception:
                     pass
         # The tab and the slot of each coaxial feed on this layer. The tab
-        # makes the edge of a round pad straight at the plate of the port,
-        # and the slot removes the copper around the pad from the plate. The
+        # makes the edge of a round pad straight at the plate of the port.
+        # The slot removes the copper around the pad from the plate. The
         # plate then touches the copper along its two faces, and it is on
         # no copper.
         for box in coax_on.get(name, []):
@@ -1043,8 +1047,8 @@ def main(model_path, outdir):
                 position=(min(a0, a1) * MM, min(b0, b1) * MM, z)))
         # **Copper with its conductivity, and not PEC** (5.8e7 S/m, as the
         # sheets of openEMS). EMerge gives a conducting sheet in the model
-        # a ThinConductor: each side has the surface impedance of copper,
-        # thus the line has the loss of its metal.
+        # a ThinConductor: each side has the surface impedance of copper.
+        # Thus the line has the loss of its metal.
         layer.set_material(em.lib.COPPER)
         copper.append(layer)
 
@@ -1146,7 +1150,7 @@ def main(model_path, outdir):
     # feed** (`_feature_boxes`). The CPW of the rigs has a gap of 0.3 mm,
     # and the edge of the substrate rule is 0.77 mm. The field of the gap
     # then went into the substrate, and eps_eff read +9.9% against the
-    # closed form. The gap as the size gives +2.5% (openEMS: +1%).
+    # closed form. The gap as the element dimension gives +2.5% (openEMS: +1%).
     import gmsh
     boxes = _feature_boxes(ports, z_of, edge, (ax0, ay0, ax1, ay1),
                            FEATURE_PART.get(mesh, 0.5))
@@ -1162,8 +1166,8 @@ def main(model_path, outdir):
             # The face of a wave port: the copper edge. The box of a
             # narrow gap or strip goes across the face and refines it
             # there. A face at a quarter of the gap (0.1 mm on all its
-            # 17 x 11 mm) gave 378 k tetrahedra on the CPW of the rigs,
-            # and the mode solve then had no memory.
+            # 17 x 11 mm) gave 378 k tetrahedra on the CPW of the rigs.
+            # The mode solve then had no memory.
             size = edge
         else:
             size = max(min(w, h) / 3, EDGE_MIN_MM)

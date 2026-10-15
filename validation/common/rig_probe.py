@@ -8,9 +8,10 @@ is the coaxial feed (`solverenv.coax_box`): a lumped port across the gap
 between the pad and the ground, flat on B.Cu. The current goes up to the
 patch in the barrel of the hole (`board_reader._barrels`).
 
-**The control is the probe of the openEMS tutorial of a patch**: the same
-patch with an SMD pad of the pin dimension on F.Cu, a SOLID ground below
-it, and a lumped port from the plane to the patch. A coaxial feed with a
+**The control is the probe of the openEMS tutorial of a patch.** It is the
+same patch with an SMD pad of the pin dimension on F.Cu and a SOLID ground
+below it. A lumped port goes from the plane to the patch. A coaxial feed
+with a
 small pad in a small clearance ("small") is almost that geometry. Thus the
 two must give the same resonance AND the same resistance at it. The
 closed form of the patch gives all of them a common scale.
@@ -18,9 +19,9 @@ closed form of the patch gives all of them a common scale.
 **The pad of kicad-rfgen is NOT that geometry.** Its pad on B.Cu is 4.286
 mm, in a hole of 7 mm in the ground below the patch. The two solvers agree
 that this feed gives the patch about 1.85 times the resistance of the
-probe, and about 1 nH more of series inductance (openEMS 132 ohm and 1.86
-nH, EMerge 149 ohm and 1.84 nH, against 67 and 80 ohm for the probe, at
-the coarse preset). The rig gives that ratio, and it tests only the
+probe, and about 1 nH more of series inductance. At the coarse preset,
+openEMS gives 132 ohm and 1.86 nH, and EMerge 149 ohm and 1.84 nH. The
+probe gives 67 and 80 ohm. The rig gives that ratio, and it tests only the
 frequency of that feed.
 
 Measured on 2026-10-06 (R0 is the resistance at the resonance, L the
@@ -32,25 +33,25 @@ series inductance of the pin, from a fit of Z):
     rfgen    149.0 ohm  1.84 nH  132.0 ohm  1.86 nH  138.2 ohm  1.90 nH
 
 **In EMerge the small feed IS the probe**, to 0.6% in R0 and to 0.01 nH.
-**In openEMS the two lumped ports put R0 on the two sides of that value**:
-+11% for the small feed (flat, across the gap) and -9% for the control
-(vertical, a box of 2 x 2 cells), at medium. Thus the limits of the two
+**In openEMS the two lumped ports put R0 on the two sides of that value.**
+At medium, the small feed (flat, across the gap) gives +11%. The control
+(vertical, a box of 2 x 2 cells) gives -9%. Thus the limits of the two
 solvers are not the same, as for `rig_via`.
 
 The resonance (the largest Re(Z)) against the closed form: EMerge -5.0% to
 -4.2%. openEMS read -9.3% to -8.3% at coarse and -8.0% to -6.6% at medium
-before the 1/3 - 2/3 rule at a long copper edge (`openems_runner.EDGE_THIRDS`):
-a line ON the radiating edge made the patch electrically longer. With the
+before the 1/3 - 2/3 rule at a long copper edge (`openems_runner.EDGE_THIRDS`).
+A line ON the radiating edge made the patch electrically longer. With the
 rule it reads -4.5% to -3.7% at coarse, -4.4% to -3.4% at medium and -4.6%
-to -3.5% at fine. The resistances above are from before the rule; the rule
-makes them 7% to 11% larger at coarse (the probe 74.8 ohm, the small feed
-92.6 ohm), and the ratio of the small feed to the probe stays 1.24.
+to -3.5% at fine. The resistances above are from before the rule. At
+coarse, the rule makes them 7% to 11% larger (the probe 74.8 ohm, the
+small feed 92.6 ohm). The ratio of the small feed to the probe stays 1.24.
 
 The stages:
 
 - `extract` (no solver): the pad gets the coaxial feed on B.Cu, on the
-  axis away from the centre, with the gap of the clearance, and a barrel
-  of the drill. A through-hole pad with no ground around it stops
+  axis away from the centre, with the gap of the clearance. It also gets
+  a barrel of the drill. A through-hole pad with no ground around it stops
   `extract` with a message (the guard).
 - `single`: the pad of kicad-rfgen, the small coaxial feed and the
   control, one feed each.
@@ -83,7 +84,7 @@ F_START, F_STOP = 2.0e9, 3.0e9
 # must be in clear air and not near the copper.
 MARGIN = 15.0
 # The small coaxial feed: a pad of 1.7 mm (a ring of 0.215 mm around the
-# drill of 1.27 mm) in a clearance of r 1.1 mm, thus a gap of 0.25 mm.
+# drill of 1.27 mm) in a clearance of r 1.1 mm. The gap is 0.25 mm.
 SMALL = (1.7, 1.1)
 # The feeds of `single` must give the same resonance to this part. They
 # are different only at the feed, and the cavity of the patch sets the
@@ -93,7 +94,7 @@ FEED_TOL = 0.02
 # is the resistance of the patch at the feed. A series reactance (the pin)
 # does not move it. EMerge gives the two to 0.6%. The two lumped ports of
 # openEMS are 11% above and 9% below that value at medium, and 28% apart
-# at coarse (the table above). The limit of openEMS still finds a short,
+# at coarse (the table above). The limit of openEMS also finds a short,
 # an open, and the factor of 1.9 of the pad of kicad-rfgen.
 R_TOL = {"openems": 0.35, "emerge": 0.10}
 # Each resonance against the closed form of the patch (the transmission
@@ -104,8 +105,8 @@ F0_TOL = {"openems": 0.06, "emerge": 0.06}
 # The feed must couple to the patch: the dip of S11 at the resonance.
 DIP_MAX = -6.0
 # `dual`: the isolation of the two feeds at the resonance, the symmetry of
-# the two (they are the same feed, turned 90 degrees), and the XPD of
-# each one at its main lobe. A feed on the axis of the patch is on the
+# the two, and the XPD of each one at its main lobe. The two are the same
+# feed, turned 90 degrees. A feed on the axis of the patch is on the
 # null of the orthogonal mode, thus a correct model gives a high XPD.
 ISO_MAX = -15.0
 SYM_F, SYM_DB = 0.005, 1.0

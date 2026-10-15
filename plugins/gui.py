@@ -47,7 +47,7 @@ MAX_PART_ROWS = 6
 # hours, thus a user can let a choke run during the night. The value of
 # 90000 nH that started this rule causes 180 million steps. That is about
 # 135 hours on the SMALL board of the rigs, and more on the board of a
-# user. A user who wants such a run gives a "Timestep" of their own,
+# user. For such a run, a user gives a "Timestep" of their own,
 # which this rule reads.
 MAX_DERIVED_STEPS = 50e6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
@@ -169,7 +169,7 @@ def _state_value(kind, text):
     `STATE_RULES` gives a ValueError.
 
     A Series RLC cell is three numbers with "/" between them, in the units
-    of the three fields of its row: "2 / 0.5 / 0" is 2 ohm and 0.5 nH, with
+    of the three fields of its row. "2 / 0.5 / 0" is 2 ohm and 0.5 nH, with
     no C (a PIN diode that is on); "0 / 0.5 / 0.15" is a PIN diode that is
     off.
     """
@@ -255,8 +255,8 @@ def _port_choices(p):
     equal. The label of the port row names what the geometry does not give.
 
     **A through-hole pad gets a coaxial feed and no lumped port.** There
-    is one entry for each side that has a gap around the pad, with the
-    default side first: the side is where the connector is. Its value is
+    is one entry for each side that has a gap around the pad. The default
+    side, where the connector is, is first. Its value is
     "coax:" and the layer. A lumped port of such a pad goes to the adjacent
     layer, and there the copper below the pad is the ring of the pad.
     """
@@ -413,8 +413,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
 
 
 def _legend(ax, **kw):
-    """Draw the legend of `ax` if it has a trace. A graph whose traces the
-    user hid has no legend, and matplotlib then gives no warning."""
+    """Draw the legend of `ax` if it has a trace. When the user hid all the
+    traces of a graph, it has no legend, and matplotlib no warning."""
     if ax.get_legend_handles_labels()[0]:
         ax.legend(**kw)
 
@@ -483,7 +483,7 @@ class SettingsDialog(wx.Dialog):
         # because it sets which fields below the run uses.
         #
         # **A wx.RadioBox, and not a wx.Choice**: a solver that is not
-        # installed stays in the list but greyed out, and a wx.Choice cannot
+        # installed stays in the list but greyed out. A wx.Choice cannot
         # disable one item. Its tooltip and the line below give the cause.
         # The first solver that can run is the default.
         self.solver = wx.RadioBox(self, label="Solver",
@@ -535,8 +535,8 @@ class SettingsDialog(wx.Dialog):
         #
         # **A SpinCtrlDouble, and not a SpinCtrl.** The dialog moves each
         # control into its scrolled body below. On Windows a wx.SpinCtrl is
-        # a text box and a buddy button, and after that move it got a size
-        # of 0 x 0: the row showed "Frequencies:" and no field.
+        # a text box and a buddy button. After that move, it got the
+        # dimensions 0 x 0: the row showed "Frequencies:" and no field.
         fd.Add(wx.StaticText(self, label="Frequencies:"), 0,
                wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
         self.fem_points = wx.SpinCtrlDouble(self, min=2, max=201,
@@ -820,7 +820,7 @@ class SettingsDialog(wx.Dialog):
                 # these parts.
                 srf_ctrls = []
                 # **Each field shows only for a type that uses it**
-                # (`PARA_FIELDS`), and the fields that show sit next to
+                # (`PARA_FIELDS`). The fields that show are adjacent to
                 # each other from the left: a resistor has its ESL where
                 # the other types have the ESR. Each field has the SAME
                 # width (one label width and one unit width for the
@@ -857,8 +857,8 @@ class SettingsDialog(wx.Dialog):
                 # three fields of a Series RLC.** A Series RLC row hides
                 # its parasitics, thus its three fields use their space.
                 # When they had a cell of their own, the value cell of
-                # EACH row kept space for them, and the dialog was 266 px
-                # wider with no Series RLC row.
+                # EACH row kept space for them. Thus the dialog was 266 px
+                # wider, also with no Series RLC row.
                 area = wx.BoxSizer(wx.HORIZONTAL)
                 area.Add(single, 0, mid)
                 area.Add(triple, 0, mid)
@@ -1078,7 +1078,7 @@ class SettingsDialog(wx.Dialog):
         content = top.GetMinSize()
         # **Keep the width of the scroll bar at all times.** The bar comes
         # into view when the content becomes taller than the body: a new
-        # line of the warning is sufficient. It then took 17 px from
+        # line of the warning is sufficient. It then removed 17 px from
         # content that had no more width, and the right edge went out of
         # view.
         content.SetWidth(content.GetWidth()
@@ -1221,7 +1221,7 @@ class SettingsDialog(wx.Dialog):
         """Put the pad and its problem tag into the label of each port.
 
         The label is the footprint, the pad and the net: "P1 Pad 1 (RF1)",
-        as in the dialog of 2026-07-31. The owner wants the net in view.
+        as in the dialog of 2026-07-31. The owner keeps the net in view.
         The number of the port is the choice of the row, thus the label
         does not repeat it. A tag names what stops all the de-embedded
         types: "[No Track]". A coplanar gap that is missing gets no tag. It
@@ -1279,7 +1279,7 @@ class SettingsDialog(wx.Dialog):
         if area is None:
             return
         rows = max(1, len(self.part_rows))
-        # A hidden ESR, ESL or SRF keeps a blank space of its width, thus
+        # A hidden ESR, ESL or SRF keeps a blank space of its width. Thus
         # a change of the type does not change the width of a row.
         best = area.GetSizer().GetMinSize()
         one = best.GetHeight() / float(rows)
@@ -1504,7 +1504,7 @@ class SettingsDialog(wx.Dialog):
         text = ""
         # **The two lines are for openEMS only.** EMerge has no timestep,
         # thus an inductor costs no run time. It also keeps each part in
-        # the model, also a part that is an open circuit over the sweep.
+        # the model, also a part that is an open circuit across the sweep.
         fdtd = self._solver_key() == "openems"
         # The rule starts to cost at 0.25 nH. A body ESL of 0603 to 2512
         # (0.35 to 0.90 nH) costs 1.2 to 1.9 times. Below 1.05, the number
@@ -1530,7 +1530,7 @@ class SettingsDialog(wx.Dialog):
                        "" if steps is None
                        else " (up to %s timesteps)" % _count_text(steps),
                        _cause_text(source, value)))
-        # **A part that is open over the sweep is not in the run.** The
+        # **A part that is open across the sweep is not in the run.** The
         # user typed its value, and the run ignores the part. Without this
         # line, the run-time line went away with no cause when a value
         # became large. A body that the run leaves out changes |Z| by 2%
@@ -1573,8 +1573,8 @@ class SettingsDialog(wx.Dialog):
         self.Layout()
         # **Paint all the dialog again.** A new warning makes its box
         # taller, and the Layout moves the controls. The window of the
-        # rows then kept areas that it did not paint again: the label of a
-        # row became empty when a row became an inductor.
+        # rows then kept areas that it did not paint again. Thus the label
+        # of a row became empty when a row became an inductor.
         self.Refresh()
 
     def _pml_mm(self):
@@ -1858,7 +1858,7 @@ class SettingsDialog(wx.Dialog):
         # 90000 nH causes 180 million steps for the 300000 of the default.
         # That is about 135 hours on the SMALL board of the rigs.
         #
-        # A user who wants such a run can also give a "Timestep",
+        # For such a run, a user can also give a "Timestep",
         # which `_derived_steps` reads. That user then accepts the risk of
         # a run that diverges.
         steps = self._derived_steps()
@@ -2145,8 +2145,8 @@ class SettingsDialog(wx.Dialog):
         """Give (the name of the state, the row, the entry in SI) of each
         cell of State 2 and above that the run uses.
 
-        A cell of a part that is off, or with no type, gives nothing. So
-        does a cell that is not a number, or a part that changed its type
+        A cell of a part that is off, or with no type, gives nothing. The
+        same is true for a cell that is not a number, or a part that changed its type
         after the user edited the states: `_on_ok` refuses those.
         """
         rows = {ref: i for i, (ref, _, _, _, _) in enumerate(self.para_rows)}
@@ -2241,7 +2241,7 @@ class SettingsDialog(wx.Dialog):
             # elements, thus model.json keeps the values that the solver
             # uses. "Custom" goes through as it is. Thus the log of the
             # solver shows the difference between a value that the user
-            # selected and a package that the code could not read. Each row
+            # selected and a package that the code cannot read. Each row
             # gives its type and its value, also a row that the user did
             # not touch. The dialog SHOWS what the parser read. Thus what
             # the dialog shows is what model.json holds. "type" is None for
@@ -2722,10 +2722,10 @@ class ResultsFrame(wx.Frame):
                                 | wx.TE_DONTWRAP)
         self.text.Hide()
         # **A check box for each trace of a graph**: a trace that the user
-        # clears leaves the graph, and the scale fits the traces that stay.
+        # clears leaves the graph. The scale fits the traces that stay.
         # The choice holds for each name in each view, thus S11 hidden in
         # the magnitude is also hidden in the phase and the Smith chart.
-        # The list is on a white panel of the height of the canvas, thus
+        # The list is on a white panel of the height of the canvas. Thus
         # the column at the right of the graph is white as the figure.
         self.side = wx.Panel(self)
         self.side.SetBackgroundColour(wx.WHITE)
@@ -2951,7 +2951,7 @@ class ResultsFrame(wx.Frame):
                     continue
                 net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid, color=c)
                 grid = False
-            if grid:  # the user hid each trace: the chart alone
+            if grid:  # the user hid each trace: only the chart
                 from skrf.plotting import smith
                 smith(ax=ax, draw_labels=True)
             for ln in ax.get_lines():  # skrf writes "name, S11": use "S11"
@@ -3093,7 +3093,7 @@ class ResultsFrame(wx.Frame):
         if not self.side.IsShown() or not axes:
             return
         # The figure has pixels of the device, and the sizer has the
-        # logical pixels of wx: they differ on a screen with a scale.
+        # logical pixels of wx: they are different on a screen with a scale.
         fig_h = self.figure.bbox.height
         top = ((fig_h - axes[0].bbox.y1) * self.canvas.GetSize().height
                / fig_h)

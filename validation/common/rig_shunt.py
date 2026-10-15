@@ -106,16 +106,16 @@ L_PART_TOL = 0.15
 # |S11|^2 + |S21|^2 at the notch, as a part of the same sum of the board
 # next to the notch (0.7 to 0.9 and 1.1 to 1.3 of f0, the median). The
 # branch has no resistance in these runs. Thus the power that does not go
-# through must come back, and only the loss of the board itself (copper,
+# through must come back. Only the loss of the board itself (copper,
 # dielectric, radiation, the ports) removes a part. A run that loses MORE
 # at the notch is not a measurement. In openEMS, an inductor of 5 nH gave
 # 0.944 of the board at medium and read +16.2%, and 0.955 at coarse and
 # read +5.1%; 1 nH, 2 nH and the short give 0.988 to 1.005.
 #
 # **It is relative, and not an absolute sum** (B72, 2026-09-30). The board
-# of EMerge keeps only 0.99 to 0.87 of the power over the sweep with no
-# notch at all (tan d constant, the copper, and the wave ports), thus an
-# absolute 0.95 failed its good runs (0.914 to 0.933 at the notch, +2.4%
+# of EMerge keeps only 0.99 to 0.87 of the power in the sweep with no
+# notch (tan d constant, the copper, and the wave ports). Thus an
+# absolute 0.95 rejected its good runs (0.914 to 0.933 at the notch, +2.4%
 # and +2.9%). Relative to its own board, EMerge gives 0.990 to 0.999.
 POWER_MIN = 0.95
 # **Each run of `two()` is 5 ns long, and no end criteria stops it** (B80,
@@ -123,8 +123,8 @@ POWER_MIN = 0.95
 # 2.9 ns. The engine tests the energy at intervals, and the energy of this
 # board has a short dip near 2.2 ns. A test that falls in the dip stops the
 # run there, and the multithread engine moves the dip from run to run. A
-# port signal is still near 1e-2 of its peak at 3 ns. Thus a run that stops
-# early gives sum|S|^2 above 1 below 1.5 GHz, and the notch moves. Measured
+# port signal is also near 1e-2 of its peak at 3 ns. Thus a run that stops
+# before the end gives sum|S|^2 above 1 below 1.5 GHz, and the notch moves. Measured
 # at the coarse preset, with the same model each time:
 #
 #   the stop                  2 nH    1 nH    sum|S|^2 below 1.5 GHz
@@ -136,9 +136,9 @@ POWER_MIN = 0.95
 #
 # 5e-5 is not a correction: the run of 2 nH stopped in the dip again, at
 # the same step as with 1e-4. **1e-5 is not possible on this board.** The
-# energy falls to -44 dB at about 5 ns. Then a slow mode grows, which the
-# PML makes near a column of refined cells (B30), to -12 dB at 115 ns, and
-# the run stops at the step limit after 28 min. Thus the run stops at the
+# energy falls to -44 dB at about 5 ns. Then a slow mode grows to -12 dB at
+# 115 ns. The PML makes it near a column of refined cells (B30). The run
+# stops at the step limit after 28 min. Thus the run stops at the
 # minimum of the energy, before the growth. Two runs of 5 ns give the same
 # bits. The runner then gives its warning that the run stopped at the step
 # limit, and that warning is correct here.
@@ -409,7 +409,7 @@ def two(mesh="coarse"):
           % (excess[0] * 1e9, excess[1] * 1e9))
     # **The sign is a property of the lumped inductor of openEMS.** The
     # element of EMerge is its Z(f), with no cells of its own, thus its
-    # excess can have each sign. It still must stay in L_PART_TOL above.
+    # excess can have each sign. It also must stay in L_PART_TOL above.
     if rigsolve.SOLVER == "openems" and min(excess) < -ESL_FLOOR_H:
         fails.append("an inductor reads LOW (%.4f nH): the excess of this "
                      "board is positive on every measurement so far"

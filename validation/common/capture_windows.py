@@ -37,7 +37,7 @@ import board_reader  # noqa: E402
 import gui  # noqa: E402
 
 # The board of the dialog comes from `make_lumped_board.make`. The
-# tests make it when it is not there, thus they need no solver run.
+# tests make it when it is not there, thus no solver run is necessary.
 BOARD = os.path.join(HERE, "out_dialog", "series_r.kicad_pcb")
 if not os.path.isfile(BOARD):
     import make_lumped_board  # noqa: E402

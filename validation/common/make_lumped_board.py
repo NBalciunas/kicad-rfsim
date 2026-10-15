@@ -1,7 +1,7 @@
-"""The boards of the lumped tests: a series part in a microstrip of 50
-ohm, a part in shunt to ground, and two parts in series to ground.
+"""The boards of the lumped tests: a series part in a 50 ohm microstrip,
+a shunt part to ground, and two series parts to ground.
 
-The boards need pcbnew only, thus the rigs of each solver use them.
+The boards use only pcbnew, thus the rigs of each solver use them.
 Run the rigs with the python of KiCad 10.
 """
 import pcbnew
@@ -10,8 +10,8 @@ from pcbnew import FromMM, VECTOR2I
 TRACE_W = 2.9   # about 50 ohm on FR4 of 1.6 mm
 Y = 10.0
 BOARD = (0.0, 0.0, 40.0, 20.0)
-# The shunt board of make_shunt(): the part is below the line at SHUNT_X,
-# and a via connects the ground side of it down to the plane.
+# The shunt board of make_shunt(): the part is below the line at SHUNT_X.
+# A via connects the ground side of the part down to the plane.
 SHUNT_X = 20.0
 SHUNT_PAD = 1.0         # the pads of the part with no package, square
 SHUNT_GAP = 0.5         # the copper gap that the part bridges

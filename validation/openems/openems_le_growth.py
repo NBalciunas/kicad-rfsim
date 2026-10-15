@@ -56,7 +56,7 @@ All users can make this mesh:
 **Two controls that one number held before.** `MARGIN` gave the air band
 AND the cell of the PML at the same time (`MARGIN` mm of air, and a PML of
 8 cells of `MARGIN`/8). Thus a run at 12 mm moved the two of them, and no
-measurement could tell which one causes the mode. `AIR` and `PML_STEP` are
+measurement was able to tell which one causes the mode. `AIR` and `PML_STEP` are
 different values at this time. The `MARGIN` = m of before is `AIR` = m with
 `PML_STEP` = m/8.
 
@@ -297,7 +297,7 @@ def build(comp=None, factor=1.0, pec=False, cells=1, time_ns=TIME_NS,
 
     `cells` is the number of mesh cells in series through the box of the
     element: 1 is the box with no line in it. `end` is the end criteria.
-    Its default value is so small that no run gets to it. The window then
+    Its default value is too small, thus no run gets to it. The window then
     comes only from `time_ns`. `short` puts a box of PEC in the gap.
     `solid` makes the strip as ONE polygon with no gap. Those two controls
     tell if the gap causes the mode.
