@@ -33,7 +33,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
    > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
-5) Install **one solver, at least**: openEMS (step 6), EMerge (step 7) or both. The dialog grays out a solver that is not installed.
+5) Install at least one solver: openEMS (step 6), EMerge (step 7) or both. The dialog grays out any solver that is not installed.
 
 6) (optional) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases) and extract the `openEMS` folder to `C:\openEMS`. Install [Python 3.14](https://www.python.org/downloads/), then make the venv of openEMS:
 
@@ -77,9 +77,12 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
 ### Ports
 
-**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** Its box covers the whole pad and the whole substrate.
+**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.**
+Its box covers the whole pad and the whole substrate.
 
-Each port needs copper at the pad on the reference layer, the adjacent layer below or, for an inner layer, above. Without it, the plugin does not run. A CPW port is the exception: its return path is the copper at the sides of the line.
+Each port needs copper at the pad on the reference layer, the adjacent layer below or, for an inner layer, above.
+Without it, the plugin does not run.
+A CPW port is the exception: its return path is the copper at the sides of the line.
 
 The dialog gives only the types that the geometry permits:
 
@@ -100,7 +103,9 @@ A pad with no such gap and no track stops the run.
 
 ### The impedance of a line
 
-The microstrip, the coplanar and the stripline ports measure their own line. The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds it with the effective permittivity. A lumped port has no line.
+The microstrip, the coplanar and the stripline ports measure their own line.
+The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds it with the effective permittivity.
+A lumped port has no line.
 
 ### The substrate and the domain
 
@@ -125,7 +130,8 @@ Rogers gives two εr for each grade: a stripline value and a larger design value
 **The loss of the substrate is correct at one frequency only**, the center of the sweep.
 Put the center of the sweep at the frequency that matters, or keep the sweep narrow.
 
-The domain is the board, the margin of air around it, and an absorber 8 cells deep. Copper that crosses the outer edge ends in the absorber and does not reflect.
+The domain is the board, the margin of air around it, and an absorber 8 cells deep.
+Copper that crosses the outer edge ends in the absorber and does not reflect.
 
 ### Accuracy
 
@@ -140,7 +146,8 @@ The mesh preset sets the cells for each wavelength, at the shortest wavelength o
 
 The preset sets only this step. The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
 
-The coarse preset is for a first look, and a small lumped element reads too large there. Use medium or fine when a number is important. For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+The coarse preset is for a first look, and a small lumped element reads too large there.
+Use medium or fine when a number is important. For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
 
 ### Lumped elements
 
@@ -163,29 +170,32 @@ Each footprint with 2 numbered SMD pads on one copper layer gives a row in the "
 
 **Each type has its own mark for the unit**, in upper or lower case: `4F7` on a resistor and `4R7` on an inductor give no value. Give such a value in the dialog.
 
-The letter can also come after the number (`4.7k`, `22p`). The unit letter is optional (`10uH` reads as `10u`), and the unit can be a word (`10 kOhm`, `4.7 uF`). A word after a space, such as `10%` or `25V`, has no effect, and "DNP" gives no value. The dialog shows the value that the plugin read.
+The letter can also come after the number (`4.7k`, `22p`). The unit letter is optional (`10uH` reads as `10u`).
+A word after a space, such as `10%` or `25V`, has no effect.
+
+**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
+Its row holds R in ohm, L in nH and C in pF, in series. 0 leaves that component out.
+
+**"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
+The grid has a column for each state and a row for each part with "Model" on. State 1 is the reference.
+A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
+An empty cell keeps the value of State 1. Each state is one run, in the folder `state_N` of the output directory.
+
+#### Parasitics and run time
 
 **Each row also holds the parasitics of the body** that its type uses: a resistor has an ESL, a capacitor has an ESR and an ESL, and an inductor has an ESR (its DCR).
 The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`), from 8 codes between 0201 and 2512.
 Any other name gives "Custom", and "No parasitics" makes an ideal element.
-The run leaves out a body that changes |Z| of its part by 2% or less over the sweep, for example the ESL of a 1 kohm pull-up. The Optimizations view of the results names these parts.
+The run leaves out a body that changes |Z| of its part by 2% or less over the sweep.
 
-**An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet. The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
-A land of one mesh cell cannot hold the capacitance, and the run says so.
+**An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet.
+The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
 
-**An inductance makes the run longer.** 0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well.
+**An inductance makes the run longer.** 0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times.
+The ESL of a body counts as well.
 The label under the rows of the parts gives the number before you start the run.
-A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit. The run leaves it out at no cost, and the label names it.
-
-**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
-Its row holds R in ohm, L in nH and C in pF, in series, with no parasitics. 0 leaves that component out.
-
-**"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
-The grid has a column for each state and a row for each part with "Model" on. State 1 is the values of the rows, and the reference.
-A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
-An empty cell keeps the value of State 1.
-
-Each state is one run, in the folder `state_N` of the output directory.
+A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit.
+The run leaves it out and the label names it.
 The results window then has a "State" choice for the other views, and four views that compare the states: the magnitude, the phase and the phase difference (to State 1) of S21, and the magnitude of S11.
 A block of text gives the value of each state at "Define at".
 
