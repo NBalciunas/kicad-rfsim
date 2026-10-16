@@ -2728,8 +2728,14 @@ class ResultsFrame(wx.Frame):
         # The list is on a white panel of the height of the canvas. Thus
         # the column at the right of the graph is white as the figure.
         self.side = wx.Panel(self)
+        self.side.SetThemeEnabled(False)
+        self.side.SetBackgroundStyle(wx.BG_STYLE_COLOUR)
         self.side.SetBackgroundColour(wx.WHITE)
         self.traces = wx.CheckListBox(self.side)
+        self.traces.SetBackgroundColour(wx.WHITE)
+        # The frame is white too, so no grey strip stays if the panel does
+        # not fill the column.
+        self.SetBackgroundColour(wx.WHITE)
         side = wx.BoxSizer(wx.VERTICAL)
         self._gap = side.Add((0, 6))  # `_place_traces` sets its height
         side.Add(self.traces, 0, wx.RIGHT, 6)
@@ -3232,9 +3238,15 @@ class ResultsFrame(wx.Frame):
         # A current view (F4) shows the copper of its own layer.
         current = kind.startswith("J:")
         top = kind[2:] if current else self.model["ports"][0]["layer"]
+        # A pour with holes is ONE fractured outline, which reaches each hole
+        # along a slit with no width. Drawn as it is, the slit shows as a
+        # line from the edge of the pour to the hole.
         for poly in self.model["polygons"].get(top, []):
-            ax.plot([p[0] for p in poly] + [poly[0][0]],
-                    [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
+            outline, holes = solverenv.split_rings(poly)
+            for ring in [outline] + holes:
+                ax.plot([p[0] for p in ring] + [ring[0][0]],
+                        [p[1] for p in ring] + [ring[0][1]],
+                        color="0.2", lw=0.6)
         # **The ports, in the same lime as the Board layout view.** The
         # field views are the pictures that go out of the tool. A reviewer
         # on 2026-08-03 read the port at an incorrect position, because no

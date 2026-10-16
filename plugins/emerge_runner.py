@@ -134,49 +134,6 @@ def _impedance(comp, epc):
     return z
 
 
-def _area(ring):
-    """Give the signed area of a ring (the shoelace formula)."""
-    n = len(ring)
-    return 0.5 * sum(ring[i][0] * ring[(i + 1) % n][1]
-                     - ring[(i + 1) % n][0] * ring[i][1] for i in range(n))
-
-
-def _rings(poly):
-    """Give (the outline, the holes) of a fractured polygon.
-
-    **KiCad keeps a pour with holes as ONE outline** (`Fracture`). The
-    outline goes into each hole along a slit with no width, and it comes
-    back along the same slit. openEMS rasterizes such a polygon correctly.
-    gmsh makes a surface of it, and a slit with no width makes that
-    surface degenerate. A ground zone with the clearances of three vias
-    gave S11 = 0 dB and S21 = -51 dB: the plane was not in the model.
-
-    A slit shows as a point that the outline visits two times. The
-    shortest loop between two visits is a hole or a spike of the slit. A
-    loop with an area is a hole, and a loop with no area is a spike. The
-    loop leaves the outline each time, until no point repeats.
-    """
-    pts = [(round(x, 6), round(y, 6)) for x, y in poly]
-    if len(pts) > 1 and pts[0] == pts[-1]:
-        pts = pts[:-1]
-    loops = []
-    while True:
-        seen, best = {}, None
-        for j, q in enumerate(pts):
-            if q in seen and (best is None
-                              or j - seen[q] < best[1] - best[0]):
-                best = (seen[q], j)
-            seen[q] = j
-        if best is None:
-            break
-        i, j = best
-        loop = pts[i:j]
-        if len(loop) >= 3 and abs(_area(loop)) > 1e-9:
-            loops.append(loop)
-        pts = pts[:i] + pts[j:]
-    return pts, loops
-
-
 def _feature_boxes(ports, z_of, edge, box, part=0.5):
     """Give the boxes of a fine mesh along the feed of each port, as
     (x0, y0, z0, x1, y1, z1, size) in mm.
@@ -996,19 +953,19 @@ def main(model_path, outdir):
         cs = em.GCS.displace(0, 0, z)
         parts = []
         for p in polys:
-            outline, loops = _rings(p)
+            outline, loops = solverenv.split_rings(p)
             if len(outline) < 3:
                 continue
             surf = em.geo.XYPolygon(np.array(outline)[:, 0] * MM,
                                     np.array(outline)[:, 1] * MM).geo(cs)
-            sign = np.sign(_area(outline))
+            sign = np.sign(solverenv.ring_area(outline))
             for loop in loops:
                 piece = em.geo.XYPolygon(np.array(loop)[:, 0] * MM,
                                          np.array(loop)[:, 1] * MM).geo(cs)
                 # A loop that turns the other way is a hole. A loop that
                 # turns the same way is copper in a hole, which the
                 # outline also went around.
-                if np.sign(_area(loop)) != sign:
+                if np.sign(solverenv.ring_area(loop)) != sign:
                     surf = em.geo.remove(surf, piece)
                 else:
                     surf = em.geo.add(surf, piece)

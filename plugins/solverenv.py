@@ -688,3 +688,46 @@ SOLVER_INFO = {
                "python": emerge_python},
 }
 SOLVERS = tuple(SOLVER_INFO)
+
+
+def ring_area(ring):
+    """Give the signed area of a ring (the shoelace formula)."""
+    n = len(ring)
+    return 0.5 * sum(ring[i][0] * ring[(i + 1) % n][1]
+                     - ring[(i + 1) % n][0] * ring[i][1] for i in range(n))
+
+
+def split_rings(poly):
+    """Give (the outline, the holes) of a fractured polygon.
+
+    **KiCad keeps a pour with holes as ONE outline** (`Fracture`). The
+    outline goes into each hole along a slit with no width, and it comes
+    back along the same slit. openEMS rasterizes such a polygon correctly.
+    gmsh makes a surface of it, and a slit with no width makes that
+    surface degenerate. A ground zone with the clearances of three vias
+    gave S11 = 0 dB and S21 = -51 dB: the plane was not in the model.
+
+    A slit shows as a point that the outline visits two times. The
+    shortest loop between two visits is a hole or a spike of the slit. A
+    loop with an area is a hole, and a loop with no area is a spike. The
+    loop leaves the outline each time, until no point repeats.
+    """
+    pts = [(round(x, 6), round(y, 6)) for x, y in poly]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    loops = []
+    while True:
+        seen, best = {}, None
+        for j, q in enumerate(pts):
+            if q in seen and (best is None
+                              or j - seen[q] < best[1] - best[0]):
+                best = (seen[q], j)
+            seen[q] = j
+        if best is None:
+            break
+        i, j = best
+        loop = pts[i:j]
+        if len(loop) >= 3 and abs(ring_area(loop)) > 1e-9:
+            loops.append(loop)
+        pts = pts[:i] + pts[j:]
+    return pts, loops
