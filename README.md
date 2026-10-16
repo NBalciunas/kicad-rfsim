@@ -7,18 +7,18 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
 ## Features
 
+- Use one of two solvers: openEMS (FDTD) or EMerge (FEM).
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
-- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay. Clear the checkbox of a trace to hide it.
+- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
 - Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
 - Calculate the far field: three polar cuts, a 3D pattern, Dmax, the efficiency, and the co-polarization, the cross-polarization (Ludwig 3) and the XPD.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
 - Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
-- Simulate more than one set of part values (the states of a phase shifter), one run each, and compare the magnitude and the phase of S21 of the states.
-- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port, or feed a through-hole pad from a coaxial connector on F.Cu or B.Cu.
+- Simulate more than one set of part values (for example the states of a phase shifter), one run each, and compare the magnitude and the phase of S21 of the states.
+- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port, or feed a through-hole pad from a coaxial connector.
 - Extract the geometry from the board: the pads, tracks, arcs, vias, zones, shapes and text on copper.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
-- Select the solver in the dialog: openEMS (FDTD) or EMerge (FEM).
 
 ## Installation
 
@@ -110,11 +110,13 @@ A lumped port has no line.
 ### The substrate and the domain
 
 "KiCad's Stackup" takes εr, tanδ and the thickness of each layer from Board Setup > Physical Stackup.
-The dialog starts there when the board has a stackup, and the four fields are then read-only. A field with more than one value joins them with " / ".
+The dialog starts there when the board has a stackup, and the four fields are then read-only.
+A field with more than one value joins them with " / ".
 
 > When the stackup has changes that you did not save, RFsim asks which values to use.
 
-The other presets make a uniform stackup. They fill εr and tanδ, and "Custom" leaves the two fields to you:
+The other presets make a uniform stackup.
+They fill εr and tanδ, and "Custom" leaves the two fields to you:
 
 | Preset                      | εr   | tanδ   |
 |-----------------------------|------|--------|
@@ -144,17 +146,23 @@ The mesh preset sets the cells for each wavelength, at the shortest wavelength o
 | Fine      | 40                   | 0.59 mm                      |
 | Ultrafine | 80                   | 0.29 mm                      |
 
-The preset sets only this step. The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
+The preset sets only this step.
+The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
 
 The coarse preset is for a first look, and a small lumped element reads too large there.
-Use medium or fine when a number is important. For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+Use medium or fine when a number is important.
+For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
 
 ### Lumped elements
 
 Each footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog.
-**The first letter of the reference gives the type**: R, L or C. Each other 2-terminal part, for example a diode, starts at "Unknown" with "Model" off. It changes nothing until you select a type and give a value.
+**The first letter of the reference gives the type**: R, L or C.
+Each other 2-terminal part, for example a diode, starts at "Unknown" with "Model" off.
+It changes nothing until you select a type and give a value.
 
-**The Value field of the footprint gives the value.** The same letters serve the three types, and the type gives the unit. The case is important: `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
+**The Value field of the footprint gives the value.**
+The same letters serve the three types, and the type gives the unit.
+The case is important: `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
 
 | Letter      | Prefix | Text              | Resistor | Capacitor | Inductor |
 |-------------|--------|-------------------|----------|-----------|----------|
@@ -170,14 +178,16 @@ Each footprint with 2 numbered SMD pads on one copper layer gives a row in the "
 
 **Each type has its own mark for the unit**, in upper or lower case: `4F7` on a resistor and `4R7` on an inductor give no value. Give such a value in the dialog.
 
-The letter can also come after the number (`4.7k`, `22p`). The unit letter is optional (`10uH` reads as `10u`).
+The letter can also come after the number (`4.7k`, `22p`).
+The unit letter is optional (`10uH` reads as `10u`).
 A word after a space, such as `10%` or `25V`, has no effect.
 
 **"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
 Its row holds R in ohm, L in nH and C in pF, in series. 0 leaves that component out.
 
 **"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
-The grid has a column for each state and a row for each part with "Model" on. State 1 is the reference.
+The grid has a column for each state and a row for each part with "Model" on.
+State 1 is the reference.
 A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
 An empty cell keeps the value of State 1. Each state is one run, in the folder `state_N` of the output directory.
 
@@ -191,7 +201,8 @@ The run leaves out a body that changes |Z| of its part by 2% or less over the sw
 **An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet.
 The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
 
-**An inductance makes the run longer.** 0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times.
+**An inductance makes the run longer.**
+0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times.
 The ESL of a body counts as well.
 The label under the rows of the parts gives the number before you start the run.
 A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit.
@@ -223,7 +234,8 @@ The 3D radiation pattern, which you can rotate:
 
 ## Validation
 
-The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory. [validation/README.md](validation/README.md) lists the tests and tells how to run them.
+The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory.
+[validation/README.md](validation/README.md) lists the tests and tells how to run them.
 
 ## License
 
