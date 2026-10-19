@@ -1,6 +1,6 @@
-"""Run a model through the solver of the rig that is running.
+"""Run a model through the solver of the rig that runs at this time.
 
-The rigs of `validation/common/rig_*.py` test the same things in the two
+The rigs of `validation/common/rig_*.py` test the same items in the two
 solvers. A small file in `validation/openems/` or `validation/emerge/`
 selects the solver and the folder of the results with `use()`, and it then
 starts the rig. The rig calls `run()` for each board. Thus a rig holds the

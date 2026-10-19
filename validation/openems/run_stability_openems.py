@@ -181,7 +181,7 @@ def solve(model, factor, tmp):
     model["settings"]["time_step_factor"] = factor
     shutil.rmtree(tmp, ignore_errors=True)
     # **Tell why the directory stays**, and do not give a traceback for it.
-    # A run that somebody stopped keeps its solver process. That process
+    # A run that a person stopped keeps its solver process. That process
     # holds the port files open, and Windows then refuses to remove them.
     if os.path.isdir(tmp):
         raise SystemExit(
@@ -421,7 +421,7 @@ def ladder_stage(src, med, tmp):
                                           ">=" if lim else "", f / rule)))
                 margins.append((f / rule, lim))
         # The worst geometry comes from the points that the ladder
-        # MEASURED. A point at the top of the ladder only says "1.4x or
+        # MEASURED. A point at the top of the ladder only tells "1.4x or
         # more", thus it cannot name the worst geometry.
         real = [m for m, lim in margins if not lim]
         m = min(real) if real else min(m for m, _ in margins)

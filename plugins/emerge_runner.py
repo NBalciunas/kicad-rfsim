@@ -313,7 +313,7 @@ def _power_overlap():
     **EMerge projects the field on the mode of the port with E . e***
     (`sparam.py`). That is the orthogonality of the modes of a guide with
     ONE dielectric. A microstrip has two, thus the field of the line is
-    not accurately the 2D mode, and E . e* does not count the power of the
+    not accurately the 2D mode. E . e* does not count the power of the
     difference. The projection with E x h* . n is the orthogonality of the
     modes of a guide with no loss and any dielectrics:
 

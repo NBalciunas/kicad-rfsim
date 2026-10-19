@@ -34,7 +34,7 @@ This file measures these things:
 The first four cases are:
 
 - `r50` puts a 50 ohm resistor in the box. A resistor costs no timestep,
-  thus the grid run is cheap. The load is then equal to the reference
+  thus the grid run is short. The load is then equal to the reference
   impedance: `G` = 0, and the reduction gives the block of the board back.
   **It tests the PORT and not the mathematics.** The box, the axis, the
   reference plane and the mesh must all be correct. If not, the two curves
@@ -422,7 +422,7 @@ def case_l10():
     """The 10 nH inductor of `run_rlc_openems.py`: the reduction itself.
 
     The load turns with frequency here, thus `G` is not 0, and all the
-    formula gives the answer. The grid run pays the timestep of the rule;
+    formula gives the answer. The grid run uses the timestep of the rule;
     the co-simulated run does not.
     """
     print("\n=== a 10 nH inductor: the reduction ===")
@@ -524,7 +524,7 @@ def case_precision():
     element in the grid, as the load sends back more and more power.
 
     **A RESISTOR is the tool of this case.** A resistor costs the grid run
-    no timestep. Thus the run that puts it in the grid is cheap at each
+    no timestep. Thus the run that puts it in the grid is short at each
     value, and it gives a reference at each one. Also, the value of a
     resistor moves `G` from 0 at z0 to almost 1 at a value far from z0.
     Thus the row of R measures the error against ONE value. That value

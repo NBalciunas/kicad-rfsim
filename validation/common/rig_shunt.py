@@ -23,7 +23,7 @@ remove, against 3.1 ohm for an 0402 ESL at 2 GHz. That systematic error is
 a scale error of the amplitude, and no scale error can move a frequency.
 This file uses the procedure that stays.
 
-The tool asserts three things:
+The tool asserts three conditions:
 
 1. Each run gives a deep notch (the resonance is there).
 2. The board inductance is the same for two DIFFERENT capacitors. It is a
@@ -150,7 +150,7 @@ POWER_MIN = 0.95
 # of the feed and the stop do not change it. It is the error of a port of
 # 4 cells at the top of the sweep.
 MAX_STEPS_TWO = 13000
-END_TWO = 1e-9          # not met: the step limit stops the run
+END_TWO = 1e-9          # never true: the step limit stops the run
 
 
 def _in_poly(polys, x, y):

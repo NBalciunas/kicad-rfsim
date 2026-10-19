@@ -37,7 +37,7 @@ changes only the count of mesh lines IN the box:
 
     N cells in series  <->  N-1 lines in the box, with equal distances
 
-A copy of `plugins/` has that change, thus the code that ships does not
+A copy of `plugins/` has that change, thus the plugin code does not
 change. The copy reads two variables of the environment:
 
     RFSIM_LE_CELLS   N cells in series (0: no change to the mesh)
@@ -73,7 +73,7 @@ import openems_runner as runner  # noqa: E402
 import run_stability_openems as rs  # noqa: E402
 
 # The copy of `plugins/` with the hook. It goes adjacent to the output,
-# thus a run does not touch the code that ships.
+# thus a run does not touch the plugin code.
 COPY = os.path.join(HERE, "out_le_cells_plugins")
 
 # **The TURN of the trace finds the fast mode, and the e-fold does not.** A
@@ -253,7 +253,7 @@ def ladder_stage(src, tmp, lnh=10):
         cause, f, turn, slope = measure(src, lnh, cells=n, tmp=tmp)
         row("%d cell(s) in series" % n, cause, f, turn, slope)
         out.append((n, cause, turn, slope))
-    # The mesh that ships, for the same board and the same value.
+    # The mesh of the plugin, for the same board and the same value.
     cause, f, turn, slope = measure(src, lnh, cells=0, tmp=tmp)
     row("the mesh that ships", cause, f, turn, slope)
     out.append(("ships", cause, turn, slope))
@@ -283,7 +283,7 @@ def verdict(ladder):
     A row has the fast mode when the runner refused it for a growth. It
     also has the fast mode when its trace turns at a short time AND
     increases fast after the turn. The decision uses three rows: 2 cells
-    have the mode, and 1 cell and the mesh that ships do not.
+    have the mode, and 1 cell and the mesh of the plugin do not.
     """
     fast = [n for n, cause, turn, slope in ladder
             if cause == "growth"

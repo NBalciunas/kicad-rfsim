@@ -301,7 +301,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             cmd = [solver_py, runner, model_path, outdir]
             first = outdir
         # run.log keeps all the text that the window shows, because the
-        # window closes immediately when a run succeeds.
+        # window closes immediately when a run ends with no error.
         run = gui.RunDialog(None, cmd,
                             log_path=os.path.join(outdir, "run.log"))
         ok = run.ShowModal() == wx.ID_OK

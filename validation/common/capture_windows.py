@@ -2,7 +2,7 @@
 
 A capture of 2026-08-04 found a defect that the eye did not find. The
 sequence of the pictures showed the package choice go back to "No
-parasitics" after an edit. A person who clicks thinks that they did that.
+parasitics" after an edit. A person who clicks sees it as their own change.
 That harness stayed in the scratchpad of a session. Thus the subsequent
 change to the dialog had nothing to compare against. This file is that
 harness, in `validation/`.

@@ -79,8 +79,8 @@ def test_via_center_line():
     (`runner.VIA_SURFACE`). 12.3 - 12.0 = 0.3000000000000007 is OUT OF r =
     0.3. Thus the barrel of a 0.6 mm drill held ONE PEC edge, and it read
     +155% in inductance against Goldfarb and Pucel. A barrel of 5 edges
-    reads +13% to +20%. The nudge is 0.3 nm on this via, thus it cannot
-    move the geometry.
+    reads +13% to +20%. The offset into the barrel is 0.3 nm on this via, thus
+    it cannot move the geometry.
     """
     m = model("stripline")
     m["vias"] = [{"x": 12.0, "y": -7.0, "r": 0.3, "z0": 0.0, "z1": 1.46}]
@@ -371,7 +371,7 @@ def test_cpw_z_cells():
 
     # The chain must NOT move the line of a copper plane. _merge_close uses
     # the mean of two lines that are near each other. Thus a line of this
-    # chain that is near a plane pulls the plane off its own z. openEMS
+    # chain that is near a plane moves the plane off its own z. openEMS
     # then writes "Unused primitive (type: LinPoly)", and that copper is
     # not metal. The vias of 2026-08-03 (10) had the same failure.
     for c in m["copper_layers"]:

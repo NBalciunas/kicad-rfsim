@@ -233,7 +233,7 @@ def runner_with(cells, root):
 def realizable(cells, l_stub, mesh, w_stub, root):
     """Tell how many cells the mesh puts across the stub.
 
-    The rule and the merge tolerance work against each other. Thus only
+    The rule and the merge tolerance operate against each other. Thus only
     `_mesh` itself gives a reliable answer. This costs no solver run: the
     mesh rules give the answer in seconds.
     """
@@ -366,7 +366,7 @@ def main(mesh="coarse", w_stub=W_STUB):
     for a, b in zip(rows, rows[1:]):
         print("from %d cells to %d cells the answer moves %+.2f%%"
               % (a[0], b[0], 100.0 * (b[3] / a[3] - 1.0)))
-    # openEMS holds the shipped value of the rule. EMerge holds its one
+    # openEMS holds the value of the rule in the plugin. EMerge holds its one
     # row.
     shipped = [r for r in rows if r[0] == 2] if fdtd else rows
     if shipped:

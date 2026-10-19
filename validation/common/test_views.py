@@ -324,8 +324,8 @@ def test_the_states_are_compared():
 def test_the_ports_are_on_the_field_views():
     """The field views are the pictures that go out of the tool.
 
-    One time, a reviewer thought that a lumped port is at the edge of the
-    substrate on B.Cu. No picture showed the position of a port.
+    One time, a review gave an incorrect position for a lumped port: the
+    edge of the substrate on B.Cu. No picture showed the position of a port.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings()

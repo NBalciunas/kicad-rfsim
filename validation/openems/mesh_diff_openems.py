@@ -82,8 +82,8 @@ def mesh_of(r, model):
     """Give the three line lists of `model` with the runner module `r`.
 
     `res` comes from the formula of `main()`, with the constants of that
-    runner. The warnings of `_mesh` go nowhere. One warning for each board
-    hides the differences, and this file prints the differences.
+    runner. This file does not show the warnings of `_mesh`. One warning for
+    each board hides the differences, and this file prints the differences.
     """
     model = json.loads(json.dumps(model))  # the copies do not share it
     s = model["settings"]

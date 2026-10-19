@@ -206,7 +206,7 @@ def body_is_idle(comp, own, f_start, f_stop):
     at the factor of the inductor rule and 15 ns, `_diverged` gives:
 
         the DCR of 2 nH    0      0.01   0.1         1 ohm
-        the result         ok     ok     DIVERGES    DIVERGES
+        the result         stable stable DIVERGES    DIVERGES
 
     With 0.1 ohm and 1e-4, the energy gets to -33.5 dB only and then goes
     to inf at 33 ns. With 0.1 ohm the limit of the factor on that board is
@@ -240,7 +240,7 @@ def mesh_res(f_stop, eps_max, mesh):
     `f_stop` is the top of the sweep in Hz, `eps_max` is the largest
     permittivity of the stackup and `mesh` is a key of `RES_DIV`. The
     wavelength is the one in the fastest dielectric, thus the step holds
-    everywhere on the board.
+    at all points on the board.
     """
     return C0 / f_stop / math.sqrt(eps_max) * 1e3 / RES_DIV[mesh]
 

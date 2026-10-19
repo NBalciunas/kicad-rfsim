@@ -2,9 +2,9 @@
 microstrip of 50 ohm.
 
 For an ideal part with Z0 = 50, S21 = 2*Z0/(2*Z0+R) = -3.5 dB and S11 =
-R/(R+2*Z0) = -9.5 dB. If the simulation ignores the resistor, the gap is an
-open circuit: S11 near 0 dB and S21 much lower. The asserts below show the
-difference between the two conditions.
+R/(R+2*Z0) = -9.5 dB. If the simulation does not use the resistor, the gap
+is an open circuit: S11 near 0 dB and S21 much lower. The asserts below show
+the difference between the two conditions.
 
 Run this file with the python of KiCad 10. It uses pcbnew, and it starts
 the solver itself:

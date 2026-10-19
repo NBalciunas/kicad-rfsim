@@ -1,9 +1,9 @@
 """Make a picture of the geometry of a lumped port for the README.
 
-The documents did not show WHERE a port is. Thus a reviewer on 2026-08-03
-thought that a lumped port is at the EDGE of the substrate on B.Cu. It is
-at a PAD that the user selects. It excites that pad against the adjacent
-copper layer.
+The documents did not show WHERE a port is. Thus a review on 2026-08-03
+gave an incorrect position for a lumped port: the EDGE of the substrate on
+B.Cu. It is at a PAD that the user selects. It excites that pad against the
+adjacent copper layer.
 
 The numbers come from `runner._port_geometry` (the `else` branch) and from
 `openEMS.ports.LumpedPort`, and NOT from memory:

@@ -46,7 +46,7 @@ def fire(ctrl, evt_type):
 # `extract()` gives "default" and the dialog starts at FR-4. This is
 # the model of a board that HAS one: a Rogers RO4350B of 0.508 mm.
 # `dialog(stackup=...)` puts it into the preview, which is the only
-# thing that the dialog reads.
+# item that the dialog reads.
 ROGERS = {
     "stackup_source": "file",
     "dielectric_layers": [{"name": "dielectric 1", "z_top": 0.508,
@@ -200,7 +200,7 @@ def test_unknown_part_starts_off_and_empty():
     r = d.part_rows[1]
     assert d._kind_of(1) is None, "D1 does not start as Unknown"
     # The code knows nothing about the body of a part with no type, thus
-    # it must not invent an ESL for it.
+    # it must not make an ESL for it.
     assert d._pkg_of(d.para_rows[1][2]) == gui.NO_PARASITICS, \
         d._pkg_of(d.para_rows[1][2])
     assert d.para_rows[1][3].GetValue() == "0" \
@@ -275,7 +275,7 @@ def test_unknown_part_without_a_value_cannot_run():
     cb = d.para_rows[1][1]
     cb.SetValue(True)
     fire(cb, wx.EVT_CHECKBOX)
-    # _on_ok speaks through wx.MessageBox, which must have a person. Get
+    # _on_ok shows its text in wx.MessageBox, which must have a person. Get
     # the text, and not the message box. Thus the test runs with no
     # display.
     stopped = []
@@ -317,11 +317,11 @@ def test_unknown_part_without_a_value_cannot_run():
 
 
 def test_the_rows_scroll_and_the_dialog_stops_growing():
-    """A board with many parts must not make a dialog taller than a screen.
+    """A board with many parts must not make a dialog higher than a screen.
 
     Measured on 2026-08-04: 1053 px with ONE part, and 29 px more for each
-    subsequent part. Thus the dialog was taller than a screen of 1920x1080
-    with one part, and taller than 2560x1440 at 15 parts. At this time, the
+    subsequent part. Thus the dialog was higher than a screen of 1920x1080
+    with one part, and higher than 2560x1440 at 15 parts. At this time, the
     rows are in a scrolled window. Thus the height stops at MAX_PART_ROWS
     rows.
     """
@@ -352,7 +352,7 @@ def test_the_whole_dialog_scrolls_and_keeps_the_run_button():
     """A short dialog must also show the Run button.
 
     From 2026-08-05, the rows of the parts scrolled. But the dialog was
-    1084 px tall with ONE part. A screen of 1920x1080 has about 1040 px of
+    1084 px high with ONE part. A screen of 1920x1080 has about 1040 px of
     client area. At this time, ALL the dialog scrolls, and the Run button
     is OUT OF the scrolled body. A button that scrolls out of view is the
     defect that the scroll must not make.
@@ -416,7 +416,7 @@ def test_the_inductor_warning_follows_the_value():
     assert "1.3 times longer" in d.lumped_warn.GetLabel(), \
         "a body of 0.40 nH costs 1.3 times: %r" % d.lumped_warn.GetLabel()
     # **The label must name the SOURCE and the part** (B49). Before
-    # 2026-09-21, it said "An inductor of 0.4 nH". The board holds NO
+    # 2026-09-21, it showed "An inductor of 0.4 nH". The board holds NO
     # inductor: 0.40 nH is the body of an unknown package on R1.
     first = d.lumped_warn.GetLabel()
     assert "because of the 0.4 nH of R1." in first,         "the label must name the body and its part: %r" % first
@@ -600,8 +600,8 @@ def test_the_dialog_refuses_a_run_that_cannot_finish():
         assert "Timestep factor" not in msg, \
             "the message must not send the user to a factor that " \
             "diverges: %r" % msg
-        # **The alternative works.** 250000 steps at 0.005 is a limit of
-        # 50 million, which is the limit itself.
+        # **The alternative is satisfactory.** 250000 steps at 0.005 is a limit
+        # of 50 million, which is the limit itself.
         d.max_steps.SetValue("250000")
         del stopped[:]
         ok_evt()
@@ -625,11 +625,11 @@ def test_the_dialog_refuses_a_run_that_cannot_finish():
 def test_the_run_window_keeps_its_log():
     """RunDialog writes each line that it shows to run.log.
 
-    The window closes immediately when a run succeeds. Thus before this
-    file, its log was gone. Nobody could then read again the decisions of the
-    run, the thread count and how each excitation ended. The file must be
-    complete and CLOSED when ShowModal returns. A run that stops with an
-    error must also tell it in the file.
+    The window closes immediately when a run ends with no error. Thus
+    before this file, its log was gone. A person then cannot read again the
+    decisions of the run, the thread count and how each excitation ended. The
+    file must be complete and CLOSED when ShowModal returns. A run that stops
+    with an error must also tell it in the file.
     """
     import tempfile
     tmp = tempfile.mkdtemp()
@@ -661,7 +661,7 @@ def test_the_substrate_starts_at_fr4():
     A version filled the four fields from the `(stackup ...)` block of the
     board file. It came into the code and went out again on 2026-08-05, at
     the decision of the owner. At this time, the "KiCad's Stackup" preset
-    does that work. These conditions must stay true:
+    does that task. These conditions must stay true:
 
     - the fields start at the FR-4 preset for a board with NO stackup;
     - that preset must agree with the fallback of `board_reader`. If not,
@@ -682,8 +682,8 @@ def test_the_substrate_starts_at_fr4():
     assert gui.SUBSTRATE_PRESETS[0][0] == gui.BOARD_PRESET
     # Each preset must write its two values, and "Custom" must write none.
     # It is the entry where a value that the user types moves the row.
-    # "KiCad's Stackup" on a board with no stackup speaks and goes back to
-    # FR-4. Thus wx.MessageBox does not use a person here.
+    # "KiCad's Stackup" on a board with no stackup shows a message and goes
+    # back to FR-4. Thus wx.MessageBox does not use a person here.
     old_box, said = wx.MessageBox, []
     wx.MessageBox = lambda msg, *a, **k: (said.append(msg), wx.OK)[1]
     try:
@@ -718,7 +718,8 @@ def test_the_rogers_grades_have_two_rows():
     Rogers gives two Dk values for one laminate. It measures the process Dk
     with a stripline test. The design Dk is larger, and it is for a
     microstrip. The list has the two values, and a row must write its OWN
-    value. Two rows with one name and two numbers are easy to confuse. The
+    value. With one name and two numbers, a person can easily read the
+    incorrect row. The
     tan d is the same in the two rows of a grade.
     """
     names = [p[0] for p in gui.SUBSTRATE_PRESETS]
@@ -1246,7 +1247,7 @@ def test_an_inductor_row_keeps_its_model_box_in_view():
     The SRF columns show only for an inductor. Before, the window of the
     rows got its width from the rows when the dialog opened. Thus a board
     with no inductor gave a window with no space for the SRF. A row that
-    then became an inductor pushed its Model checkbox out of the window.
+    then became an inductor moved its Model checkbox out of the window.
     """
     d = dialog([unknown("D1")])
     d.Show()

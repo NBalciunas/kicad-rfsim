@@ -132,12 +132,12 @@ FLAT_MM = 1e-7
 # it makes the cells of all the board smaller.
 #
 # **The rank below sets WHICH of the three lines stays**, and it changed the
-# number. The CENTRE wins, thus the node is at the axis of the barrel.
+# number. The CENTRE stays, thus the node is at the axis of the barrel.
 # `run_via_openems.py coarse` then reads -16% against Goldfarb and Pucel.
 # Before, the mean of the centre and a surface line put that node 0.106 mm off
 # the axis, and it read +54%.
 #
-# The centre must also win for a different cause. Three anchors of one rank
+# The centre must also stay for a different cause. Three anchors of one rank
 # keep the FIRST, which is the surface line at x - r. A barrel with its
 # only node 1 ppm from its wall can then have no node on the other axis.
 # Such a barrel writes "Unused primitive", and no current flows in it.
@@ -304,7 +304,7 @@ def _has_lumped_rlc():
     """Tell if this CSXCAD can do lumped inductors and series RLC.
 
     LEtype came with the lumped RLC work: openEMS PR #121, which is in
-    v0.37 and in the subsequent v0.0.36-N nightly builds. An older CSXCAD
+    v0.37 and in the subsequent v0.0.36-N nightly builds. A previous CSXCAD
     has no LEtype and refuses the keyword. Thus this test controls the
     guard for the inductors and the kwargs for AddLumpedElement.
     """
@@ -439,8 +439,8 @@ def _time_step_factor(model):
     margin of about 1.5. `solverenv.time_step_factor` holds the law and the
     margin, and the dialog reads the same function.
 
-    The mesh preset without other changes has no effect, and that is not
-    luck. The two faces of the element box are anchors of the mesh with no
+    The mesh preset without other changes has no effect, and that has a
+    cause. The two faces of the element box are anchors of the mesh with no
     lines between them. Thus the box itself sets the smallest cell of the
     board when the preset becomes coarse. A rule on the FACTOR uses the
     same geometry that controls the stability.
@@ -549,7 +549,7 @@ def _decisions(model, res, rlc=True):
     mesh also makes decisions: a narrow feature of ONE cell, and a via that
     is a thin wire (`_mesh`).
 
-    **Each line names the decision AND its cause**, because nobody can
+    **Each line names the decision AND its cause**, because a person cannot
     check a decision with no cause. `main` prints the list one time and
     writes it to optimizations.log before the engine starts. `rlc` tells if the
     engine has the series topology. A previous engine does not have it, and
@@ -729,12 +729,12 @@ def _si(v, unit):
 
 
 def _max_timesteps(model):
-    """Give the step limit that the engine receives.
+    """Give the step limit that the engine gets.
 
     A smaller timestep must have more steps for the same simulated time.
     Thus `settings["max_timesteps"]` is a limit on the TIME and not on the
     count. `build()` gives this value to openEMS. `main()` uses the same
-    number to tell if a run met its end criteria or stopped at the limit.
+    number to tell if a run got to its end criteria or stopped at the limit.
     """
     nrts = model["settings"]["max_timesteps"]
     tsf = _time_step_factor(model)
@@ -860,8 +860,8 @@ def _le_topology(comp, rlc):
 
     **A branch with ONE R, or ONE C below C_SERIES_MIN, must NOT use it.**
     The series extension integrates the current of the branch. A branch
-    with no inductance gives that integrator no opposition, and it then
-    diverges. A larger resistance, and a smaller capacitance, diverge
+    with no inductance gives that integrator nothing to stop it, and it
+    then diverges. A larger resistance, and a smaller capacitance, diverge
     after fewer steps. A single C of C_SERIES_MIN or more uses the series
     path: refer to C_SERIES_MIN. A measurement on the board of
     `run_rlc_openems.py` at the coarse preset, on 2026-09-22, at the full
@@ -898,7 +898,7 @@ def _run_length(sim_path):
       last step that the engine wrote.
 
     Thus the count is accurate to the subsample interval. The caller also
-    receives that interval.
+    gets that interval.
     """
     et = os.path.join(sim_path, "et")
     uts = sorted(glob.glob(os.path.join(sim_path, "port_ut_*")))
@@ -967,8 +967,8 @@ def _diverged(sim_path):
 
     **NaN** comes from a timestep that is too long for a lumped inductor,
     and a shorter one corrects it. openEMS writes '-nan(ind)' into the
-    time-domain data of the port. CalcPort then stops with an unclear
-    "could not convert string to float" ValueError. Thus this test comes
+    time-domain data of the port. CalcPort then stops with a ValueError that
+    is not clear: "could not convert string to float". Thus this test comes
     first, and it reads the file as text.
 
     **Growth** is a run that is not stable and that does not get to NaN.
@@ -1046,7 +1046,7 @@ def _merge_close(vals, tol, anchors=()):
     of the barrel, and the via reads as a thinner one.
 
     **Two anchors nearer than `tol` cannot stay together**, because this
-    function must prevent the cell between them. The HIGHER rank wins, and
+    function must prevent the cell between them. The HIGHER rank stays, and
     two anchors of one rank keep the first. Refer to RANK_FACE for the
     sequence and for its cause.
     """
@@ -1112,13 +1112,13 @@ def _feature_lines(edges, lines, res, tol, cells=POLY_FEATURE_CELLS,
     **The mesh does NOT grade outward from a feature.** The cells that this
     rule makes are much smaller than `res`. Thus the adjacent cell is a step.
     For that cause, the port branches of `_mesh` grade away from a strip and
-    from a CPW gap. A measurement on 2026-09-01 examined a grade here, and it
-    is not worth its cost. With the 2 cells that POLY_FEATURE_CELLS gives, it
-    moves the eps_eff of a 0.4 mm line by 0.04%. A grade at EACH narrow feature
-    moves the mesh of 44 of the 71 boards of `validation/`, and it adds up to
-    76% more cells. A grade only where `tol` refuses the division moves 26
-    boards, and it adds up to 81%. It gives about 5% ONLY at one cell across
-    the feature, which is the result of `tol`.
+    from a CPW gap. A measurement on 2026-09-01 examined a grade here. Its
+    cost is larger than its effect. With the 2 cells that POLY_FEATURE_CELLS
+    gives, it moves the eps_eff of a 0.4 mm line by 0.04%. A grade at EACH
+    narrow feature moves the mesh of 44 of the 71 boards of `validation/`, and
+    it adds up to 76% more cells. A grade only where `tol` refuses the division
+    moves 26 boards, and it adds up to 81%. It gives about 5% ONLY at one cell
+    across the feature, which is the result of `tol`.
     `validation/openems/run_feature_openems.py` has the measurement.
     """
     out, narrow = set(), []
@@ -1437,7 +1437,7 @@ def _mesh(model, ports, res, notes=None):
     #
     # Before, this loop gave only the BOX of each polygon. Thus no edge IN
     # a polygon had a line. A structure that is smaller than `res` then
-    # fell BETWEEN the lines. An example is a 2.45 GHz Wilkinson divider
+    # was BETWEEN the lines. An example is a 2.45 GHz Wilkinson divider
     # with tracks of 0.265 mm, at the fine preset with a step of 0.589 mm.
     # It became 63 pieces of copper that touch nothing, and S21 read
     # -94.4 dB. **openEMS gives NO message for it.** It writes "Unused
@@ -2004,8 +2004,8 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
     # The tab of each coaxial feed: copper from the axis of the hole to the
     # face of the box. Thus the edge of a round pad is straight at the box
     # (`solverenv.coax_box`). The box itself has a higher priority than the
-    # copper. Thus where the box goes onto the copper around the pad, the
-    # box wins, and the face of that copper is also straight.
+    # copper. Thus where the box goes on the copper around the pad, the
+    # box stays, and the face of that copper is also straight.
     for g in ports_geo:
         box = g.get("coax")
         if box and g["coax_side"] in copper_prop:
@@ -2027,7 +2027,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         # element gets its own topology, and `_le_topology` selects it from
         # the components of that element. The package parasitics put R, L
         # and C together in one element. Thus they must have the series
-        # topology of LEtype. An older engine has no LEtype, and it removes
+        # topology of LEtype. A previous engine has no LEtype, and it removes
         # an element that has an L without a message. Thus the code removes
         # the parasitics on such an engine.
         para = s.get("parasitics", True) and rlc
@@ -2039,7 +2039,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         opens = _open_parts(model)
         for e in model.get("lumped_elements", []):
             # A PORT is in the box of this element. Thus the grid has no
-            # value for it, and the run pays no timestep for it.
+            # value for it, and it does not make the timestep shorter.
             if e.get("ref") in ported:
                 say("[rfsim] lumped %s: a port is in its box, and the "
                     "value of the part goes into the S-matrix after the "
@@ -2523,7 +2523,7 @@ def main(model_path, outdir):
                          "must have 1 or more." % n)
 
     # A lumped inductor must have openEMS v0.37 or after, which has lumped
-    # RLC. An older engine writes "Lumped Element R or C not specified!
+    # RLC. A previous engine writes "Lumped Element R or C not specified!
     # skipping" and models an open circuit. Thus refuse to run, because the
     # results are then incorrect.
     if s.get("lumped", True):
@@ -2708,7 +2708,7 @@ def main(model_path, outdir):
             ld = _line_data(p, sim_path, freq)
             if not ld:
                 continue
-            # A value from a run that did not excite this port wins.
+            # A value from a run that did not excite this port stays.
             # A one-port run has no such value, thus it keeps its own.
             was_exc = (j == k)
             if j + 1 in lines and (was_exc or not line_exc[j + 1]):

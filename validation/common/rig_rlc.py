@@ -12,14 +12,14 @@ Thus each type has a different and clear signature from 1 to 5 GHz:
     C = 1 pF   : |S21| INCREASES  -5.5 ->  -0.4 dB  (Z = 1/jwC decreases with f)
 
 The opposite slopes are the important result. An element that the
-simulation ignores cannot make them. It is an open circuit, thus |S21| is
-much lower and its slope goes in the other direction. You also cannot
-confuse L and C. The mesh has only a small effect on the slope, but it has
-a large effect on the absolute magnitude. At the coarse preset, the track
+simulation does not use cannot make them. It is an open circuit, thus |S21| is
+much lower and its slope goes in the other direction. Also, the slope of
+L is not the slope of C. The mesh has only a small effect on the slope, but it
+has a large effect on the absolute magnitude. At the coarse preset, the track
 of 2.9 mm is only about 1 cell wide. The parasitic series inductance then
 increases |Z| more and more with the frequency. Thus the test asserts the
-analytic magnitude only at the low end of the sweep. It prints the other
-points for you to examine.
+analytic magnitude only at the low end of the sweep. It prints the other points
+for you to examine.
 
 An inductor must have openEMS v0.37 or after. Refer to the README,
 "Installation".

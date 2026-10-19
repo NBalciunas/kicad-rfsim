@@ -318,7 +318,7 @@ def _stackup_from_text(text):
     if i < 0:
         return None
     depth, in_str, j = 0, False, i
-    while j < len(text):  # find the end parenthesis; ignore those in strings
+    while j < len(text):  # find the end parenthesis, not one in a string
         c = text[j]
         if c == '"':
             in_str = not in_str
@@ -431,7 +431,7 @@ def unsaved_stackup(board):
             % "\n".join("  - " + d for d in diffs))
     # `_stackup` uses the FR4 default values for a stackup that is missing,
     # or that has copper layers that are different from the board. Tell the
-    # user here, thus the FR-4 preset of the dialog is not a surprise.
+    # user here, thus the user expects the FR-4 preset of the dialog.
     for which, items in (("new", live), ("saved", saved)):
         if items is None or cu_names != [it["name"] for it in items
                                          if it["kind"] == "copper"]:
@@ -672,8 +672,8 @@ def _coplanar_gap(polys, x, y, direction, sides=False):
     dx, dy = direction
     # Get samples along the line and not at the pad. Frequently, a pad is
     # wider than the line. A sample that is not on copper gives a number of
-    # hits that is not odd, and the code ignores it. (The line stops before
-    # that point.)
+    # hits that is not odd, and the code does not use it. (The line stops
+    # before that point.)
     side = {1: [], -1: []}
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
@@ -841,11 +841,11 @@ def _coax_sides(cx, cy, half, polygons, outer, centre):
     and in y. `outer` has the names of the top and the bottom copper
     layer, and `centre` is the centre of the board. On each layer, the
     four directions of the axes get a gap from `_coax_gap`, and the
-    smallest gap wins. **Two gaps that are almost the same (5%) are a
-    tie**, and the direction AWAY from the centre of the board wins. A
-    round clearance gives a tie on the four axes. The rule then gives the
-    two feeds of a dual-polarized patch the same geometry in their own
-    axis.
+    function selects the smallest gap. **Two gaps that are almost the same
+    (5%) are equal**, and the function then selects the direction AWAY
+    from the centre of the board. A round clearance gives four equal gaps. The
+    rule then gives the two feeds of a dual-polarized patch the same geometry
+    in their own axis.
     """
     out = {}
     for layer in outer:
@@ -1020,8 +1020,8 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
     and not into a message box. Each element is a box that bridges
     the gap between the two pads of the part. The box is parallel to the
     nearest Cartesian axis, because openEMS lets current flow along one
-    axis only. The function changes the values to SI units. It ignores the
-    parts in `skip_refs`, which have a port pad. It gives a warning for a
+    axis only. The function changes the values to SI units. It does not use
+    the parts in `skip_refs`, which have a port pad. It gives a warning for a
     part that has an unknown value, or that is not on one copper layer.
 
     A refdes that starts with R, L or C gives the TYPE of the part. The
@@ -1042,7 +1042,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if ref in skip_refs:
             continue
         if not fp.GetBoundingBox().Intersects(region):
-            continue  # not in the simulated area: ignore it, with no warning
+            continue  # out of the simulated area: no element, no warning
         # The terminals are the pads that have a *number*. Many footprints
         # have more copper pads with no number, for mechanical strength or
         # for paste relief. These pads cannot hold a net, and they are not
@@ -1055,10 +1055,10 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if len(pads) != 2:
             # Before, this code did not give messages. Thus a part that the
             # code did not find, with no message, was the problem that was
-            # the hardest to find. Give a warning only if the value is also
-            # correct. Then a default "REF**", or a connector with a name
-            # that starts with R, gives no message. But a 50-ohm part that
-            # has 3 terminals gives a warning.
+            # the most difficult to find. Give a warning only if the value is
+            # also correct. Then a default "REF**", or a connector with a name
+            # that starts with R, gives no message. But a 50-ohm part that has
+            # 3 terminals gives a warning.
             #
             # When the refdes does not give the type of a part, the part
             # gives no message here. A connector, a mounting hole or a
@@ -1397,7 +1397,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         if not p["direction"]:
             # The gap of each candidate direction, for the manual feed
             # of the dialog. A drawn CPW has no track, and the dialog
-            # offers the CPW type only for a direction that has a gap.
+            # shows the CPW type only for a direction that has a gap.
             p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
                          for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
@@ -1413,8 +1413,8 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # touches a part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
     # ponytail: this is a test of the bounding boxes. Change it to a
-    # point-in-polygon test if pours with unusual shapes give incorrect
-    # results.
+    # point-in-polygon test if pours with shapes that are not usual give
+    # incorrect results.
     for p, pad in zip(ports, pads):
         if p["drill"]:
             # **A through-hole pad has no port to the adjacent layer.** On
@@ -1464,7 +1464,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                    p["ref_layer"]))
 
     # Model the SMD R/L/C parts as lumped elements. A part that holds a
-    # port pad is the port, not a different element. Thus ignore its
+    # port pad is the port, not a different element. Thus do not use its
     # footprint.
     port_refs = {pad.GetParentFootprint().GetReference() for pad in pads}
     lumped, le_warn, notes = _lumped_elements(board, region, copper_layers,
@@ -1785,8 +1785,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
                      0.0, 0.0, [1, 0], 1.1) is None, "gap of 4 mm"
     assert _coax_gap([_DISC], 0.0, 0.0, [1, 0], 2.2) is None, "no ground"
     # The sides of a dual-polarized patch: the pad at +x of the centre of
-    # the board gets +x on B.Cu. The four gaps tie, and +x goes away from
-    # the centre. F.Cu is the patch, thus it has no side.
+    # the board gets +x on B.Cu. The four gaps are equal, and +x goes away
+    # from the centre. F.Cu is the patch, thus it has no side.
     _shift = [[[x + 7.0, y] for x, y in q] for q in _SMA]
     _sides = _coax_sides(7.0, 0.0, (2.143, 2.143),
                          {"F.Cu": [_rect(-14.0, -14.0, 14.0, 14.0)],
@@ -1797,8 +1797,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     _sides = _coax_sides(0.0, -7.0, (2.143, 2.143), {"B.Cu": _shift},
                          ("F.Cu", "B.Cu"), (0.0, 0.0))
     assert _sides["B.Cu"]["dir"] == [0, -1], _sides
-    # Three gaps of 1 mm tie, and -x goes away from the centre at +x. A
-    # smaller gap at +y wins against that direction.
+    # Three gaps of 1 mm are equal, and -x goes away from the centre at +x.
+    # The function selects a smaller gap at +y before that direction.
     _sides = _coax_sides(0.0, 0.0, (1.0, 1.0), {"F.Cu": _TRACK},
                          ("F.Cu", "B.Cu"), (5.0, 0.0))
     assert _sides["F.Cu"]["dir"] == [-1, 0], _sides
@@ -1809,11 +1809,11 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     print("coaxial feed OK (15 cases)")
 
     # (the name, the code, does it give a warning?). A name that has the
-    # metric code is not ambiguous, also when the imperial code is 0402 or
-    # 0603. A bare "C_0603" IS ambiguous. It can be an imperial 0603
+    # metric code has one meaning, also when the imperial code is 0402 or
+    # 0603. A bare "C_0603" has TWO meanings. It can be an imperial 0603
     # (0.35 nH), or a metric 0603, which is an imperial 0201 (0.20 nH). A
-    # bare code that is not also a metric dimension, such as 1206, is not
-    # ambiguous.
+    # bare code that is not also a metric dimension, such as 1206, has one
+    # meaning.
     _PKGS = [("R_0402_1005Metric", "0402", False),
              ("C_0603_1608Metric", "0603", False),
              ("R_0201_0603Metric", "0201", False),

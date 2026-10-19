@@ -1,4 +1,4 @@
-"""Why does the simulation not include my R/L/C part as a lumped element?
+"""Why does the simulation not include an R/L/C part as a lumped element?
 
 For each R*/L*/C* footprint, this tool obeys the tests of _lumped_elements
 in sequence. It shows the first test that refuses the part. Some tests give

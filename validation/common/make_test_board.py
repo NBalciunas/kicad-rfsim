@@ -81,7 +81,7 @@ def via_fence(board, net, offset=VIA_OFFSET, x1=X1):
     2026-08-04. The error of the two boards was the MESH, and
     `runner._mesh` corrects it at this time.
 
-    This function has two traps:
+    This function has two problems that are not easy to see:
 
     - A THROUGH via puts an annular ring on ALL copper layers, and that
       includes the layer of the strip. `SetRemoveUnconnected(True)` with

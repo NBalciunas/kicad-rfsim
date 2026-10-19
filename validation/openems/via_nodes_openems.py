@@ -77,7 +77,7 @@ def main(*argv):
         src = (md.other_runner(rest[0], tmp) if rest
                else os.path.join(md.PLUGINS, "openems_runner.py"))
         r = md.load(src, "runner_under_test")
-    # A runner from before the nudge of 2026-09-16 has no VIA_SURFACE, and
+    # A runner from before the change of 2026-09-16 has no VIA_SURFACE, and
     # its surface lines are ON the barrel.
     surface = getattr(r, "VIA_SURFACE", 1.0)
 

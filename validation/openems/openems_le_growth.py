@@ -56,7 +56,7 @@ All users can make this mesh:
 **Two controls that one number held before.** `MARGIN` gave the air band
 AND the cell of the PML at the same time (`MARGIN` mm of air, and a PML of
 8 cells of `MARGIN`/8). Thus a run at 12 mm moved the two of them, and no
-measurement could tell which one causes the mode. `AIR` and `PML_STEP` are
+measurement can tell which one causes the mode. `AIR` and `PML_STEP` are
 different values at this time. The `MARGIN` = m of before is `AIR` = m with
 `PML_STEP` = m/8.
 
@@ -223,7 +223,7 @@ ELEMENTS = {
 # five gives 0.42 /ns. The `none`, `short` and `solidlines` controls, which
 # have no element, also give 0.42 /ns. `solid` is the one that DECREASES.
 # It is the same strip as `solidlines`, but it keeps no small cell at the
-# gap. Also run those four before you think that an element or a gap makes
+# gap. Also run those four before you say that an element or a gap makes
 # the mode.
 RUNS = (("L10", 0.5, TIME_NS), ("L10", 0.25, TIME_NS), ("L1", 1.0, TIME_NS),
         ("L10pec", 0.5, TIME_NS), ("R50", 0.5, TIME_NS),
