@@ -10,8 +10,8 @@ tests.
 Only the runner and its interpreter are different
 (`solverenv.SOLVER_INFO`). `openems_runner.py` runs in the venv of openEMS,
 and `emerge_runner.py` in the venv of EMerge. The two write the same
-`results.sNp`. The line ports of the two write `lines.json`; a run with no line
-port writes none, thus `lines()` gives None.
+`results.sNp`. The line ports of the two write `lines.json`. A run with no
+line port writes none, thus `lines()` gives None.
 """
 import json
 import os
@@ -56,8 +56,8 @@ def out(name):
 def python():
     """Give the interpreter of the solver.
 
-    openEMS v0.0.36 can run in the Python of KiCad, thus openEMS falls back
-    to it. The other solvers must have their own venv (the README).
+    openEMS v0.0.36 can run in the Python of KiCad, thus openEMS uses it as
+    the fallback. The other solvers must have their own venv (the README).
     """
     py = solverenv.SOLVER_INFO[SOLVER]["python"]()
     if py:

@@ -4,8 +4,8 @@ probe-fed patch of kicad-rfgen, fed from below.
 A connector below the board (an SMA) has its pin in a plated hole. The
 pin goes up through the substrate to the patch, and the outer conductor
 touches the ground around the clearance of the hole. The port of such a pad
-is the coaxial feed (`solverenv.coax_box`): a lumped port across the gap
-between the pad and the ground, flat on B.Cu. The current goes up to the
+is the coaxial feed (`solverenv.coax_box`). That is a lumped port across the
+gap between the pad and the ground, flat on B.Cu. The current goes up to the
 patch in the barrel of the hole (`board_reader._barrels`).
 
 **The control is the probe of the openEMS tutorial of a patch.** It is the
@@ -19,7 +19,7 @@ closed form of the patch gives all of them a common scale.
 **The pad of kicad-rfgen is NOT that geometry.** Its pad on B.Cu is 4.286
 mm, in a hole of 7 mm in the ground below the patch. The two solvers agree
 that this feed gives the patch about 1.85 times the resistance of the
-probe, and about 1 nH more of series inductance. At the coarse preset,
+probe. It also adds about 1 nH of series inductance. At the coarse preset,
 openEMS gives 132 ohm and 1.86 nH, and EMerge 149 ohm and 1.84 nH. The
 probe gives 67 and 80 ohm. The rig gives that ratio, and it tests only the
 frequency of that feed.
@@ -83,8 +83,8 @@ F_START, F_STOP = 2.0e9, 3.0e9
 # The clear air around the board. A patch radiates, thus the NF2FF box
 # must be in clear air and not near the copper.
 MARGIN = 15.0
-# The small coaxial feed: a pad of 1.7 mm (a ring of 0.215 mm around the
-# drill of 1.27 mm) in a clearance of r 1.1 mm. The gap is 0.25 mm.
+# The small coaxial feed: a pad of 1.7 mm in a clearance of r 1.1 mm. The
+# pad is a ring of 0.215 mm around the drill of 1.27 mm. The gap is 0.25 mm.
 SMALL = (1.7, 1.1)
 # The feeds of `single` must give the same resonance to this part. They
 # are different only at the feed, and the cavity of the patch sets the

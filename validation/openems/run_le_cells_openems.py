@@ -1,11 +1,11 @@
 """The cause of the FAST growth of a lumped inductor, on ONE variable.
 
 A lumped inductor on the reference board increases in two different
-procedures. An earlier measurement found the difference between them:
+procedures. A previous measurement found the difference between them:
 
   - a **FAST** growth with an e-fold near 0.4 ns, which the runner refuses.
     `_feature_lines` reads the gap between the two pads of a part as a
-    narrow copper feature, and it puts a line at the middle of it. That
+    narrow copper feature. It puts a line at the middle of it. That
     line is IN the box of the element. Thus the element is on 2 cells in
     series, and 1 cell is possible;
   - a **SLOW** mode with an e-fold near 6 ns. No timestep corrects it, and
@@ -14,9 +14,9 @@ procedures. An earlier measurement found the difference between them:
 **This file does not show the difference between the two counts at this
 time. After 2026-09-20, that is the correct result.** The mesh moved the
 absorber away from the copper (B30), and the fast mode went away with it.
-B51 tried five boards to find one that continues to have the mode. These
-were the reference, a board of 3.2 mm, a board of 6.4 mm, a box of 1.0 mm,
-and the thick board with the large box. No board shows a difference between
+B51 examined five boards to find one that continues to have the mode. These
+were the reference, the boards of 3.2 mm and 6.4 mm, a box of 1.0 mm, and
+the thick board with the large box. No board shows a difference between
 1 cell and 2 (B51). The rule is only from the measurement of 2026-09-16.
 
 **The code holds the rule from 2026-09-16.** `_feature_lines` gets the gap
@@ -47,7 +47,7 @@ Two steps, and each one gives the growth of the trace:
 
   1. `ladder`  - the count of cells in series: 1, 2, 3, 4 and 6, with the
      same box and `tol`. This is the measurement that finds the rule.
-  2. `matrix`  - the three rows that an earlier session did not run: er
+  2. `matrix`  - the three rows that a previous session did not run: er
      2.2, er 10.2 and caps=False, each one with the line and without it.
 
 Run it with the python of KiCad 10 or with the python of the solver. It uses
@@ -92,8 +92,8 @@ FAST_TURN_NS = 4.0
 # Thus a slope of 1 /ns is between them, with a factor of 6 at each side.
 # **The turn without the slope is not sufficient.** A row that only
 # DECREASES turns where its trace touches the floor, and that point moves
-# with the timestep. At the factor of a 10 nH inductor with
-# `LE_STAB_MARGIN` = 0.5, the row of 3 cells turns at 3.34 ns with an
+# with the timestep. Use the factor of a 10 nH inductor with
+# `LE_STAB_MARGIN` = 0.5. The row of 3 cells then turns at 3.34 ns, with an
 # e-fold of 8.2 ns. Thus it decreases, and the runner accepts it.
 FAST_SLOPE = 1.0
 
@@ -246,7 +246,7 @@ def head(title):
 
 
 def ladder_stage(src, tmp, lnh=10):
-    """The count of cells in series, at a FIXED box and `tol`."""
+    """The count of cells in series, at a CONSTANT box and `tol`."""
     head("the cells in series at a FIXED box and tol, %d nH" % lnh)
     out = []
     for n in (1, 2, 3, 4, 6):
@@ -261,7 +261,7 @@ def ladder_stage(src, tmp, lnh=10):
 
 
 def matrix_stage(src, tmp, lnh=10):
-    """The three rows that the earlier session did not run."""
+    """The three rows that the previous session did not run."""
     head("the rows that did not run, %d nH, with the line and without it"
          % lnh)
     rows = [("a substrate of er 2.2", dict(er=2.2)),

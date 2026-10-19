@@ -140,8 +140,9 @@ def test_the_current_views_say_what_they_show():
 
     On the matched microstrip, the current across the line is
     sqrt(2 * 0.5 W / 50 ohm) = 0.141 A peak on the strip, and back on the
-    plane. The views are for the pattern (the hot spots and the return
-    path): openEMS gave 0.126 A and 0.122 A, EMerge 0.152 A and 0.142 A.
+    plane. The views are for the pattern: the areas of high current and the
+    return path. openEMS gave 0.126 A and 0.122 A, EMerge 0.152 A and
+    0.142 A.
     """
     f = frame()
     names = [n for n in f.choice.GetStrings() if n.startswith("Current on ")]
@@ -196,7 +197,7 @@ def test_the_far_field_views_give_the_polarization():
     """A cut shows Abs, Co and Cross of Ludwig 3, each with a check box.
     Its block gives the reference and the XPD at the main lobe. The 3D
     balloon gives the XPD of the runner. A far field from before the
-    polarization has Abs only, with its title of before."""
+    polarization has Abs only, with its previous title."""
     import copy
     f = frame()
     names = list(f.choice.GetStrings())
@@ -234,9 +235,10 @@ def test_the_far_field_views_give_the_polarization():
 
 
 def test_the_states_are_compared():
-    """F30: a run of states gives four views that compare them, and a
-    choice of the state for the other views. A block of text gives the
-    value of each state at "Define at".
+    """F30: the views of the sweep of a run of states show all the states,
+    with a check box for each state, and a trace as "S21 (off)". The
+    Phase Difference view compares each trace to the Reference trace. The
+    State choice selects the state of the other views.
 
     The states are made from `out_coarse`: State 2 is the same run with
     S21 times 0.9 at -45 degrees. Thus its phase difference is -45.00
@@ -263,36 +265,60 @@ def test_the_states_are_compared():
                               {"name": "off", "dir": "state_2"}]}, fh)
     f = gui.ResultsFrame(None, os.path.join(root, "state_1", "results.s2p"))
     names = list(f.choice.GetStrings())
-    want = ["States: S21 [Magnitude]", "States: S21 [Phase]",
-            "States: S21 [Phase difference]", "States: S11 [Magnitude]"]
-    assert all(w in names for w in want), names
+    assert gui.PHASE_DIFF_VIEW in names, names
+    assert not any(n.startswith("States") for n in names), names
     assert f.state_choice.GetStrings() == ["State 1", "off"]
-    f.choice.SetStringSelection("States: S21 [Phase difference]")
+    assert f.ref_choice.GetStringSelection() == "S21 (State 1)"
+
+    def lines():
+        return [ln.get_label() for ln in f.figure.get_axes()[0].get_lines()
+                if not ln.get_label().startswith("_")]
+
+    f.choice.SetStringSelection(gui.PHASE_DIFF_VIEW)
     f._plot()
-    assert list(f.traces.GetStrings()) == ["State 1", "off"]
-    t = texts(f.figure)
-    assert "off = -45.00" in t and "state 1 = 0.00" in t, t
-    f.choice.SetStringSelection("States: S21 [Magnitude]")
-    f._plot()
-    vals = [float(x) for x in re.findall(r"= (-?\d+\.\d+) db", texts(
-        f.figure))]
-    # The block gives 2 decimals of each value, thus the difference of two
-    # of them is 20 log10(0.9) = -0.915 dB to +-0.01.
-    assert len(vals) == 2 and abs(vals[1] - vals[0] + 0.915) <= 0.011, vals
-    # The other views follow the State choice, and the view stays.
+    assert f.ref_choice.IsShown() and not f.state_choice.IsShown()
+    assert "S21" in f.traces.GetStrings(), list(f.traces.GetStrings())
+    assert list(f.state_box.GetStrings()) == ["State 1", "off"]
+    assert "S21 (State 1)" in lines() and "S21 (off)" in lines(), lines()
+    y = {ln.get_label(): ln.get_ydata()
+         for ln in f.figure.get_axes()[0].get_lines()}
+    assert np.allclose(y["S21 (State 1)"], 0.0), y["S21 (State 1)"]
+    assert np.allclose(y["S21 (off)"], -45.0), y["S21 (off)"]
+    assert len(f.figure.get_axes()) == 1, "Phase Difference has a block"
+    # Only S21 of the two states: the magnitude of off is 0.9 times.
+    f._hidden = {n for n in f.traces.GetStrings() if n != "S21"}
     f.choice.SetStringSelection("S-Parameters [Magnitude]")
+    f._plot()
+    assert lines() == ["S21 (State 1)", "S21 (off)"], lines()
+    on, off = [ln.get_ydata() for ln in f.figure.get_axes()[0].get_lines()]
+    # 20 log10(0.9) = -0.915 dB at each frequency. The view has no block of
+    # values: the owner removed it from Magnitude and Phase.
+    assert np.allclose(off - on, 20 * np.log10(0.9)), off - on
+    assert len(f.figure.get_axes()) == 1, "Magnitude has a block of values"
+    f._hidden_states = {"off"}
+    f._plot()
+    assert lines() == ["S21 (State 1)"], lines()
+    # The other views follow the State choice, and the view stays.
+    f.choice.SetStringSelection("Board Layout")
+    f._plot()
+    assert f.state_choice.IsShown() and not f.state_box.IsShown()
     f.state_choice.SetSelection(1)
     f._on_state(None)
-    assert f.choice.GetStringSelection() == "S-Parameters [Magnitude]"
+    assert f.choice.GetStringSelection() == "Board Layout"
     assert f.outdir.endswith("state_2"), f.outdir
     f.Destroy()
-    # One run of its own has no states and no State choice.
+    # One run of its own has no states and no State choice. The reference
+    # of the phase difference has no check box.
     f = frame()
-    assert f.state_choice is None and not any(
-        n.startswith("States:") for n in f.choice.GetStrings())
+    assert f.state_choice is None
+    f.choice.SetStringSelection(gui.PHASE_DIFF_VIEW)
+    f._plot()
+    assert f.ref_choice.GetStringSelection() == "S21"
+    assert "S21" not in f.traces.GetStrings() and not f.state_box.IsShown()
+    assert "S21" in lines(), lines()
     f.Destroy()
-    print("the states are compared OK (4 views, -45.00 deg, -0.92 dB, and "
-          "the State choice)")
+    print("the states are compared OK (S21 (off): -45.00 deg, -0.92 dB, "
+          "the check boxes of the states, and the State choice)")
 
 
 def test_the_ports_are_on_the_field_views():
@@ -317,6 +343,42 @@ def test_the_ports_are_on_the_field_views():
             % (name, len(marks), len(f.model["ports"]))
     print("the ports are drawn on the field views OK (%d ports)"
           % len(f.model["ports"]))
+    f.Destroy()
+
+
+def test_the_field_views_frame_the_dump():
+    """The frame of a field view is the area of its dump.
+
+    In a subregion (F20), the copper goes into the absorber, out of the
+    dump. Its outline moved the limits of the axes out, and the view showed a
+    white area
+    with no field. The Board layout view shows the face of the absorber,
+    thus a user sees where the copper stops.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings()
+             if n.startswith(("E-Field", "H-Field", "Current on"))]
+    assert names, "the run wrote no field dump"
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        ax = next(a for a in f.figure.get_axes()
+                  if a.get_xlabel() == "x (mm)")
+        x, y = ax.collections[0].get_coordinates()[..., 0], \
+            ax.collections[0].get_coordinates()[..., 1]
+        assert abs(ax.get_xlim()[0] - x.min()) < 1e-6 \
+            and abs(ax.get_xlim()[1] - x.max()) < 1e-6 \
+            and abs(ax.get_ylim()[0] - y.min()) < 1e-6 \
+            and abs(ax.get_ylim()[1] - y.max()) < 1e-6, \
+            "%r: the frame %s %s is not the dump" \
+            % (name, ax.get_xlim(), ax.get_ylim())
+    f.choice.SetSelection(f.choice.GetStrings().index("Board Layout"))
+    f._plot()
+    labels = [t.get_text() for a in f.figure.get_axes()
+              if a.get_legend() for t in a.get_legend().get_texts()]
+    assert "Absorber" in labels, labels
+    print("the field views frame the dump, and the layout shows the "
+          "absorber OK (%d views)" % len(names))
     f.Destroy()
 
 
@@ -355,8 +417,89 @@ def test_the_field_views_have_the_scale_of_cst():
           "from 0.5 W)" % (v, want))
 
 
+def test_a_field_view_exports_a_gif():
+    """F21: the E, H and current views have an "Export GIF" button, and the
+    other views do not. The GIF holds each frame of the animation, at the
+    dimensions of the canvas, and each frame shows its own phase.
+
+    Frame 0 must be the picture of the canvas. The first GIF was 1 pixel
+    narrower than its buffer, thus each row moved 1 pixel and the picture
+    was not straight. It passed a test of the dimensions with 2 pixels
+    of tolerance.
+    """
+    import tempfile
+    import numpy as np
+    from PIL import Image
+    f = frame()
+    names = list(f.choice.GetStrings())
+    anim = [n for n in names
+            if n.startswith(("E-Field", "H-Field", "Current on "))]
+    assert anim, "the run wrote no field dump"
+    for name in names:
+        f.choice.SetStringSelection(name)
+        f._plot()
+        assert f.gif_button.IsShown() == (name in anim), \
+            "%r shows the button: %s" % (name, f.gif_button.IsShown())
+    w, h = f.canvas.get_width_height()
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in (next(n for n in anim if n.startswith("E-Field")),
+                     next(n for n in anim if n.startswith("Current on "))):
+            f.choice.SetStringSelection(name)
+            f._plot()
+            path = os.path.join(tmp, "view.gif")
+            f.save_gif(path)
+            step, _ = f._frame_step
+            step(0)
+            f.canvas.draw()
+            want = np.asarray(f.canvas.buffer_rgba())[..., :3].astype(float)
+            with Image.open(path) as im:
+                assert im.n_frames == 24, "%r: %d frames" % (name, im.n_frames)
+                assert im.size == (w, h), (name, im.size, (w, h))
+                assert im.info["duration"] == gui.FRAME_MS, im.info
+                im.seek(0)
+                first = im.convert("RGB").tobytes()
+                got = np.asarray(im.convert("RGB")).astype(float)
+                err = float(np.mean(np.abs(got - want)))
+                assert err < 3.0, \
+                    "%r: frame 0 is not the canvas (mean error %.1f of 255)" \
+                    % (name, err)
+                im.seek(6)
+                assert im.convert("RGB").tobytes() != first, \
+                    "%r: the frames are all the same" % name
+    print("a field view exports a GIF OK (%d views with the button, "
+          "24 frames of %dx%d)" % (len(anim), w, h))
+    f.Destroy()
+
+
+def test_the_list_of_traces_fits_its_rows():
+    """The list of the check boxes has the height of its rows. wx gives a
+    list box on Windows the height of 3 rows or more, thus a list of one
+    trace had two empty rows."""
+    f = frame()
+    f.SetSize((820, 620))
+    rows = {}
+    for name in f.choice.GetStrings():
+        f.choice.SetStringSelection(name)
+        f._plot()
+        if not f.side.IsShown():
+            continue
+        f.SendSizeEvent()
+        f.canvas.draw()
+        n = f.traces.GetCount()
+        border = f.traces.GetWindowBorderSize().height
+        got = f.traces.GetSize().height
+        assert got == f.traces.GetMinSize().height, (name, got)
+        rows.setdefault(n, (got - border) / n)
+    assert len(rows) >= 2, "the run gives one count of traces only: %s" % rows
+    assert len(set(rows.values())) == 1, \
+        "the height of a row changes with the count: %s" % rows
+    print("the list of traces fits its rows OK (%s rows, %g pixels each)"
+          % (", ".join(str(n) for n in sorted(rows)), list(rows.values())[0]))
+    f.Destroy()
+
+
 def test_a_trace_can_be_hidden():
-    """A check box for each trace: a cleared box removes the trace from the
+    """A check box for each trace: a box with no mark removes the trace from the
     graph and from its legend. The other traces keep their colours, and the
     choice holds in the next view. A field view has no check boxes."""
     f = frame()
@@ -417,5 +560,8 @@ if __name__ == "__main__":
     test_the_far_field_views_give_the_polarization()
     test_the_states_are_compared()
     test_the_ports_are_on_the_field_views()
+    test_the_field_views_frame_the_dump()
     test_the_field_views_have_the_scale_of_cst()
+    test_a_field_view_exports_a_gif()
+    test_the_list_of_traces_fits_its_rows()
     print("PASS")

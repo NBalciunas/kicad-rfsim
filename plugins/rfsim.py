@@ -38,7 +38,7 @@ def _solver_env(solver):
 def _solver_state():
     """Give {solver: None when it can run, or the cause when it cannot}.
 
-    The plugin must have one solver and not all, thus the dialog greys out a
+    The plugin must have one solver and not all, thus the dialog disables a
     solver with a cause. A subprocess for each solver uses find_spec, which
     does not import the extensions: a missing openEMS DLL does not look like
     a missing package. The subprocesses run at the same time, thus the
@@ -102,7 +102,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         # in its own interpreter, because openEMS v0.37 and after have no
         # cp311 wheel and EMerge has no cp314 wheel. Thus the code examines
         # the packages of KiCad here, and those of each solver before the
-        # dialog, which greys out a solver that cannot run.
+        # dialog, which disables a solver that cannot run.
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
         if gui_missing:
@@ -164,7 +164,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         settings = dlg.get_settings()
         dlg.Destroy()
 
-        # The dialog lets only a solver that can run through.
+        # The dialog accepts only a solver that can run.
         solver_py, script, _ = _solver_env(settings["solver"])
 
         port_types = settings.pop("port_types")

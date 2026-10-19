@@ -103,8 +103,8 @@ F_BAND = (1e9, 5e9)
 # fewer edges.
 #
 # EMerge has no edges, thus it has no thin barrel to find. Its via
-# converges to +26% at r = 0.3 mm (a fine mesh at the barrel), and a
-# barrel of 32 sides or a cylinder moves it by 4% or less. With the same Z0,
+# converges to +26% at r = 0.3 mm (a fine mesh at the barrel). A barrel
+# of 32 sides or a cylinder moves it by 4% or less. With the same Z0,
 # openEMS reads 2% to 5% less, thus the closed form is low for a via in a
 # strip of 2.9 mm. 30% keeps the converged value of EMerge in the limit.
 VIA_TOL = 0.30 if rigsolve.SOLVER == "emerge" else 0.25

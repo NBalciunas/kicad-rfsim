@@ -14,8 +14,8 @@ notch is at the frequency that 1 / (2 pi sqrt(LC)) gives. No scale error of
 the amplitude can move it.
 
 **The board is the microstrip of `make_lumped_board.make` with the PADS of an
-0402 land** (0.540 mm along the current, 0.640 mm across, a gap of
-0.480 mm). The count of the cells across the land sets the result of this
+0402 land.** A pad is 0.540 mm along the current and 0.640 mm across, with a
+gap of 0.480 mm. The count of the cells across the land sets the result of this
 measurement. An 0402 land on a board has 2 of them, and the 2.9 mm strip of
 `run_rlc_openems.py` has 4.
 

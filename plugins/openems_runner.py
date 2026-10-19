@@ -153,11 +153,11 @@ VIA_SURFACE = 1.0 - 1e-6
 # S21 -0.16 dB and not -4.5 dB.) A via without one of its three lines keeps
 # the other two. It then reads as a thinner barrel.
 #
-# This case occurs on a board. On the 0402 and the 0603 land of
-# `run_shunt_openems.py packages`, the surface line of the via is 0.02 mm from
-# a face of the element box. Thus the via keeps only its centre on that axis.
-# Those two boards did the same before the ranks, because a face was the only
-# anchor at that time.
+# This case occurs on a board. The 0402 and the 0603 land of
+# `run_shunt_openems.py packages` have it. There, the surface line of the via
+# is 0.02 mm from a face of the element box. Thus the via keeps only its centre
+# on that axis. Those two boards did the same before the ranks, because a face
+# was the only anchor at that time.
 RANK_FACE = 2
 RANK_VIA_CENTRE = 1
 RANK_VIA_SURFACE = 0
@@ -184,9 +184,9 @@ POLY_FEATURE_CELLS = 2
 # **The 1/3 - 2/3 rule at a long copper edge** (F8, `_edge_thirds`). A mesh
 # line ON the edge of a copper sheet makes the copper electrically larger.
 # FDTD does not hold the peak of the field at the edge. The rule puts the
-# edge at 1/3 of a cell: one line EDGE_THIRDS * res / 3 in the copper, and
-# one 2/3 of that cell out of it. The tutorials of openEMS use the same
-# rule with a cell of res / 4.
+# edge at 1/3 of a cell. One line is EDGE_THIRDS * res / 3 in the copper,
+# and one line is 2/3 of that cell out of it. The tutorials of openEMS use the
+# same rule with a cell of res / 4.
 #
 # Measured on 2026-10-07 on the patch of `rig_probe` (28.314 mm on 1.53 mm
 # of er 4.5). The table gives the resonance against the closed form, for
@@ -201,7 +201,7 @@ POLY_FEATURE_CELLS = 2
 #   EMerge, coarse         -4.2%  -4.7%  -5.0%
 #
 # Thus with the rule the coarse preset gives the answer of EMerge to 0.5
-# points, and the mesh no longer moves it. A cell of res / 2 gave the same
+# points, and the mesh then does not move it. A cell of res / 2 gave the same
 # answer as res / 4. res / 8 put the two lines nearer than `tol`, and the
 # merge made ONE line out of the copper: -14.3%. Thus the two lines are
 # anchors, and res / 4 is 2 times the largest `tol`.
@@ -209,10 +209,10 @@ EDGE_THIRDS = 0.25
 # **The feed of a line port must stay before the probes of its plane**
 # (B77, `_port_planes`). openEMS puts the feed on the mesh line nearest to
 # `FeedShift` from the start of the port. It puts the voltage probes on the
-# line nearest to `MeasPlaneShift` and on the line at each side of it, and
-# the current probes between them. A short port at the coarse preset holds
-# some cells only. On a port of 9 mm with cells of 1.9 to 2.6 mm (a sweep to
-# 4 GHz), `res` and half the port gave the SAME line. The source was then
+# line nearest to `MeasPlaneShift` and on the line at each side of it. The
+# current probes are between them. A short port at the coarse preset holds
+# some cells only. A port of 9 mm had cells of 1.9 to 2.6 mm (a sweep to
+# 4 GHz). On it, `res` and half the port gave the SAME line. The source was then
 # between the two current probes. Measured on 2026-10-08 on the series board
 # of `rig_states` (1 pF), the lines counted from the start of the port:
 #
@@ -234,10 +234,10 @@ PORT_CELLS = 3
 # this module. An import of the runner replaces `warnings.showwarning` for
 # all the process. The name stays here for the rigs that read it.
 LE_STAB_MARGIN = solverenv.LE_STAB_MARGIN
-# **A lone C of C_SERIES_MIN or more uses the series path** (B79,
+# **A single C of C_SERIES_MIN or more uses the series path** (B79,
 # `_le_topology`). The two paths of openEMS do not give the same loop to a
-# C on a wide land. On the 2512 land of `run_shunt_openems.py packages`, a
-# lone C of 10 pF gave an L_board of 1.9901 nH on the classic path and
+# C on a wide land. The 2512 land of `run_shunt_openems.py packages` had a
+# single C of 10 pF. It gave an L_board of 1.9901 nH on the classic path and
 # 2.2456 nH on the series path. EMerge gave 2.5067 nH. A C with a body
 # uses the series path. Thus a body that P21 kept out moved the loop by
 # more than the body. Measured on 2026-10-08, against EMerge:
@@ -577,7 +577,7 @@ def _decisions(model, res, rlc=True):
                    g["exc_dir"], g["coax"]["width"]))
     # **Each line is a sentence**, with its subject first, and not
     # "category: text". The log puts "[rfsim] optimization: " in front of
-    # it, and two labels in one line read badly.
+    # it, and two labels in one line are difficult to read.
     mesh = []
     lines = _mesh(model, ports, res, mesh)
     out += mesh
@@ -797,16 +797,16 @@ def _grid_inductors(model):
     grid that holds an inductance. The ESL of a body counts.
 
     **openEMS can make the current of an inductor with no C in series grow
-    after the pulse** (B81): `_dc_inductors`. The series path leaves a
+    after the pulse** (B81): `_dc_inductors`. The series path keeps a
     constant voltage across the inductance, thus its current ramps. The
     port data then gets a slow drift, and the transform puts it at the low
-    end of the sweep. A smaller timestep
-    makes it worse, and the inductor rule gives a large L a small timestep.
-    On the board of `rig_shunt two` at the default settings, 20 nH does not
-    get to 1e-4: the energy is back at its peak at 30 ns, and sum|S|^2 is
-    514. 2 to 8 nH stop at 1e-4 before the growth. The same 20 nH is
-    correct on the one-part shunt board and in series in a line. A factor
-    of 0.10 or 0.08 in the place of 0.112 makes it worse (3.2 and 33).
+    end of the sweep. A smaller timestep makes it worse, and the inductor
+    rule gives a large L a small timestep. On the board of `rig_shunt two`
+    at the default settings, 20 nH does not get to 1e-4. The energy is back
+    at its peak at 30 ns, and sum|S|^2 is 514. 2 to 8 nH stop at 1e-4 before
+    the growth. The same 20 nH is correct on the one-part shunt board and
+    in series in a line. A factor of 0.10 or 0.08, and not 0.112, makes it
+    worse (3.2 and 33).
     """
     s = model["settings"]
     if not s.get("lumped", True):
@@ -838,12 +838,12 @@ def _lr_branches(model):
 
     The series path of openEMS can grow on such a branch when the R is
     small. 2 nH with 0.1 ohm diverged on the board of `rig_shunt two` at
-    the factor of the inductor rule, and a smaller factor (0.29 and less)
+    the factor of the inductor rule. A smaller factor (0.29 and less)
     corrected it. `solverenv.body_is_idle` removes a DCR that changes
-    nothing. A DCR that stays is a DCR that is necessary in the sweep, thus the
-    correction is a smaller timestep. A resistor with the ESL of its body
-    is such a branch as well, and a smaller timestep also corrects a
-    large R on it (`solverenv.series_r_factor`).
+    nothing. A DCR that stays is a DCR that is necessary in the sweep, thus
+    the correction is a smaller timestep. A resistor with the ESL of its
+    body is also such a branch. A smaller timestep also corrects a large R
+    on it (`solverenv.series_r_factor`).
     """
     return [ref for ref, _, comp in _grid_inductors(model)
             if comp.get("R") and not comp.get("C")]
@@ -862,9 +862,10 @@ def _le_topology(comp, rlc):
     The series extension integrates the current of the branch. A branch
     with no inductance gives that integrator no opposition, and it then
     diverges. A larger resistance, and a smaller capacitance, diverge
-    sooner. A lone C of C_SERIES_MIN or more uses the series path: refer to
-    C_SERIES_MIN. A measurement on the board of `run_rlc_openems.py` at the
-    coarse preset, on 2026-09-22, at the full Courant step, gave this result.
+    after fewer steps. A single C of C_SERIES_MIN or more uses the series
+    path: refer to C_SERIES_MIN. A measurement on the board of
+    `run_rlc_openems.py` at the coarse preset, on 2026-09-22, at the full
+    Courant step, gave this result.
     10, 50, 75 and 100 ohm are stable, and 150, 200, 500 and 1000 ohm all get
     to NaN. The 1000 ohm run used 9.5 minutes and all of the step limit of
     300000 steps to get to NaN. `_diverged` then named a lumped inductor, but
@@ -927,7 +928,7 @@ def _report_end(sim_path, nrts, end_criteria, dc_l=()):
     with a high Q is the usual cause.
 
     `dc_l` names the inductors with no C in series (`_dc_inductors`). With
-    one of them, the field can grow after the pulse and never get to the
+    one of them, the field can grow after the pulse and not get to the
     end criteria (B81). More steps then make the result worse.
     """
     end = _run_length(sim_path)
@@ -1302,7 +1303,7 @@ def _clear_for(polys, x, y, axis, sign, metal, length):
 
 def _edge_thirds(model, xs, ys, res, ports, tol):
     """Put the lines of each LONG copper edge at 1/3 and 2/3 of a cell
-    (F8), in the place of the line on the edge. Give the new lines of each
+    (F8), and not one line on the edge. Give the new lines of each
     axis, which `_mesh` makes anchors.
 
     A coordinate gets the rule when each straight edge on it, on each
@@ -1316,14 +1317,14 @@ def _edge_thirds(model, xs, ys, res, ports, tol):
     A slit of `Fracture` has copper at its two sides, thus it is no edge.
 
     **A line port keeps the mesh along its feed**, from 2 cells behind its
-    box (or its pad and a cell, if more) to its end. The open end of
-    a track behind the feed is in the near field of the port. The boards
-    of `run_shunt_openems.py two` have a sweep to 5 GHz, ports of 9 mm and
-    a plane of measurement 1.67 mm after the feed. On them, the rule at
-    that end gave sum|S|^2 = 11.7. The board with no rule there gives 0.96
+    box to its end. When the pad and one cell are longer, they set the start.
+    The open end of a track behind the feed is in the near field of the port.
+    The boards of `run_shunt_openems.py two` have a sweep to 5 GHz, ports of
+    9 mm and a plane of measurement 1.67 mm after the feed. On them, the rule
+    at that end gave sum|S|^2 = 11.7. The board with no rule there gives 0.96
     to 1.00.
 
-    **The board must continue a cell beyond the edge.** The copper of a
+    **The board must go one cell farther than the edge.** The copper of a
     plane or a pour that ends AT the edge of the board ends where the
     substrate ends. Thus the line 2/3 of a cell out of it is in the air.
     On the patch of `rig_probe`, the rule on the edges of the ground only
@@ -1571,7 +1572,7 @@ def _mesh(model, ports, res, notes=None):
             # **The gap of a coaxial feed is a ring, and the mesh must hold
             # it on the two axes.** openEMS makes an edge copper when the
             # copper holds the edge, thus an edge that crosses all the gap
-            # joins the pad to the ground. A pad of 1.7 mm in a clearance
+            # connects the pad to the ground. A pad of 1.7 mm in a clearance
             # of r 1.1 mm read a short circuit with the lines of the box
             # only. Thus lines are at the pad, at the middle of the
             # gap and at the ground, on each side of the axis of the hole.
@@ -1611,13 +1612,13 @@ def _mesh(model, ports, res, notes=None):
     for g in ports:
         if g["type"] != "cpw" or not g["gap"]:
             # A MICROSTRIP port does NOT use this rule, and a measurement
-            # on 2026-08-05 shows the cause. On the validation board (a
-            # track of 2.9 mm on a substrate of 1.53 mm), the same chain of
-            # z lines moves Z0 by 0.05 ohm, which is 0.1%. It costs 8.6%
-            # more cells. The plane below the strip holds the field, thus
-            # the dielectric rule of 4 cells is sufficient. A NARROW line
-            # gets its cells ACROSS the strip from `_feature_lines`. The
-            # run gives a warning when `tol` stops that rule.
+            # on 2026-08-05 shows the cause. The validation board has a
+            # track of 2.9 mm on a substrate of 1.53 mm. On it, the same
+            # chain of z lines moves Z0 by 0.05 ohm, which is 0.1%. It costs
+            # 8.6% more cells. The plane below the strip holds the field, thus
+            # the dielectric rule of 4 cells is sufficient. A NARROW line gets
+            # its cells ACROSS the strip from `_feature_lines`. The run gives a
+            # warning when `tol` stops that rule.
             continue
         # A CPW port also must have its own cells ABOVE and BELOW the plane
         # of the line, and their step must come from the GAP. The line of a
@@ -2004,7 +2005,7 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
     # face of the box. Thus the edge of a round pad is straight at the box
     # (`solverenv.coax_box`). The box itself has a higher priority than the
     # copper. Thus where the box goes onto the copper around the pad, the
-    # box wins, and the face of that copper is straight as well.
+    # box wins, and the face of that copper is also straight.
     for g in ports_geo:
         box = g.get("coax")
         if box and g["coax_side"] in copper_prop:
@@ -2294,9 +2295,9 @@ def _surface_current(sim_path, zs, model, p):
     current of the copper sheet (A/m), in its own file.
 
     The sheet has no thickness. On the grid, rot H at the sheet line
-    is the jump of the tangential H across it, divided by the distance of
-    the two H lines. That distance is half of the two cells at the sheet.
-    Thus that distance times rot H is the current of the sheet. `zs` are
+    is the jump of the tangential H across it. That jump is divided by the
+    distance of the two H lines. That distance is half of the two cells at the
+    sheet. Thus that distance times rot H is the current of the sheet. `zs` are
     the z lines of the grid, in mm.
     """
     import h5py

@@ -90,8 +90,8 @@ def beat(null_at=0.62, depth=4e-4):
 def buildup(times=3.0):
     """A resonator that gets energy from the pulse and ends above it.
 
-    The trace ends `times` above the peak of the excitation. The rule of
-    before accepted it on purpose, and the rule of today must also accept
+    The trace ends `times` above the peak of the excitation. The previous
+    rule accepted it on purpose, and the rule at this time must also accept
     it. The envelope has no TURN, thus it did not decrease.
     """
     n = ROWS

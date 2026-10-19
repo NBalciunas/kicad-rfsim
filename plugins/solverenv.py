@@ -12,14 +12,14 @@ import os
 
 # The safety margin of the timestep rule for a lumped inductor. The largest
 # stable factor follows 1/sqrt(L[nH]). The bare law has no margin on the
-# worst geometry: a board of 6.4 mm with 100 nH is stable at 0.09, and the
+# worst geometry. A board of 6.4 mm with 100 nH is stable at 0.09, and the
 # bare law gives 0.10.
 #
 # **0.5 comes from the mesh that keeps ONE cell in series.** That mesh moved
 # the boundary of the worst geometry, a board of 6.4 mm. With 0.7, that board
 # kept 1.3x at 100 nH and 1.6x at 10 nH. The mesh of two cells in series gave
 # 2.3x or more on each geometry of the matrix of
-# `validation/openems/run_stability_openems.py`, and that file sets a limit of
+# `validation/openems/run_stability_openems.py`. That file sets a limit of
 # 1.35x. With 0.5, the same geometry keeps 1.8x and 2.2x, and each other
 # geometry keeps 3.2x or more.
 #
@@ -199,23 +199,23 @@ def body_is_idle(comp, own, f_start, f_stop):
     that keeps one parasitic uses the series path. The other parasitics
     then cost no more.
 
-    **An inductor loses a DCR that changes nothing** (B82, 2026-10-14). An
-    inductor always uses the series path, and the series path of openEMS
-    does not hold an L with a small R and no C. On the board of
-    `rig_shunt two` (C 4.7 pF and L 2 nH in series to ground, coarse), at
-    the factor of the inductor rule, 15 ns, the verdict of `_diverged`:
+    **An inductor does not keep a DCR that changes nothing** (B82,
+    2026-10-14). An inductor always uses the series path, and the series
+    path of openEMS does not hold an L with a small R and no C. The board of
+    `rig_shunt two` has C 4.7 pF and L 2 nH in series to ground. At coarse,
+    at the factor of the inductor rule and 15 ns, `_diverged` gives:
 
         the DCR of 2 nH    0      0.01   0.1         1 ohm
         the result         ok     ok     DIVERGES    DIVERGES
 
     With 0.1 ohm and 1e-4, the energy gets to -33.5 dB only and then goes
     to inf at 33 ns. With 0.1 ohm the limit of the factor on that board is
-    near 0.33, against 0.354 of the rule; 0 ohm is stable at 0.5. The
+    near 0.33, against 0.354 of the rule. 0 ohm is stable at 0.5. The
     same L with C1 as copper diverges. A C with its ESL and ESR, and a
     resistor of 50 ohm with an ESL, are stable on the same board. The same
     is true for 2 nH + 0.1 ohm on the one-part shunt board and in series
     in a line (to 3 ohm). The DCR of 0.1 ohm changes |Z| of 2 nH by 0.01%
-    from 0.5 GHz, thus the run loses nothing that it can show. An
+    from 0.5 GHz, thus the run removes nothing that it can show. An
     inductor with an EPC keeps its DCR (`components`).
     """
     if own not in ("R", "L", "C") or len(comp) < 2:
@@ -318,9 +318,9 @@ def components(e, para, s=None):
 
     `s` is the settings of the run. With a sweep in it, **a body that does
     not change its part stays out** (`body_is_idle`). The part is
-    then one R, one L or one C. A lone R uses the classic path of openEMS, and not
-    the series path, which costs more than the body models. A lone C of
-    0.1 pF or more uses the series path (`openems_runner._le_topology`),
+    then one R, one L or one C. A single R uses the classic path of openEMS,
+    and not the series path, which costs more than the body models. A single
+    C of 0.1 pF or more uses the series path (`openems_runner._le_topology`),
     with no timestep factor.
     `settings["keep_idle_body"]` = True keeps all bodies, for a rig that
     must measure the series path itself. With no `s`, the body always
@@ -356,7 +356,7 @@ def components(e, para, s=None):
 # the states of a phase shifter. Each state is a run of its own in the
 # folder STATE_DIR % k of the output directory. STATES_FILE in the
 # output directory lists them. State 1 is the values of the rows of the
-# dialog, and it is the reference of the views.
+# dialog.
 STATES_FILE = "states.json"
 STATE_DIR = "state_%d"
 
@@ -364,11 +364,11 @@ STATE_DIR = "state_%d"
 def apply_state(model, state):
     """Give a copy of `model` with the part values of `state`.
 
-    `state["parts"]` has an entry for each part that the state changes:
-    {"value": SI} for an R, an L or a C, or {"r", "l", "c": SI or None}
-    for a Series RLC. **A state does not change the type of a part, or its
-    body**: the package parasitics of the row stay. The EPC of an inductor
-    comes from its SRF, thus it changes with the inductance:
+    `state["parts"]` has an entry for each part that the state changes.
+    The entry is {"value": SI} for an R, an L or a C. It is {"r", "l", "c":
+    SI or None} for a Series RLC. **A state does not change the type of a part,
+    or its body**: the package parasitics of the row stay. The EPC of an
+    inductor comes from its SRF, thus it changes with the inductance:
     EPC = 1 / ((2 pi SRF)^2 L), and the SRF stays.
     """
     import copy
@@ -422,15 +422,16 @@ def coax_box(p, z_of, surface=1.0):
     `board_reader` measures the gap on each outer layer (`p["coax"]`). The
     box is on the axis of that measurement. It goes from the edge of the
     pad (`r_in`) to the edge of the copper around it (`r_out`). It is
-    as wide as the hole, which is the pin. `surface` makes the width a
-    little smaller: openEMS gives it the factor that puts the surface lines
-    of a via in the barrel. Thus the box and the barrel share those lines.
+    as wide as the hole, which is the pin. `surface` makes the width
+    smaller by a small quantity: openEMS gives it the factor that puts the
+    surface lines of a via in the barrel. Thus the box and the barrel share
+    those lines.
 
-    **A narrow gap makes the box narrower.** The corners of the box (and of
-    the tab below) must stay in the middle of the gap, at r_in + gap / 2 or
-    less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm.
+    **A narrow gap makes the box narrower.** The corners of the box and of
+    the tab below must stay in the middle of the gap. That is r_in + gap / 2
+    or less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm.
     A box as wide as its drill of 1.27 mm put the corner of the tab
-    0.04 mm from the ground. One cell of the mesh then joined the pin to
+    0.04 mm from the ground. One cell of the mesh then connected the pin to
     the ground, and the port read a short circuit.
 
     **The start is on the copper around the pad, and the stop is on the
@@ -453,9 +454,9 @@ def coax_box(p, z_of, surface=1.0):
 
     **The tab makes the edge of the pad straight at the box.** A round pad
     touches the face of the box at ONE point. At the corners of the box,
-    the edge of the pad is a little nearer to the axis. The tab is copper
-    from the axis to the face, as wide as the box, thus the box touches the
-    pad along all its face. The tab adds 0.1 mm or less of copper at the
+    the edge of the pad is a small distance nearer to the axis. The tab is
+    copper from the axis to the face, as wide as the box, thus the box touches
+    the pad along all its face. The tab adds 0.1 mm or less of copper at the
     corners of a pad of 4.3 mm.
     """
     side = p.get("coax_side")
@@ -496,7 +497,7 @@ def ludwig3_ref(e_theta, e_phi, phi_deg):
     or 135 degrees from +x. **It is not the major axis itself.** A patch
     with a feed that also excites the orthogonal mode has a TILTED
     polarization. A reference on the tilt gives no cross-pol, and the
-    reference of the design (x or y) shows it. A design on an other angle
+    reference of the design (x or y) shows it. A design on a different angle
     gets the nearest of the four, and the side block of the view names it.
     """
     a, b = complex(e_theta), complex(e_phi)
@@ -674,7 +675,7 @@ def solver_python():
 # the name that the dialog shows, its runner in this folder and the modules
 # that the runner imports. It also has the function that finds its Python
 # (None: the Python of KiCad). The plugin must have one of them, not all:
-# the dialog greys out a solver if its Python does not have its modules. A
+# the dialog disables a solver if its Python does not have its modules. A
 # new solver is one more entry here, and a runner that reads model.json and
 # writes results.sNp. A model with no "solver" key uses openEMS.
 SOLVER_INFO = {
@@ -682,7 +683,7 @@ SOLVER_INFO = {
                 "runner": "openems_runner.py",
                 "modules": ("numpy", "h5py", "CSXCAD", "openEMS"),
                 "python": solver_python},
-    "emerge": {"name": "EMerge (FEM, experimental)",
+    "emerge": {"name": "EMerge (FEM)",
                "runner": "emerge_runner.py",
                "modules": ("numpy", "h5py", "emerge"),
                "python": emerge_python},
@@ -703,14 +704,15 @@ def split_rings(poly):
     **KiCad keeps a pour with holes as ONE outline** (`Fracture`). The
     outline goes into each hole along a slit with no width, and it comes
     back along the same slit. openEMS rasterizes such a polygon correctly.
-    gmsh makes a surface of it, and a slit with no width makes that
-    surface degenerate. A ground zone with the clearances of three vias
+    gmsh makes a surface of it. A slit with no width makes that surface
+    degenerate. A ground zone with the clearances of three vias
     gave S11 = 0 dB and S21 = -51 dB: the plane was not in the model.
 
     A slit shows as a point that the outline visits two times. The
     shortest loop between two visits is a hole or a spike of the slit. A
     loop with an area is a hole, and a loop with no area is a spike. The
-    loop leaves the outline each time, until no point repeats.
+    code removes the loop from the outline each time, until no point
+    repeats.
     """
     pts = [(round(x, 6), round(y, 6)) for x, y in poly]
     if len(pts) > 1 and pts[0] == pts[-1]:

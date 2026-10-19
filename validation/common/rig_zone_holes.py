@@ -51,8 +51,8 @@ import solverenv  # noqa: E402
 # discontinuity in the middle of a matched line, and a discontinuity causes
 # a reflection.
 #
-# Measured on 2026-08-05 at the coarse preset: the solid pour gives S11
-# −11.5 dB, and the void gives −3.3 dB. −3.3 dB is 47% of the power back. A
+# Measured on 2026-08-05 at the coarse preset, the solid pour gives S11
+# −11.5 dB. The void gives −3.3 dB. −3.3 dB is 47% of the power back. A
 # slit that CLOSED keeps the plane solid, and S11 then does not move. 5 dB
 # is much above the scatter of this board, and much below the step that the
 # run gives.

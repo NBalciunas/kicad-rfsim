@@ -1,9 +1,8 @@
 """Run the boards of the openEMS rigs through the EMerge solver.
 
-EMerge is an experiment (`plugins/emerge_runner.py`). This file makes the
+The runner is `plugins/emerge_runner.py`. This file makes the
 same boards as the openEMS rigs, with the builders of `validation/common/`,
-and it runs each one through EMerge. Each case has a check that EMerge can
-pass today:
+and it runs each one through EMerge. Each case has a check:
 
   msl        a 50 ohm microstrip through line: a good match, a low loss,
              and 7.07 V across the substrate in the E-field view
@@ -51,19 +50,19 @@ Z0 = 50.0
 # small margin for the mesh.
 POWER_MAX = 1.02
 # The field views have the scale of CST: a wave of 0.5 W. On a matched line
-# of Z0 that is a peak voltage of sqrt(2 * 0.5 * Z0), and Ez * h at the
+# of Z0, that is a peak voltage of sqrt(2 * 0.5 * Z0). Ez * h at the
 # middle of the line gives it. 10% holds the mesh and the small mismatch.
 LINE_V_TOL = 0.10
 
 # The patch: FR-4 of 1.53 mm with a low loss, thus the radiation and not
 # the substrate gets the power. W and L come from the transmission-line
-# model of the patch for 2.4 GHz (er 4.5), and the inset from
-# R(y0) = R_edge cos^2(pi y0 / L) with R_edge of about 310 ohm.
+# model of the patch for 2.4 GHz (er 4.5). The inset comes from
+# R(y0) = R_edge cos^2(pi y0 / L), with R_edge of about 310 ohm.
 PATCH_W, PATCH_L, PATCH_INSET = 37.7, 29.1, 10.7
 PATCH_H, PATCH_ER, PATCH_TAND = 1.53, 4.5, 0.002
 FEED_W, FEED_GAP, FEED_LEN = 2.9, 1.0, 12.0
 # The air box must be a part of a wavelength away from the patch for the
-# far field: 30 mm is 0.24 wavelength at 2.4 GHz.
+# far field. 30 mm is 0.24 wavelength at 2.4 GHz.
 PATCH_MARGIN = 30.0
 
 

@@ -129,7 +129,7 @@ def _parse_value(text, kind):
     """Change '4k7', '4.7k', '100nF' or '3n3' into a float in SI units.
 
     The units are ohm, H or F. `kind` is 'R', 'L' or 'C'. The function
-    obeys the RKM convention, where a letter shows the position of the
+    obeys the RKM convention. In it, a letter shows the position of the
     decimal point (4R7 = 4.7 ohm, 3n3 = 3.3 nH or 3.3 nF). If the text is
     DNP, or if the function cannot read the text, it gives None.
 
@@ -144,7 +144,7 @@ def _parse_value(text, kind):
     tok = words[0] if words else ""            # this removes " 1%" and more
     # **The unit can be a word of its own**: "10 kOhm", "4.7 uF", "10 nH".
     # The first word is then a bare number, and the prefix goes away with
-    # NO message: "10 kOhm" gave 10 ohm and "4.7 uF" gave 4.7 F. Thus
+    # NO message. "10 kOhm" gave 10 ohm, and "4.7 uF" gave 4.7 F. Thus
     # attach the second word when it starts with a prefix or with a unit
     # letter. A tolerance starts with a DIGIT ("1%"), and a voltage rating
     # also starts with a digit ("25V"). Thus the code does not attach them.
@@ -549,9 +549,9 @@ def _copper_polys(board, layer_id, region):
     The code before it made the polygons itself. On the boards of the rigs
     the two agree to 0.13%, and the curves of KiCad are more accurate. The
     code before made a non-plated hole into copper (11% of the copper of a
-    board with 4 mounting holes). Also, a filled shape lost its outline (2%
-    of a filled rectangle). **`Simplify` must come after the converter**:
-    before it, a track and its pads overlap.
+    board with 4 mounting holes). Also, it did not keep the outline of a
+    filled shape (2% of a filled rectangle). **`Simplify` must come after the
+    converter**: before it, a track and its pads overlap.
 
     The converter has no filter for the region, thus the code clips its
     result. It gives no data about each item, thus the count of the items
@@ -661,8 +661,9 @@ def _coplanar_gap(polys, x, y, direction, sides=False):
     is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
 
     With `sides`, it gives (the gap, the median gap of the +side, the median
-    gap of the -side), or three None. extract() warns when the two sides are
-    not the same, because the CPW port has the same gap on its two sides.
+    gap of the -side), or three None. extract() gives a warning when the two
+    sides are not the same, because the CPW port has the same gap on its two
+    sides.
     """
     none = (None, None, None) if sides else None
     if not direction or not polys:
@@ -1706,8 +1707,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
     # The two sides of a CPW (B66): 0.2 mm at +y and 0.6 mm at -y. The gap
-    # is the median of the two, and extract() warns: |a - b| / (a + b) is
-    # 0.5, above ASYM_WARN.
+    # is the median of the two, and extract() gives a warning: |a - b| /
+    # (a + b) is 0.5, above ASYM_WARN.
     _ASYM = [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -5.0, 20.0, -1.1)]
     _got = _coplanar_gap(_ASYM, 0.0, 0.0, [1, 0], sides=True)
     assert _got == (0.4, 0.2, 0.6), _got
@@ -1750,8 +1751,8 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
 
     # The gap of a coaxial feed. A round pad of r 2.143 (36 points) in a
     # round clearance of r 3.5, in a plane of 20 x 20 mm. The plane is
-    # FRACTURED as KiCad gives it: the hole joins the outline through a
-    # slit with no width, at y = 0 to the left. A ray along -x goes ON
+    # FRACTURED as KiCad gives it. The hole connects to the outline through
+    # a slit with no width, at y = 0 to the left. A ray along -x goes ON
     # that slit.
     import math
 

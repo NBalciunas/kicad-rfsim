@@ -116,7 +116,7 @@ def test_edit_gives_custom_and_not_no_parasitics():
     """An edit of a field moves the row to Custom, and keeps the value.
 
     _on_para_edit selected `GetCount() - 1`, and the LAST entry of that
-    choice is "No parasitics"; "Custom" is the entry before it. Thus a
+    choice is "No parasitics". "Custom" is the entry before it. Thus a
     value that the user typed became an IDEAL element. _para_value gives
     0 for "No parasitics", and model.json then held 0 and 0 with no
     message.
@@ -174,7 +174,7 @@ def test_no_parasitics_shows_zero_and_greys_the_fields():
 
 
 def test_model_off_removes_the_part():
-    """"Model" off greys its row, and rfsim.py then removes that part."""
+    """"Model" off makes its row grey, and rfsim.py then removes that part."""
     d = dialog()
     _, cb, ch, esl, esr = d.para_rows[0]
     cb.SetValue(False)
@@ -360,7 +360,7 @@ def test_the_whole_dialog_scrolls_and_keeps_the_run_button():
     d = dialog([unknown("D%d" % k) for k in range(9)])
     # Examine the children of THIS dialog. `wx.Window.FindWindowById` is a
     # STATIC method in wxPython. It examines all the windows of the
-    # process. Thus it can give the button of a dialog that an earlier test
+    # process. Thus it can give the button of a dialog that a previous test
     # made and did not remove.
     run = [c for c in d.GetChildren()
            if isinstance(c, wx.Button) and c.GetId() == wx.ID_OK]
@@ -402,7 +402,8 @@ def test_the_inductor_warning_follows_the_value():
     times longer, with no message.
 
     **From 2026-09-21, the label names the SOURCE of the largest value and
-    its part** (B49): "The body of R1", "The inductor L9" or "The L of X1".
+    its part** (B49). Examples are "The body of R1", "The inductor L9" and
+    "The L of X1".
     Before, it gave "An inductor of 0.4 nH" for a package body. Thus it
     named a part that is not on the board. ONE limit of 1.05 times is
     correct for all sources, by a decision of the owner. A body costs the
@@ -414,8 +415,8 @@ def test_the_inductor_warning_follows_the_value():
     # it, thus the label must tell it.
     assert "1.3 times longer" in d.lumped_warn.GetLabel(), \
         "a body of 0.40 nH costs 1.3 times: %r" % d.lumped_warn.GetLabel()
-    # **The label must name the SOURCE and the part** (B49). It said "An
-    # inductor of 0.4 nH" before 2026-09-21, and the board holds NO
+    # **The label must name the SOURCE and the part** (B49). Before
+    # 2026-09-21, it said "An inductor of 0.4 nH". The board holds NO
     # inductor: 0.40 nH is the body of an unknown package on R1.
     first = d.lumped_warn.GetLabel()
     assert "because of the 0.4 nH of R1." in first,         "the label must name the body and its part: %r" % first
@@ -477,7 +478,7 @@ def test_the_label_follows_a_resistance_as_well():
     # that, and it gives no cost.
     r["value"].SetValue("1000")
     got = d.lumped_warn.GetLabel()
-    # The run leaves the body out, and the Optimizations list tells it.
+    # The run removes the body, and the Optimizations list tells it.
     # The label tells only a cost, and this part has none.
     assert got == "", got
     # The SWEEP sets the result. At 100 GHz, the body is 251 ohm, 3.1% of
@@ -528,7 +529,7 @@ def test_an_open_part_leaves_the_grid():
             c.SetValue({"R": "50", "L": "90000", "C": "100"}[k])
         d._on_lumped(None)
         text = d.lumped_warn.GetLabel()
-        # The label tells that the run leaves the part out.
+        # The label tells that the run does not include the part.
         assert ("D1 (565 kohm) is not in the run, because it is an open "
                 "circuit over this sweep.") in text.replace("\n", " "), text
         # The cost of the part is gone: what stays is the body of R1.
@@ -625,7 +626,7 @@ def test_the_run_window_keeps_its_log():
     """RunDialog writes each line that it shows to run.log.
 
     The window closes immediately when a run succeeds. Thus before this
-    file, its log was gone. Nobody was able to read again the decisions of the
+    file, its log was gone. Nobody could then read again the decisions of the
     run, the thread count and how each excitation ended. The file must be
     complete and CLOSED when ShowModal returns. A run that stops with an
     error must also tell it in the file.
@@ -796,7 +797,7 @@ def test_the_solver_choice_reaches_the_settings():
     s = d.get_settings()
     assert s["solver"] == "emerge" and s["fem_points"] == 15, s
     # A wx.SpinCtrl got the dimensions 0 x 0 when the dialog moved it into its
-    # scrolled body, thus the row showed a label and no field.
+    # scrolled body. Thus the row showed a label and no field.
     d.Show()
     wx.Yield()
     w, h = d.fem_points.GetSize()
@@ -824,7 +825,7 @@ def test_the_solver_choice_reaches_the_settings():
 
 def test_a_missing_solver_is_greyed_out():
     """The plugin must have one solver, not all. A solver that is not installed
-    stays in the list, greyed out, with its cause in the tooltip and in the
+    stays in the list, grey, with its cause in the tooltip and in the
     line below. The first solver that can run is the default. With no
     solver that can run, Run refuses."""
     i_oe, i_em = gui.SOLVERS.index("openems"), gui.SOLVERS.index("emerge")

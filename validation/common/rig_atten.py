@@ -20,9 +20,9 @@ same. Thus each constant loss cancels.
 **The closed formula, and there are TWO of them.** The copper has a
 conductivity and the substrate has a loss, thus the theory has two terms:
 
-  - the conductor, alpha_c = 8.686 * Rs / (Z0 w). Rs is the surface
-    resistance, sqrt(pi f mu0 / kappa), of a sheet that is thicker than the
-    skin depth (35 um against 1.2 um at 3 GHz);
+  - the conductor, alpha_c = 8.686 * Rs / (Z0 w). Rs = sqrt(pi f mu0 /
+    kappa) is the surface resistance of a sheet that is thicker than the
+    skin depth. Here, that is 35 um against 1.2 um at 3 GHz;
   - the dielectric, alpha_d = 8.686 * (pi f / c) * er / sqrt(eps_eff)
     * (eps_eff - 1) / (er - 1) * tan d.
 

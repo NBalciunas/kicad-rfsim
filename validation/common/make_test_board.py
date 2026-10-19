@@ -239,7 +239,7 @@ def make_probe_patch(path, feed="coax", dual=False, ground=True,
     That is the probe of the openEMS tutorial of a patch: a lumped port
     from the plane to the patch. A coaxial feed with a small pad and a
     small clearance is almost that probe. `dual` adds the second feed, on
-    the y axis. `ground=False` leaves out the ground, for the guard.
+    the y axis. `ground=False` makes no ground, for the guard.
 
     The patch is a filled shape with no net, as the copper of the
     footprint of kicad-rfgen. The ground is a zone of GND, thus the filler

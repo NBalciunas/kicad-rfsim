@@ -107,25 +107,25 @@ L_PART_TOL = 0.15
 # next to the notch (0.7 to 0.9 and 1.1 to 1.3 of f0, the median). The
 # branch has no resistance in these runs. Thus the power that does not go
 # through must come back. Only the loss of the board itself (copper,
-# dielectric, radiation, the ports) removes a part. A run that loses MORE
+# dielectric, radiation, the ports) removes a part. A run with MORE loss
 # at the notch is not a measurement. In openEMS, an inductor of 5 nH gave
 # 0.944 of the board at medium and read +16.2%, and 0.955 at coarse and
-# read +5.1%; 1 nH, 2 nH and the short give 0.988 to 1.005.
+# read +5.1%. 1 nH, 2 nH and the short give 0.988 to 1.005.
 #
 # **It is relative, and not an absolute sum** (B72, 2026-09-30). The board
 # of EMerge keeps only 0.99 to 0.87 of the power in the sweep with no
-# notch (tan d constant, the copper, and the wave ports). Thus an
-# absolute 0.95 rejected its good runs (0.914 to 0.933 at the notch, +2.4%
-# and +2.9%). Relative to its own board, EMerge gives 0.990 to 0.999.
+# notch. The causes are the constant tan d, the copper and the wave ports.
+# Thus an absolute 0.95 rejected its good runs (0.914 to 0.933 at the
+# notch, +2.4% and +2.9%). Relative to its own board, EMerge gives 0.990 to 0.999.
 POWER_MIN = 0.95
 # **Each run of `two()` is 5 ns long, and no end criteria stops it** (B80,
 # 2026-10-13). With the 1e-4 of the dialog the board stopped at 2.1 to
 # 2.9 ns. The engine tests the energy at intervals, and the energy of this
-# board has a short dip near 2.2 ns. A test that falls in the dip stops the
+# board has a short dip near 2.2 ns. A test that occurs in the dip stops the
 # run there, and the multithread engine moves the dip from run to run. A
 # port signal is also near 1e-2 of its peak at 3 ns. Thus a run that stops
-# before the end gives sum|S|^2 above 1 below 1.5 GHz, and the notch moves. Measured
-# at the coarse preset, with the same model each time:
+# before the end gives sum|S|^2 above 1 below 1.5 GHz, and the notch moves.
+# Measured at the coarse preset, with the same model each time:
 #
 #   the stop                  2 nH    1 nH    sum|S|^2 below 1.5 GHz
 #   1e-4, 2.1 to 2.2 ns       +7.3%   +8.4%   up to 1.085
@@ -136,7 +136,7 @@ POWER_MIN = 0.95
 #
 # 5e-5 is not a correction: the run of 2 nH stopped in the dip again, at
 # the same step as with 1e-4. **1e-5 is not possible on this board.** The
-# energy falls to -44 dB at about 5 ns. Then a slow mode grows to -12 dB at
+# energy decreases to -44 dB at about 5 ns. Then a slow mode grows to -12 dB at
 # 115 ns. The PML makes it near a column of refined cells (B30). The run
 # stops at the step limit after 28 min. Thus the run stops at the
 # minimum of the energy, before the growth. Two runs of 5 ns give the same
@@ -150,7 +150,7 @@ POWER_MIN = 0.95
 # of the feed and the stop do not change it. It is the error of a port of
 # 4 cells at the top of the sweep.
 MAX_STEPS_TWO = 13000
-END_TWO = 1e-9          # never met: the step limit stops the run
+END_TWO = 1e-9          # not met: the step limit stops the run
 
 
 def _in_poly(polys, x, y):
@@ -250,7 +250,7 @@ def simulate(tag, cval, esl, mesh, pkg=None):
     _check_gap_is_open(model, pkg)
     # The value and the body come from this file, and not from the board.
     # The runs must be different ONLY in the ESL. **Thus they also use the
-    # same path of openEMS**: a C of 0.1 pF or more uses the series path
+    # same path of openEMS**. A C of 0.1 pF or more uses the series path,
     # with a body and with no body (`_le_topology`). On the 2512 land the
     # classic path gave an L_board 0.26 nH smaller, and the ESL of the
     # table then read +28.7%. The ESR stays 0, thus the depth of the notch
@@ -393,18 +393,17 @@ def two(mesh="coarse"):
                          % (got * 1e9, lval * 1e9))
     # Each value reads HIGH, and the error is IN PROPORTION to the
     # inductor: it is a percentage and not a constant of the geometry.
-    # Measured on 2026-08-05 with 4 values at the coarse preset, and 3 of
-    # them are in the power guard: +4.2%, +5.2% and +4.2% on 0.5, 1 and
-    # 2 nH. A straight line through the error gives a slope of
-    # +0.041 nH/nH and an intercept of +0.005 nH. The intercept is less
-    # than the scatter of this rig (0.01 nH). An additive term of the
-    # geometry gives the opposite: an intercept and no slope. Two earlier
-    # probes showed that the timestep is not the cause. They also showed
-    # that a branch inductance that follows the frequency is not the cause.
-    # Thus the error comes from the lumped inductor itself. The first
-    # numbers for this result came from a 5 nH run OUT OF the power guard.
-    # These numbers come from runs in it. The test holds the SIGN, because
-    # a value that reads LOW is a different defect.
+    # Measured on 2026-08-05 with 4 values at the coarse preset. 3 of them
+    # are in the power guard: +4.2%, +5.2% and +4.2% on 0.5, 1 and 2 nH. A
+    # straight line through the error gives a slope of +0.041 nH/nH and an
+    # intercept of +0.005 nH. The intercept is less than the scatter of this
+    # rig (0.01 nH). An additive term of the geometry gives the opposite: an
+    # intercept and no slope. Two previous probes showed that the timestep is
+    # not the cause. They also showed that a branch inductance that follows the
+    # frequency is not the cause. Thus the error comes from the lumped inductor
+    # itself. The first numbers for this result came from a 5 nH run OUT OF the
+    # power guard. These numbers come from runs in it. The test holds the SIGN,
+    # because a value that reads LOW is a different defect.
     print("\n   the excess is %+.4f nH and %+.4f nH"
           % (excess[0] * 1e9, excess[1] * 1e9))
     # **The sign is a property of the lumped inductor of openEMS.** The

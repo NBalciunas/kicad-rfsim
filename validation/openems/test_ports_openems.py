@@ -242,8 +242,8 @@ def test_the_feed_of_a_short_port_stays_before_its_plane():
 
     openEMS puts the feed on the line nearest to `res` from the start, and
     the plane on the line nearest to half the port. The lines are those of
-    the series board of `rig_states` with a sweep to 4 GHz: the two got
-    9.5 mm, and S21 read +7.8 dB. With a sweep to 6 GHz the plane is after
+    the series board of `rig_states` with a sweep to 4 GHz. There, the two
+    got 9.5 mm, and S21 read +7.8 dB. With a sweep to 6 GHz the plane is after
     the feed, and the rule must change nothing.
     """
     def port(a, b):
@@ -314,9 +314,9 @@ def test_strip_cells():
 
     A microstrip got the rule on 2026-08-05. Its track of 2.9 mm is WIDER
     than one coarse cell. Thus its error was smaller, and it looked like
-    the usual mesh error: 44.3 ohm at coarse and 47.2 at medium, against
-    50.0 from the theory. With the cells, the same board gives 49.3 ohm at
-    coarse and at medium.
+    the usual mesh error. It read 44.3 ohm at coarse and 47.2 at medium,
+    against 50.0 from the theory. With the cells, the same board gives 49.3 ohm
+    at coarse and at medium.
     """
     for kind, w in (("stripline", 0.6), ("msl", 2.9)):
         m = model(kind, track_width=w, width=w, length=w)
@@ -605,9 +605,9 @@ def test_a_feature_stays_on_one_layer():
     pads, or a slot. An F.Cu edge and a B.Cu edge hold no such space, because
     the copper of two layers does not touch in the plane. Until 2026-09-01, the
     rule used the edges of all layers together. It put a line at y = -20.3875
-    on the 2512 land of `run_shunt_openems.py`, between an F.Cu edge at -20.775
-    and a B.Cu edge at -20.000. `mesh_diff_openems.py` lists the two boards
-    that the rule moved.
+    on the 2512 land of `run_shunt_openems.py`. That line was between an F.Cu
+    edge at -20.775 and a B.Cu edge at -20.000. `mesh_diff_openems.py` lists
+    the two boards that the rule moved.
 
     The same two edges on ONE layer are a gap of 0.775 mm, and that gap
     must get its line. Thus the test cannot be satisfactory with a rule
@@ -686,7 +686,8 @@ def test_a_series_rlc_part_is_one_element():
     assert rlc == cap, "the series RLC %s against the capacitor %s" % (rlc, cap)
     assert float(rlc.get("LEtype", "nan")) == 1.0, rlc
     # A DCR of 5 ohm changes |Z| of 1 nH by 28% at 1 GHz, thus it stays in
-    # the element. 0.5 ohm changes it by 0.3%, and the inductor loses it.
+    # the element. 0.5 ohm changes it by 0.3%, and the inductor does not
+    # keep it.
     rl = element(type="RLC", value=None, r=5.0, l=1e-9, c=None)
     ind = element(type="L", value=1e-9, esr=5.0)
     assert rl == ind, "the series RL %s against the inductor %s" % (rl, ind)
@@ -790,7 +791,8 @@ def test_an_open_part_leaves_the_grid():
     Such a part gives NO element in the XML of `build`, and its gap stays
     open. The element in the grid read S21 about 5 dB BELOW the bare gap at
     1/600 of the Courant step. An inductor with an EPC keeps only the EPC,
-    as a lone C, because at GHz a choke on a board is that capacitance. A part that is not an open goes into the grid as before.
+    as a single C, because at GHz a choke on a board is that capacitance. A
+    part that is not an open goes into the grid as before.
     With `open_as_gap` = False, all parts go into the grid as before. The
     timestep rule must not use the same parts that `build` does not use.
     """
@@ -926,7 +928,7 @@ def test_the_run_says_what_it_chose():
             "important than the rule (the rule gives 0.1581") in got[1], got
     got = lines(dict(type="L", value=90e-6, epc=2.81e-12))
     assert "only its EPC of 2.81 pF stays, on the series path" in got[0], got
-    # **B79**: a lone C of 0.1 pF or more uses the series path, and a
+    # **B79**: a single C of 0.1 pF or more uses the series path, and a
     # smaller one the classic path. The two get no factor.
     got = lines(dict(type="C", value=1e-12), parasitics=False)
     assert ("the series path (LEtype 1), because it is one C of 0.1 pF or "
@@ -961,8 +963,9 @@ def test_the_run_says_what_it_chose():
         and "280 fF" in got[0], got
     got = epc_lines(0.13, -10.14)
     assert len(got) == 1 and "is removed" in got[0], got
-    # The notes of `board_reader` (a part at an angle, a package that can
-    # be metric) come FIRST, and not in the warning box before the run.
+    # The notes of `board_reader` come FIRST, and not in the warning box
+    # before the run. They are a part at an angle, and a package that can
+    # be metric.
     m = model("msl")
     m["settings"] = dict(m["settings"], f_start=1e9, f_stop=6e9, z0=50.0,
                          mesh="coarse", max_timesteps=300000,
@@ -1008,8 +1011,8 @@ def test_a_body_that_changes_nothing_stays_out():
     # 1 pF with an ESR of 0.1 ohm and no ESL: the ESR is 0.4% of |Z| at
     # 6 GHz. Thus the capacitor is one component.
     assert idle({"C": 1e-12, "R": 0.1}, "C", 1e9, 6e9)
-    # An inductor loses a DCR that changes nothing (B82): the series path
-    # of openEMS can grow on an L with a small R. 10 nH is 62.8 ohm at
+    # An inductor does not keep a DCR that changes nothing (B82): the series
+    # path of openEMS can grow on an L with a small R. 10 nH is 62.8 ohm at
     # 1 GHz, thus 1 ohm is 0.013% and 20 ohm is 4.9%. A low start of the
     # sweep keeps the DCR. A part with no body has nothing to remove.
     assert idle({"L": 10e-9, "R": 1.0}, "L", 1e9, 6e9)
@@ -1061,8 +1064,8 @@ def test_the_warnings_name_the_inductors():
 
     An inductor with no C in series can ramp after the pulse
     (`_dc_inductors`). A C in the branch blocks DC. An L with an R and no C
-    can diverge (`_lr_branches`), and a resistor with an ESL is such a
-    branch as well. A part that is an open stays out of the grid.
+    can diverge (`_lr_branches`), and a resistor with an ESL is also such a
+    branch. A part that is an open stays out of the grid.
     """
     def run_of(*parts):
         s = {"f_start": 1e9, "f_stop": 6e9, "z0": 50.0, "lumped": True,
@@ -1113,9 +1116,9 @@ def test_the_mesh_says_what_it_chose():
 
 
 def coax_model(side="B.Cu", direction=(1, 0)):
-    """Give a model with ONE coaxial feed: a through-hole pad of 4.286 mm
-    with a drill of 1.27 mm at (7, -10), in a clearance of r 3.5 mm on
-    B.Cu. That is the geometry of the probe of a patch."""
+    """Give a model with ONE coaxial feed. It is a through-hole pad of
+    4.286 mm with a drill of 1.27 mm at (7, -10). Its clearance is r 3.5 mm
+    on B.Cu. That is the geometry of the probe of a patch."""
     m = model("coax", x=7.0, y=-10.0, layer="F.Cu", ref_layer="In1.Cu",
               ref_layer2=None, height=None, direction=None,
               track_width=None, width=4.286, length=4.286, drill=1.27,
@@ -1214,9 +1217,9 @@ def test_a_coaxial_feed_in_the_xml():
 
 
 def test_a_long_edge_gets_the_thirds():
-    """F8: a long copper edge has no line ON it. It has one line 1/3 of a
-    cell in the copper and one 2/3 of a cell out of it, with a cell of
-    EDGE_THIRDS * res. A narrow strip keeps the lines on its edges, because
+    """F8: a long copper edge has no line ON it. The cell is EDGE_THIRDS *
+    res. The edge has one line 1/3 of a cell in the copper, and one line 2/3
+    of a cell out of it. A narrow strip keeps the lines on its edges, because
     the rules of the features and of the ports hold them. The same is true
     for an edge that a port box holds. The two lines are anchors: the merge
     keeps them on their coordinates."""
@@ -1244,7 +1247,7 @@ def test_a_state_changes_the_values():
     """F30: `solverenv.apply_state` gives a copy of the model with the
     values of a state, and the model itself does not change. A state keeps
     the type and the body of each part. The EPC of an inductor follows its
-    inductance, because the SRF stays: 10 nH to 20 nH halves it."""
+    inductance, because the SRF stays: 10 nH to 20 nH divides it by 2."""
     m = model("msl")
     m["lumped_elements"] = [
         dict(lumped(0.5, 0.6), ref="C1", type="C", value=1e-12, esl=3e-10),

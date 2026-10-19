@@ -15,7 +15,7 @@ formula on the S-matrix:
     a_i = G b_i                        the load on each element port
     S_red = S_ee + S_ei (I - G S_ii)^-1 G S_ie
 
-where `e` are the ports of the board, `i` are the element ports, and `G` is
+where `e` are the ports of the board and `i` are the element ports. `G` is
 the diagonal of the reflection of each load, `G = (Z - z0) / (Z + z0)` with
 `Z(f) = R + jwL + 1/jwC`.
 
@@ -87,8 +87,8 @@ time.
    circuit has. But about 4 dB stays near the null of S21, and 1.5 dB on
    S11 at the top of the sweep. **The medium preset does not move it**
    (-7.6% and 4.2 dB at coarse, -7.0% and 4.1 dB at medium). More cells in
-   the box along the current also do not move it (4.3, 5.7 and 5.0 dB at 1,
-   2 and 3 cells, on 2026-09-23). The column of the element port gives out
+   the box along the current also do not move it. On 2026-09-23, 1, 2 and 3
+   cells gave 4.3, 5.7 and 5.0 dB. The column of the element port gives out
    1.096 of the power that it gets at 6 GHz. A reactance sends all of that
    error back into the answer, and a load of z0 sends back nothing.
 
@@ -632,7 +632,7 @@ def case_body():
     """P21: a body that does not change its part stays out of the grid.
 
     Each resistor has the ESL of an 0603 body (0.5 nH), with the parasitics
-    on, which is the default of a board. The run of today removes that body
+    on, which is the default of a board. The run at this time removes that body
     where it moves |Z| by 2% or less. Thus the part is one R and uses the
     classic path. Its S-parameters must be the same as the S-parameters of
     the same resistor with NO body, to the bit. The same model with

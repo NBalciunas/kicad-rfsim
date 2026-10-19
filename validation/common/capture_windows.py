@@ -102,7 +102,7 @@ def capture_dialog(out):
         d = dialog(extra)
         shot(d, os.path.join(out, name + ".png"))
         d.Destroy()
-    # A solver that is not installed: greyed out, with a line below.
+    # A solver that is not installed: grey, with a line below.
     d = dialog(solvers={"openems": None,
                         "emerge": r"C:\emerge\venv\Scripts\python.exe "
                                   "has no emerge"})

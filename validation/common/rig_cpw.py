@@ -5,8 +5,8 @@ python of KiCad 10:
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" validation\\openems\\run_cpw_openems.py [mesh] [cpw|stripline]
     "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" validation\\emerge\\run_cpw_emerge.py [mesh] [cpw|stripline]
 
-**cpw** makes a grounded CPW of 30 mm. It has a line of 1.5 mm on F.Cu, a
-ground at each side with a gap of 0.3 mm, and a full plane on B.Cu.
+**cpw** makes a grounded CPW of 30 mm. It has a line of 1.5 mm on F.Cu and
+a full plane on B.Cu. A ground is at each side, with a gap of 0.3 mm.
 
 **stripline** makes a line of 30 mm on In1.Cu of a board with 4 layers,
 between a plane on F.Cu and a plane on In2.Cu.
@@ -187,7 +187,7 @@ def main(mesh="coarse", kind="cpw"):
 
     # The two solvers write lines.json from the port of the line: the
     # probes of openEMS, and the mode of the wave port of EMerge. A port
-    # that fell back to a lumped port writes none, and then two lengths
+    # that became a lumped port writes none, and then two lengths
     # give eps_eff.
     if rigsolve.lines(outdir) is None:
         e = eps_two_lengths(kind, mesh, outdir, e_th)

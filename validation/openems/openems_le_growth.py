@@ -56,7 +56,7 @@ All users can make this mesh:
 **Two controls that one number held before.** `MARGIN` gave the air band
 AND the cell of the PML at the same time (`MARGIN` mm of air, and a PML of
 8 cells of `MARGIN`/8). Thus a run at 12 mm moved the two of them, and no
-measurement was able to tell which one causes the mode. `AIR` and `PML_STEP` are
+measurement could tell which one causes the mode. `AIR` and `PML_STEP` are
 different values at this time. The `MARGIN` = m of before is `AIR` = m with
 `PML_STEP` = m/8.
 

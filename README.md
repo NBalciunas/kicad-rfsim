@@ -9,7 +9,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 
 - Use one of two solvers: openEMS (FDTD) or EMerge (FEM).
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
-- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
+- Plot the magnitude, the phase, the phase difference to a reference trace, a Smith chart, the VSWR and the group delay.
 - Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
 - Calculate the far field: three polar cuts, a 3D pattern, Dmax, the efficiency, and the co-polarization, the cross-polarization (Ludwig 3) and the XPD.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
@@ -187,9 +187,10 @@ Its row holds R in ohm, L in nH and C in pF, in series. 0 leaves that component 
 
 **"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
 The grid has a column for each state and a row for each part with "Model" on.
-State 1 is the reference.
+State 1 is the part values that you set in the settings dialog, and its column in the grid is read-only.
 A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
 An empty cell keeps the value of State 1. Each state is one run, in the folder `state_N` of the output directory.
+The plots show each state as a trace, for example "S21 (State 2)", and "Phase Difference" gives the shift of each state from a reference trace.
 
 #### Parasitics and run time
 
@@ -207,8 +208,6 @@ The ESL of a body counts as well.
 The label under the rows of the parts gives the number before you start the run.
 A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit.
 The run leaves it out and the label names it.
-The results window then has a "State" choice for the other views, and four views that compare the states: the magnitude, the phase and the phase difference (to State 1) of S21, and the magnitude of S11.
-A block of text gives the value of each state at "Define at".
 
 ## Examples
 

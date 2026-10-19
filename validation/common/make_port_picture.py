@@ -12,8 +12,8 @@ The numbers come from `runner._port_geometry` (the `else` branch) and from
     stop  = [x + length/2, y + width/2, z_top]
 
 - In x and y, the box is the FULL pad, from `pad.GetBoundingBox()`.
-- In z, it goes through all the substrate, from the plane of the reference
-  layer up to the plane of the layer of the pad.
+- In z, it goes through all the substrate: from the plane of the
+  reference layer up to the plane of the pad.
 - The feed resistor and the excitation fill ALL the box. The voltage probe
   is one line at the centre. The current probe is a horizontal plane at the
   middle height.
@@ -33,8 +33,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Rectangle, FancyArrow  # noqa: E402
 
-# The board of validation/: FR4 of 1.53 mm between F.Cu and B.Cu, and a
-# pad of 2.0 x 2.0 mm at the end of a track of 2.9 mm.
+# The board of validation/ has FR4 of 1.53 mm between F.Cu and B.Cu. A
+# pad of 2.0 x 2.0 mm is at the end of a track of 2.9 mm.
 H_SUB, PAD, TRACK = 1.53, 2.0, 2.9
 
 
