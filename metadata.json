@@ -1,8 +1,8 @@
 {
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "RFsim",
-    "description": "S-parameter simulation of PCB structures with openEMS.",
-    "description_full": "RFsim simulates the S-parameters of an RF structure directly in the PCB editor, with the openEMS FDTD solver, for any number of ports. It plots the magnitude, the phase, a Smith chart, the VSWR and the group delay, and it writes a Touchstone (.sNp) file. It also calculates the far field, and it animates the E-field and the H-field. The geometry comes directly from the board: the pads, tracks, vias, zones and the R/L/C parts.",
+    "description": "S-parameter simulation of PCB structures with openEMS or EMerge.",
+    "description_full": "RFsim simulates the S-parameters of an RF structure directly in the PCB editor, with the openEMS FDTD solver or the EMerge FEM solver, for any number of ports. It plots the magnitude, the phase, a Smith chart, the VSWR and the group delay, and it writes a Touchstone (.sNp) file. It also calculates the far field, and it animates the E-field and the H-field. The geometry comes directly from the board: the pads, tracks, vias, zones and the R/L/C parts.",
     "identifier": "com.github.nbalciunas.kicad-rfsim",
     "type": "plugin",
     "author": {
