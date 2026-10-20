@@ -463,6 +463,37 @@ def test_a_field_view_exports_a_gif():
                 assert err < 3.0, \
                     "%r: frame 0 is not the canvas (mean error %.1f of 255)" \
                     % (name, err)
+                # The red end of the colour bar had steps of 15 of 255: the
+                # palette came from the pixels, and few pixels are red.
+                bar = f.figure.axes[-1].get_window_extent()
+                rows = slice(h - int(bar.y1) + 2, h - int(bar.y0) - 2)
+                cols = slice(int(bar.x0) + 5, int(bar.x1) - 5)
+                step_err = float(np.abs(got - want)[rows, cols].max())
+                assert step_err < 6.0, \
+                    "%r: the colour bar has steps of %.0f of 255" \
+                    % (name, step_err)
+                # Each port box and label is lime, and the same, in all the
+                # frames. When `antialiased` was True, an edge mixed the lime
+                # with the field. The palette had no colour for the mixed
+                # colours. The box had no lime pixel, and its grey colours
+                # changed with the field.
+                ax = f.figure.axes[1]
+                for p in f.model["ports"]:
+                    cx, cy = ax.transData.transform((p["x"], p["y"]))
+                    win = (slice(int(h - cy) - 20, int(h - cy) + 21),
+                           slice(int(cx) - 20, int(cx) + 21))
+                    masks = []
+                    for k in range(im.n_frames):
+                        im.seek(k)
+                        masks.append((np.asarray(im.convert("RGB"))[win]
+                                      == (0, 255, 0)).all(axis=-1))
+                    assert masks[0].sum() > 50, \
+                        "%r: P%d has %d lime pixels" \
+                        % (name, p["number"], masks[0].sum())
+                    moved = max(int((m != masks[0]).sum()) for m in masks)
+                    assert moved == 0, \
+                        "%r: %d lime pixels of P%d change between frames" \
+                        % (name, moved, p["number"])
                 im.seek(6)
                 assert im.convert("RGB").tobytes() != first, \
                     "%r: the frames are all the same" % name

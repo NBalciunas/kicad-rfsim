@@ -3075,21 +3075,79 @@ class ResultsFrame(wx.Frame):
         """
         import numpy as np
         from PIL import Image
+        from matplotlib import cm
         step, frames = self._frame_step
+        # The first artist with a colour map is the field. Its axes also
+        # hold the ports and the copper outlines.
+        mesh = next(iter(self.figure.findobj(
+            lambda a: isinstance(a, cm.ScalarMappable))))
+        # When `antialiased` is True, an edge mixes its colour with the field
+        # below it. The field changes in each frame. Thus each frame must
+        # have new mixed colours, and the palette cannot hold them. The port
+        # boxes then changed to a grey colour from frame to frame. Thus, for
+        # the GIF, `antialiased` is False on the lines and the text on the
+        # field.
+        edges = [a for a in mesh.axes.get_children()
+                 if a is not mesh and hasattr(a, "set_antialiased")]
+        before = [a.get_antialiased() for a in edges]
         rgb = []
-        for i in range(frames):
-            step(i)
-            self.canvas.draw()
-            rgb.append(np.asarray(self.canvas.buffer_rgba())[..., :3].copy())
+        try:
+            for a in edges:
+                a.set_antialiased(False)
+            for i in range(frames):
+                step(i)
+                self.canvas.draw()
+                rgb.append(
+                    np.asarray(self.canvas.buffer_rgba())[..., :3].copy())
+        finally:
+            for a, aa in zip(edges, before):
+                a.set_antialiased(aa)
+            self.canvas.draw_idle()
+
         # A GIF frame has a palette of 256 colours. When each frame gets its
-        # own palette, the same value gets a different colour in each frame,
-        # and the colour bar flickers. Thus all frames use one palette that
-        # comes from all the frames. Dither is off, because dither noise
-        # also changes from frame to frame.
-        pal = Image.fromarray(np.concatenate(rgb)).quantize(256)
-        images = [Image.fromarray(a).quantize(palette=pal,
-                                              dither=Image.Dither.NONE)
-                  for a in rgb]
+        # own palette, the same value gets a different colour in each frame.
+        # The colours of the bar then change from frame to frame. Thus all
+        # frames use one palette. Dither is off, because dither noise also
+        # changes from frame to frame. A palette from only the pixels gives
+        # most colours to the large areas of low field. The red end of the
+        # colour bar then gets steps. Thus 224 colours come from the colour
+        # map at equal steps. Some pixels are not near the colour map: the
+        # white, the text, the lines and the port boxes. Of their colours,
+        # the 32 with the most pixels go into the palette. These pixels do
+        # not move, thus their colours are in all the frames.
+        px = np.stack(rgb).astype(np.uint32)
+        keys, inv, count = np.unique(
+            (px[..., 0] << 16 | px[..., 1] << 8 | px[..., 2]).ravel(),
+            return_inverse=True, return_counts=True)
+        cols = np.stack([keys >> 16, keys >> 8 & 255, keys & 255],
+                        axis=1).astype(float)
+
+        def nearest(pal):
+            """Give the index of the nearest palette colour for each colour,
+            and the square of the distance to it."""
+            idx = np.empty(len(cols), np.intp)
+            dist = np.empty(len(cols))
+            for s in range(0, len(cols), 4096):
+                d = ((cols[s:s + 4096, None, :] - pal[None]) ** 2).sum(-1)
+                idx[s:s + 4096] = d.argmin(axis=1)
+                dist[s:s + 4096] = d.min(axis=1)
+            return idx, dist
+
+        lut = mesh.get_cmap()(np.linspace(0.0, 1.0, 224))[:, :3] * 255.0
+        _, dist = nearest(lut)
+        # A colour more than 6 of 255 from the colour map is not on the map.
+        # The steps of the map are 5 of 255 or less.
+        off = np.nonzero(dist > 36.0)[0]
+        other = cols[off[np.argsort(-count[off], kind="stable")[:32]]]
+        pal = np.concatenate([lut, other])
+        idx, _ = nearest(pal)
+        index = idx[inv].reshape(px.shape[:3]).astype(np.uint8)
+        colours = np.round(pal).astype(np.uint8).ravel().tolist()
+        images = []
+        for a in index:
+            im = Image.fromarray(a)
+            im.putpalette(colours)
+            images.append(im)
         images[0].save(path, save_all=True, append_images=images[1:],
                        duration=FRAME_MS, loop=0)
 
