@@ -223,9 +223,11 @@ The board layout that the solver used:
 
 ![Board layout view](docs/example-4.png)
 
-The E-field on the mid-plane of the substrate, as a picture and as a GIF animation, with one view for each excited port:
+The E-field on the mid-plane of the substrate, with one view for each excited port:
 
 ![E-field picture](docs/example-5.png)
+
+The same E-field as a GIF animation:
 
 ![E-field animation](docs/example-gif.gif)
 
