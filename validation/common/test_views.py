@@ -1,0 +1,598 @@
+"""Make ALL the views of the results window, with no display.
+
+The window shows 18 views or more. Until 2026-08-05, no test made one of
+them. Only the eye found a change to a plot, or nothing found it. A
+reviewer on 2026-08-03 read the field views as a quantity with no scale,
+and the far field as a quantity with a unit. The two readings came from a
+title and a colour bar that the code did not write.
+
+This file builds `gui.ResultsFrame` from the output of a run that is on the
+disk. It makes each entry of its list, and it reads the title and the
+labels back. It uses no display: `wx.App(False)` and the Agg canvas of
+matplotlib are sufficient. `figure.savefig` always gives what the canvas
+holds.
+
+Run it with the python of KiCad 10:
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" test_views.py
+
+It uses `validation/openems/out_coarse`, which `run_headless_openems.py coarse`
+makes.
+"""
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))  # the repository
+sys.path.insert(0, os.path.join(ROOT, "plugins"))
+
+import wx  # noqa: E402
+
+import gui  # noqa: E402
+
+OUT = os.path.join(os.path.dirname(HERE), "openems", "out_coarse")
+
+
+def frame():
+    s2p = os.path.join(OUT, "results.s2p")
+    if not os.path.isfile(s2p):
+        raise SystemExit("run `run_headless_openems.py coarse msl` first: "
+                         "this file needs %s" % s2p)
+    return gui.ResultsFrame(None, s2p)
+
+
+def texts(fig):
+    """Give all the text of a figure, as one lowercase string."""
+    out = []
+    for ax in fig.get_axes():
+        out += [ax.get_title(), ax.get_xlabel(), ax.get_ylabel()]
+        out += [t.get_text() for t in ax.texts]
+    return " | ".join(t for t in out if t).lower()
+
+
+def test_every_view_draws():
+    """Each entry of the list must make a figure with text on it."""
+    f = frame()
+    names = list(f.choice.GetStrings())
+    assert len(names) >= 10, "only %d views: the run wrote too little" % len(names)
+    for i, name in enumerate(names):
+        f.choice.SetSelection(i)
+        f._plot()
+        if name == gui.DECISIONS_VIEW:
+            continue             # text and no plot: the test below
+        t = texts(f.figure)
+        assert t, "the view %r drew no text at all" % name
+    print("every view draws OK (%d views)" % len(names))
+    f.Destroy()
+
+
+def test_the_decisions_are_a_view():
+    """B56: optimizations.log is a view of the window, as text and no plot.
+
+    The runner writes the decisions of the run to optimizations.log. A user
+    must not have to know the file. A run from before that file has no such
+    view.
+    """
+    import shutil
+    import tempfile
+    log = "RFsim: the choices\n\ntimestep: the full Courant step\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        # A folder with results.s2p only: a run from before the file. The
+        # folder of run_headless holds an optimizations.log after each new
+        # run, thus the test makes this case itself.
+        shutil.copy(os.path.join(OUT, "results.s2p"), tmp)
+        f = gui.ResultsFrame(None, os.path.join(tmp, "results.s2p"))
+        assert gui.DECISIONS_VIEW not in f.choice.GetStrings(), \
+            "a run with no optimizations.log must have no such view"
+        f.Destroy()
+        with open(os.path.join(tmp, "optimizations.log"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(log)
+        f = gui.ResultsFrame(None, os.path.join(tmp, "results.s2p"))
+        names = list(f.choice.GetStrings())
+        assert names[-1] == gui.DECISIONS_VIEW, names
+        f.choice.SetSelection(len(names) - 1)
+        f._plot()
+        assert f.text.IsShown() and not f.canvas.IsShown(), \
+            "the view must show the text in the place of the plot"
+        assert f.text.GetValue().replace("\r\n", "\n") == log
+        f.choice.SetSelection(0)
+        f._plot()
+        assert f.canvas.IsShown() and not f.text.IsShown(), \
+            "a plot must come back in the place of the text"
+        f.Destroy()
+    print("the decisions are a view OK (text, and the plot comes back)")
+
+
+def test_the_field_views_say_what_they_show():
+    """The unit, the plane, the frequency, the phase and the maximum.
+
+    The title was "E-Field (f=2.4 GHz)" only. It did not give the plane,
+    and the view had no colour bar. At this time, the numbers are in a
+    block of text at the left, and the colour bar shows only the unit.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings()
+             if n.startswith(("E-Field", "H-Field"))]
+    assert names, "the run wrote no field dump"
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        t = texts(f.figure)
+        # The colour bar is an axes of its own, thus its label is in the
+        # text of the figure.
+        want = "v/m" if name.startswith("E") else "a/m"
+        assert want in t, "%r has no colour bar with a unit: %s" % (name, t)
+        assert "mid-plane" in t and "mm" in t, \
+            "%r does not name the plane: %s" % (name, t)
+        assert "ghz" in t, "%r does not name the frequency: %s" % (name, t)
+        assert "phase:" in t, "%r does not give the phase: %s" % (name, t)
+        assert "maximum:" in t, \
+            "%r does not give the largest value: %s" % (name, t)
+    print("the field views name the unit, the plane and the scale OK")
+    f.Destroy()
+
+
+def test_the_current_views_say_what_they_show():
+    """F4: a view of the current on the layer of the port and on its
+    reference plane, in A/m, on the plane of that copper.
+
+    On the matched microstrip, the current across the line is
+    sqrt(2 * 0.5 W / 50 ohm) = 0.141 A peak on the strip, and back on the
+    plane. The views are for the pattern: the areas of high current and the
+    return path. openEMS gave 0.126 A and 0.122 A, EMerge 0.152 A and
+    0.142 A.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings() if n.startswith("Current on ")]
+    layers = {c["name"] for c in f.model["copper_layers"]}
+    got = {n[len("Current on "):].split(" (")[0] for n in names}
+    port = f.model["ports"][0]
+    assert {port["layer"], port["ref_layer"]} <= got, (names, got)
+    assert got <= layers, (got, layers)
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        t = texts(f.figure)
+        layer = name[len("Current on "):].split(" (")[0]
+        assert "a/m" in t, "%r has no unit: %s" % (name, t)
+        assert ("copper %s" % layer).lower() in t, \
+            "%r does not name its copper: %s" % (name, t)
+        assert "maximum:" in t and "phase:" in t, t
+    print("the current views name the layer, the unit and the plane OK "
+          "(%d views)" % len(names))
+    f.Destroy()
+
+
+def test_the_far_field_views_say_directivity():
+    """The unit is dBi, and each view gives its numbers.
+
+    A reviewer wrote that "the far-field is not a unitless quantity". The
+    views show DIRECTIVITY, which is a ratio, thus dBi is correct. A cut
+    names the quantity in its title and its axis. The 3D balloon gives the
+    frequency, the two efficiencies and the directivity in a block of text.
+    The two views keep the style of CST.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings() if n.startswith("Farfield")]
+    assert names, "the run wrote no far field"
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        t = texts(f.figure)
+        assert "dbi" in t, "%r does not name the unit: %s" % (name, t)
+        if "(phi=" in name.lower() or "(theta=" in name.lower():
+            assert "directivity" in t, \
+                "%r does not name the quantity: %s" % (name, t)
+        else:
+            for want in ("frequency:", "rad. effic.", "tot. effic.", "dir."):
+                assert want in t, \
+                    "%r does not give %r: %s" % (name, want, t)
+    print("the far-field views name dBi and give their numbers OK")
+    f.Destroy()
+
+
+def test_the_far_field_views_give_the_polarization():
+    """A cut shows Abs, Co and Cross of Ludwig 3, each with a check box.
+    Its block gives the reference and the XPD at the main lobe. The 3D
+    balloon gives the XPD of the runner. A far field from before the
+    polarization has Abs only, with its previous title."""
+    import copy
+    f = frame()
+    names = list(f.choice.GetStrings())
+    cut = next(n for n in names if n.startswith("Farfield") and "(Phi=0)" in n)
+    f.choice.SetStringSelection(cut)
+    f._plot()
+    assert list(f.traces.GetStrings()) == ["Abs", "Co", "Cross"], \
+        "run `run_headless_openems.py coarse msl` again: %s" % (
+            list(f.traces.GetStrings()),)
+    t = texts(f.figure)
+    for want in ("farfield directivity (phi=0)", "ludwig 3 ref.",
+                 "xpd (main lobe)"):
+        assert want in t, "%r is not in the cut: %s" % (want, t)
+    ball = next(n for n in names if n.startswith("Farfield")
+                and "(Phi=" not in n and "(Theta=" not in n)
+    f.choice.SetStringSelection(ball)
+    f._plot()
+    t = texts(f.figure)
+    assert "xpd :" in t and "ludwig 3 ref. :" in t, t
+    for k in list(f._ff):
+        old = copy.deepcopy(f._ff[k])
+        old.pop("xpd_dB", None)
+        for c in old["cuts"].values():
+            c.pop("D_co_dBi", None)
+            c.pop("D_cross_dBi", None)
+        f._ff[k] = old
+    f.choice.SetStringSelection(cut)
+    f._plot()
+    t = texts(f.figure)
+    assert "farfield directivity abs (phi=0)" in t and "xpd" not in t, t
+    assert not f.side.IsShown(), "a far field of before shows check boxes"
+    print("the far-field views give the polarization OK (Abs, Co, Cross, "
+          "and the XPD)")
+    f.Destroy()
+
+
+def test_the_states_are_compared():
+    """F30: the views of the sweep of a run of states show all the states,
+    with a check box for each state, and a trace as "S21 (off)". The
+    Phase Difference view compares each trace to the Reference trace. The
+    State choice selects the state of the other views.
+
+    The states are made from `out_coarse`: State 2 is the same run with
+    S21 times 0.9 at -45 degrees. Thus its phase difference is -45.00
+    degrees and its magnitude -0.92 dB, at each frequency.
+    """
+    import shutil
+    import tempfile
+    import numpy as np
+    import skrf
+    sys.path.insert(0, os.path.join(ROOT, "plugins"))
+    import solverenv
+    root = tempfile.mkdtemp()
+    net = skrf.Network(os.path.join(OUT, "results.s2p"))
+    for k, factor in ((1, 1.0), (2, 0.9 * np.exp(-1j * np.pi / 4))):
+        d = os.path.join(root, solverenv.STATE_DIR % k)
+        os.makedirs(d)
+        shutil.copy(os.path.join(OUT, "model.json"), d)
+        S = net.s.copy()
+        S[:, 1, 0] *= factor
+        solverenv.write_touchstone(os.path.join(d, "results.s2p"), net.f, S,
+                                   50.0)
+    with open(os.path.join(root, solverenv.STATES_FILE), "w") as fh:
+        json.dump({"states": [{"name": "State 1", "dir": "state_1"},
+                              {"name": "off", "dir": "state_2"}]}, fh)
+    f = gui.ResultsFrame(None, os.path.join(root, "state_1", "results.s2p"))
+    names = list(f.choice.GetStrings())
+    assert gui.PHASE_DIFF_VIEW in names, names
+    assert not any(n.startswith("States") for n in names), names
+    assert f.state_choice.GetStrings() == ["State 1", "off"]
+    assert f.ref_choice.GetStringSelection() == "S21 (State 1)"
+
+    def lines():
+        return [ln.get_label() for ln in f.figure.get_axes()[0].get_lines()
+                if not ln.get_label().startswith("_")]
+
+    f.choice.SetStringSelection(gui.PHASE_DIFF_VIEW)
+    f._plot()
+    assert f.ref_choice.IsShown() and not f.state_choice.IsShown()
+    assert "S21" in f.traces.GetStrings(), list(f.traces.GetStrings())
+    assert list(f.state_box.GetStrings()) == ["State 1", "off"]
+    assert "S21 (State 1)" in lines() and "S21 (off)" in lines(), lines()
+    y = {ln.get_label(): ln.get_ydata()
+         for ln in f.figure.get_axes()[0].get_lines()}
+    assert np.allclose(y["S21 (State 1)"], 0.0), y["S21 (State 1)"]
+    assert np.allclose(y["S21 (off)"], -45.0), y["S21 (off)"]
+    assert len(f.figure.get_axes()) == 1, "Phase Difference has a block"
+    # Only S21 of the two states: the magnitude of off is 0.9 times.
+    f._hidden = {n for n in f.traces.GetStrings() if n != "S21"}
+    f.choice.SetStringSelection("S-Parameters [Magnitude]")
+    f._plot()
+    assert lines() == ["S21 (State 1)", "S21 (off)"], lines()
+    on, off = [ln.get_ydata() for ln in f.figure.get_axes()[0].get_lines()]
+    # 20 log10(0.9) = -0.915 dB at each frequency. The view has no block of
+    # values: the owner removed it from Magnitude and Phase.
+    assert np.allclose(off - on, 20 * np.log10(0.9)), off - on
+    assert len(f.figure.get_axes()) == 1, "Magnitude has a block of values"
+    f._hidden_states = {"off"}
+    f._plot()
+    assert lines() == ["S21 (State 1)"], lines()
+    # The other views follow the State choice, and the view stays.
+    f.choice.SetStringSelection("Board Layout")
+    f._plot()
+    assert f.state_choice.IsShown() and not f.state_box.IsShown()
+    f.state_choice.SetSelection(1)
+    f._on_state(None)
+    assert f.choice.GetStringSelection() == "Board Layout"
+    assert f.outdir.endswith("state_2"), f.outdir
+    f.Destroy()
+    # One run of its own has no states and no State choice. The reference
+    # of the phase difference has no check box.
+    f = frame()
+    assert f.state_choice is None
+    f.choice.SetStringSelection(gui.PHASE_DIFF_VIEW)
+    f._plot()
+    assert f.ref_choice.GetStringSelection() == "S21"
+    assert "S21" not in f.traces.GetStrings() and not f.state_box.IsShown()
+    assert "S21" in lines(), lines()
+    f.Destroy()
+    print("the states are compared OK (S21 (off): -45.00 deg, -0.92 dB, "
+          "the check boxes of the states, and the State choice)")
+
+
+def test_the_ports_are_on_the_field_views():
+    """The field views are the pictures that go out of the tool.
+
+    One time, a review gave an incorrect position for a lumped port: the
+    edge of the substrate on B.Cu. No picture showed the position of a port.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings()
+             if n.startswith(("E-Field", "H-Field"))]
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        # The figure holds the picture, the block of text at the left
+        # and the colour bar. The picture is the one with the axis of x.
+        ax = next(a for a in f.figure.get_axes()
+                  if a.get_xlabel() == "x (mm)")
+        marks = [t for t in ax.texts if t.get_text().startswith("P")]
+        assert len(marks) == len(f.model["ports"]), \
+            "%r marks %d ports, and the model holds %d" \
+            % (name, len(marks), len(f.model["ports"]))
+    print("the ports are drawn on the field views OK (%d ports)"
+          % len(f.model["ports"]))
+    f.Destroy()
+
+
+def test_the_field_views_frame_the_dump():
+    """The frame of a field view is the area of its dump.
+
+    In a subregion (F20), the copper goes into the absorber, out of the
+    dump. Its outline moved the limits of the axes out, and the view showed a
+    white area
+    with no field. The Board layout view shows the face of the absorber,
+    thus a user sees where the copper stops.
+    """
+    f = frame()
+    names = [n for n in f.choice.GetStrings()
+             if n.startswith(("E-Field", "H-Field", "Current on"))]
+    assert names, "the run wrote no field dump"
+    for name in names:
+        f.choice.SetSelection(f.choice.GetStrings().index(name))
+        f._plot()
+        ax = next(a for a in f.figure.get_axes()
+                  if a.get_xlabel() == "x (mm)")
+        x, y = ax.collections[0].get_coordinates()[..., 0], \
+            ax.collections[0].get_coordinates()[..., 1]
+        assert abs(ax.get_xlim()[0] - x.min()) < 1e-6 \
+            and abs(ax.get_xlim()[1] - x.max()) < 1e-6 \
+            and abs(ax.get_ylim()[0] - y.min()) < 1e-6 \
+            and abs(ax.get_ylim()[1] - y.max()) < 1e-6, \
+            "%r: the frame %s %s is not the dump" \
+            % (name, ax.get_xlim(), ax.get_ylim())
+    f.choice.SetSelection(f.choice.GetStrings().index("Board Layout"))
+    f._plot()
+    labels = [t.get_text() for a in f.figure.get_axes()
+              if a.get_legend() for t in a.get_legend().get_texts()]
+    assert "Absorber" in labels, labels
+    print("the field views frame the dump, and the layout shows the "
+          "absorber OK (%d views)" % len(names))
+    f.Destroy()
+
+
+def test_the_field_views_have_the_scale_of_cst():
+    """The field of a matched line agrees with 0.5 W of incident power.
+
+    CST excites a port with a wave of 1 sqrt(W) peak, which is 0.5 W, and
+    the field views use the same reference. Into 50 ohm, that is a voltage
+    of sqrt(2 * 50 * 0.5) = 7.07 V peak. |Ez| * h below the strip gives
+    that voltage. The run of 2026-09-15 gave 7.04 V. An error of 2 or of
+    sqrt(2) in the scale moves the voltage by 41% or more.
+    """
+    import json
+    import numpy as np
+    with open(os.path.join(OUT, "model.json")) as fh:
+        model = json.load(fh)
+    z_of = {c["name"]: c["z"] for c in model["copper_layers"]}
+    p1, p2 = model["ports"][:2]
+    h = abs(z_of[p1["layer"]] - z_of[p1["ref_layer"]]) * 1e-3
+    x, y, E, _ = gui._load_field(os.path.join(OUT, "exc1", "Ef.h5"))
+    # The centre line of the strip, from 20% to 80% of the distance
+    # between the ports. The mean removes most of the ripple that the
+    # small mismatch makes.
+    ts = np.linspace(0.2, 0.8, 121)
+    ix = [int(np.argmin(np.abs(x - (p1["x"] + t * (p2["x"] - p1["x"])))))
+          for t in ts]
+    iy = [int(np.argmin(np.abs(y - (p1["y"] + t * (p2["y"] - p1["y"])))))
+          for t in ts]
+    v = float(np.mean([abs(E[j, i, 2]) for i, j in zip(ix, iy)])) * h
+    z0 = model["settings"]["z0"]
+    want = float(np.sqrt(2.0 * z0 * 0.5))
+    assert abs(v / want - 1.0) < 0.1, \
+        "the line carries %.2f V, and 0.5 W into %g ohm gives %.2f V" \
+        % (v, z0, want)
+    print("the field views have the scale of CST OK (%.2f V, and %.2f V "
+          "from 0.5 W)" % (v, want))
+
+
+def test_a_field_view_exports_a_gif():
+    """F21: the E, H and current views have an "Export GIF" button, and the
+    other views do not. The GIF holds each frame of the animation, at the
+    dimensions of the canvas, and each frame shows its own phase.
+
+    Frame 0 must be the picture of the canvas. The first GIF was 1 pixel
+    narrower than its buffer, thus each row moved 1 pixel and the picture
+    was not straight. It passed a test of the dimensions with 2 pixels
+    of tolerance.
+    """
+    import tempfile
+    import numpy as np
+    from PIL import Image
+    f = frame()
+    names = list(f.choice.GetStrings())
+    anim = [n for n in names
+            if n.startswith(("E-Field", "H-Field", "Current on "))]
+    assert anim, "the run wrote no field dump"
+    for name in names:
+        f.choice.SetStringSelection(name)
+        f._plot()
+        assert f.gif_button.IsShown() == (name in anim), \
+            "%r shows the button: %s" % (name, f.gif_button.IsShown())
+    w, h = f.canvas.get_width_height()
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in (next(n for n in anim if n.startswith("E-Field")),
+                     next(n for n in anim if n.startswith("Current on "))):
+            f.choice.SetStringSelection(name)
+            f._plot()
+            path = os.path.join(tmp, "view.gif")
+            f.save_gif(path)
+            step, _ = f._frame_step
+            step(0)
+            f.canvas.draw()
+            want = np.asarray(f.canvas.buffer_rgba())[..., :3].astype(float)
+            with Image.open(path) as im:
+                assert im.n_frames == 24, "%r: %d frames" % (name, im.n_frames)
+                assert im.size == (w, h), (name, im.size, (w, h))
+                assert im.info["duration"] == gui.FRAME_MS, im.info
+                im.seek(0)
+                first = im.convert("RGB").tobytes()
+                got = np.asarray(im.convert("RGB")).astype(float)
+                err = float(np.mean(np.abs(got - want)))
+                assert err < 3.0, \
+                    "%r: frame 0 is not the canvas (mean error %.1f of 255)" \
+                    % (name, err)
+                # The red end of the colour bar had steps of 15 of 255: the
+                # palette came from the pixels, and few pixels are red.
+                bar = f.figure.axes[-1].get_window_extent()
+                rows = slice(h - int(bar.y1) + 2, h - int(bar.y0) - 2)
+                cols = slice(int(bar.x0) + 5, int(bar.x1) - 5)
+                step_err = float(np.abs(got - want)[rows, cols].max())
+                assert step_err < 6.0, \
+                    "%r: the colour bar has steps of %.0f of 255" \
+                    % (name, step_err)
+                # Each port box and label is lime, and the same, in all the
+                # frames. When `antialiased` was True, an edge mixed the lime
+                # with the field. The palette had no colour for the mixed
+                # colours. The box had no lime pixel, and its grey colours
+                # changed with the field.
+                ax = f.figure.axes[1]
+                for p in f.model["ports"]:
+                    cx, cy = ax.transData.transform((p["x"], p["y"]))
+                    win = (slice(int(h - cy) - 20, int(h - cy) + 21),
+                           slice(int(cx) - 20, int(cx) + 21))
+                    masks = []
+                    for k in range(im.n_frames):
+                        im.seek(k)
+                        masks.append((np.asarray(im.convert("RGB"))[win]
+                                      == (0, 255, 0)).all(axis=-1))
+                    assert masks[0].sum() > 50, \
+                        "%r: P%d has %d lime pixels" \
+                        % (name, p["number"], masks[0].sum())
+                    moved = max(int((m != masks[0]).sum()) for m in masks)
+                    assert moved == 0, \
+                        "%r: %d lime pixels of P%d change between frames" \
+                        % (name, moved, p["number"])
+                im.seek(6)
+                assert im.convert("RGB").tobytes() != first, \
+                    "%r: the frames are all the same" % name
+    print("a field view exports a GIF OK (%d views with the button, "
+          "24 frames of %dx%d)" % (len(anim), w, h))
+    f.Destroy()
+
+
+def test_the_list_of_traces_fits_its_rows():
+    """The list of the check boxes has the height of its rows. wx gives a
+    list box on Windows the height of 3 rows or more, thus a list of one
+    trace had two empty rows."""
+    f = frame()
+    f.SetSize((820, 620))
+    rows = {}
+    for name in f.choice.GetStrings():
+        f.choice.SetStringSelection(name)
+        f._plot()
+        if not f.side.IsShown():
+            continue
+        f.SendSizeEvent()
+        f.canvas.draw()
+        n = f.traces.GetCount()
+        border = f.traces.GetWindowBorderSize().height
+        got = f.traces.GetSize().height
+        assert got == f.traces.GetMinSize().height, (name, got)
+        rows.setdefault(n, (got - border) / n)
+    assert len(rows) >= 2, "the run gives one count of traces only: %s" % rows
+    assert len(set(rows.values())) == 1, \
+        "the height of a row changes with the count: %s" % rows
+    print("the list of traces fits its rows OK (%s rows, %g pixels each)"
+          % (", ".join(str(n) for n in sorted(rows)), list(rows.values())[0]))
+    f.Destroy()
+
+
+def test_a_trace_can_be_hidden():
+    """A check box for each trace: a box with no mark removes the trace from the
+    graph and from its legend. The other traces keep their colours, and the
+    choice holds in the next view. A field view has no check boxes."""
+    f = frame()
+
+    def show(name):
+        f.choice.SetStringSelection(name)
+        f._plot()
+        ax = f.figure.get_axes()[0]
+        lines = {ln.get_label(): ln.get_color() for ln in ax.get_lines()
+                 if not ln.get_label().startswith("_")}
+        leg = ax.get_legend()
+        return lines, [t.get_text() for t in leg.get_texts()] if leg else []
+
+    def click(i, on):
+        f.traces.Check(i, on)
+        ev = wx.CommandEvent(wx.wxEVT_CHECKLISTBOX, f.traces.GetId())
+        ev.SetInt(i)
+        f.traces.GetEventHandler().ProcessEvent(ev)
+
+    before, _ = show("S-Parameters [Magnitude]")
+    names = list(f.traces.GetStrings())
+    assert f.side.IsShown() and names == list(before), names
+    assert "S11" in names and "S21" in names, names
+    click(names.index("S11"), False)
+    lines, leg = show("S-Parameters [Magnitude]")
+    assert "S11" not in lines and "S11" not in leg, (lines, leg)
+    assert lines["S21"] == before["S21"], "S21 changed its colour"
+    assert not f.traces.IsChecked(names.index("S11"))
+    lines, _ = show("S-Parameters [Phase]")
+    assert "S11" not in lines and "S21" in lines, lines
+    lines, _ = show("Smith Chart")
+    assert "S11" not in lines, lines
+    show("S-Parameters [Magnitude]")
+    for i in range(len(names)):  # each trace hidden: no legend, no error
+        click(i, False)
+    lines, leg = show("S-Parameters [Magnitude]")
+    assert not lines and not leg, (lines, leg)
+    show("Smith Chart")
+    click(names.index("S11"), True)
+    lines, _ = show("S-Parameters [Magnitude]")
+    assert list(lines) == ["S11"], lines
+    f.choice.SetSelection(next(i for i, n in enumerate(f.choice.GetStrings())
+                               if n.startswith("E-Field")))
+    f._plot()
+    assert not f.side.IsShown(), "a field view shows the check boxes"
+    print("a trace can be hidden OK (%s)" % ", ".join(names))
+    f.Destroy()
+
+
+if __name__ == "__main__":
+    app = wx.App(False)
+    test_every_view_draws()
+    test_a_trace_can_be_hidden()
+    test_the_decisions_are_a_view()
+    test_the_field_views_say_what_they_show()
+    test_the_current_views_say_what_they_show()
+    test_the_far_field_views_say_directivity()
+    test_the_far_field_views_give_the_polarization()
+    test_the_states_are_compared()
+    test_the_ports_are_on_the_field_views()
+    test_the_field_views_frame_the_dump()
+    test_the_field_views_have_the_scale_of_cst()
+    test_a_field_view_exports_a_gif()
+    test_the_list_of_traces_fits_its_rows()
+    print("PASS")

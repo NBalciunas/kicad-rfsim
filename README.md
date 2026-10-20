@@ -2,19 +2,21 @@
 
 # RFsim
 
-Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver.
-The geometry goes from the native board objects of KiCad to the primitives of CSXCAD.
+Simulate the S-parameters of an RF structure directly in the PCB editor of KiCad 10.0, with the [openEMS](https://openems.de) FDTD solver or the [EMerge](https://www.emerge-software.com) FEM solver.
+The geometry goes from the native board objects of KiCad to the model of the solver.
 
 ## Features
 
+- Use one of two solvers: openEMS (FDTD) or EMerge (FEM).
 - Simulate the S-parameters of any number of ports, and write a Touchstone (`.sNp`) file.
-- Plot the magnitude, the phase, a Smith chart, the VSWR and the group delay.
-- Animate the E-field and the H-field on the mid-plane of the substrate.
-- Calculate the far field with NF2FF: three polar cuts, a 3D pattern, Dmax and the efficiency.
+- Plot the magnitude, the phase, the phase difference to a reference trace, a Smith chart, the VSWR and the group delay.
+- Animate the E-field and the H-field on the mid-plane of the substrate, and the current on the copper of each port and its ground plane.
+- Calculate the far field: three polar cuts, a 3D pattern, Dmax, the efficiency, and the co-polarization, the cross-polarization (Ludwig 3) and the XPD.
 - Measure the impedance of a line and its effective permittivity from a de-embedded port.
 - Model the R, L and C parts as lumped elements with the parasitics of the package, an inductor with its self-resonance, and any 2-terminal part as a series RLC.
-- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port.
-- Extract the geometry from the board: the pads, tracks, arcs, vias, zones and shapes.
+- Simulate more than one set of part values (for example the states of a phase shifter), one run each, and compare the magnitude and the phase of S21 of the states.
+- Feed each port as a lumped, microstrip (MSL), coplanar (CPW) or stripline port, or feed a through-hole pad from a coaxial connector.
+- Extract the geometry from the board: the pads, tracks, arcs, vias, zones, shapes and text on copper.
 - Draw the board layout that the solver uses.
 - Set the substrate, the mesh preset and the CPU threads in the dialog.
 
@@ -31,11 +33,9 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
 
    > If KiCad is installed for one user only, its Python is in `%LOCALAPPDATA%\Programs\KiCad\10.0\bin`.
 
-5) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases). Extract the `openEMS` folder to `C:\openEMS`.
+5) Install at least one solver: openEMS (step 6), EMerge (step 7) or both. The dialog grays out any solver that is not installed.
 
-   > For a different folder, set the `OPENEMS_PATH` environment variable.
-
-6) Install [Python 3.14](https://www.python.org/downloads/), then make the venv of the solver:
+6) (optional) Install openEMS. Download the newest `openEMS_x64_v*_msvc.zip` from the [openEMS releases](https://github.com/thliebig/openEMS-Project/releases) and extract the `openEMS` folder to `C:\openEMS`. Install [Python 3.14](https://www.python.org/downloads/), then make the venv of openEMS:
 
    ```bat
    py -3.14 -m venv C:\openEMS\venv
@@ -43,25 +43,46 @@ The geometry goes from the native board objects of KiCad to the primitives of CS
    C:\openEMS\venv\Scripts\python.exe -c "import os; os.add_dll_directory('C:/openEMS'); import CSXCAD, openEMS; print('ok')"
    ```
 
-   > The last command must print `ok`. A warning about the version of HDF5 is not a problem.
+   > The last command must print `ok`. A warning about the version of HDF5 is not a problem. For a different folder, set `OPENEMS_PATH`.
 
-7) Restart KiCad. The plugin is now installed.
+7) (optional) Install EMerge. See the [EMerge releases](https://github.com/FennisRobert/EMerge/releases) for the newest version. Make its venv with the Python of KiCad:
+
+   ```bat
+   "C:\Program Files\KiCad\10.0\bin\python.exe" -m venv C:\emerge\venv
+   C:\emerge\venv\Scripts\python.exe -m pip install emerge==2.8.9 h5py
+   ```
+
+   > The first EMerge run compiles its code for some minutes. For a different folder, set `EMERGE_PATH`.
+
+8) Restart KiCad. The plugin is now installed.
+
+### Tested versions
+
+| Software | Version                        |
+|----------|--------------------------------|
+| KiCad    | 10.0.5                         |
+| openEMS  | v0.37.0-rc1, CSXCAD v0.7.0-rc1 |
+| EMerge   | 2.8.9                          |
 
 ## Usage
 
 ![RFsim GUI](docs/example-1.png)
 
 1. Click a pad in the PCB editor. It becomes port 1. Hold the shift key and click more pads for more ports.
-2. Click the **RFsim** icon in the toolbar.
+2. Click the **RFsim** icon in the toolbar, or open Tools > External Plugins and click RFsim.
 3. Look at the preview at the top of the dialog: the ports, the R/L/C parts and the domain.
-4. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin, the run limits and the output directory.
-5. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
+4. Select the solver.
+5. Set the sweep range, "Define at" (the frequency of the field views and the far field), the ports, the substrate, the mesh preset, the domain margin (or only the area around the ports, for a large board), the run limits and the output directory.
+6. Click Run Simulation. The results open in a plot window, and `results.sNp`, `model.json`, `lines.json` and `farfield_pN.json` go into the output directory.
 
 ### Ports
 
-**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.** Its box covers the whole pad and the whole substrate.
+**A port is at a pad that you select, and it drives that pad against the adjacent copper layer.**
+Its box covers the whole pad and the whole substrate.
 
-Each port needs copper on the reference layer below the pad, or the plugin does not run. A CPW port is the exception: its return path is the copper at the sides of the line.
+Each port needs copper at the pad on the reference layer, the adjacent layer below or, for an inner layer, above.
+Without it, the plugin does not run.
+A CPW port is the exception: its return path is the copper at the sides of the line.
 
 The dialog gives only the types that the geometry permits:
 
@@ -71,23 +92,31 @@ The dialog gives only the types that the geometry permits:
 | Microstrip (MSL) Port | Feed line on the x or y axis                             |
 | Coplanar (CPW) Port   | Feed line on the x or y axis; Copper on both sides of it |
 | Stripline Port        | Feed line on the x or y axis; Plane above and below it   |
+| Coaxial Feed Port     | Through-hole pad; Copper around it on F.Cu or B.Cu       |
+
+**A through-hole pad gets a coaxial feed and no lumped port.**
+The port goes across the gap between the pad and the surrounding copper, on the side of the connector, and the barrel of the hole takes the signal through the board.
+The type list gives one entry for each side with a gap of 3 mm or less, and the side of the footprint comes first.
+A pad with no such gap and no track stops the run.
 
 > Each excited port costs one full FDTD run. When a port gives out more power than it takes in, the plugin gives a warning: run again at the medium or the fine preset.
 
 ### The impedance of a line
 
-The microstrip, the coplanar and the stripline ports measure their own line. The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds it with the effective permittivity. A lumped port has no line.
-
-The coarse preset reads a little low: the microstrip of `validation/` gives 47.7 ohm at coarse, 47.8 ohm at medium and 48.6 ohm at fine, against 49.8 ohm from the theory.
+The microstrip, the coplanar and the stripline ports measure their own line.
+The "Line Impedance" view shows Z0 against the frequency, and `lines.json` holds it with the effective permittivity.
+A lumped port has no line.
 
 ### The substrate and the domain
 
 "KiCad's Stackup" takes εr, tanδ and the thickness of each layer from Board Setup > Physical Stackup.
-The dialog starts there when the board has a stackup, and the four fields are then read-only. A field with more than one value joins them with " / ".
+The dialog starts there when the board has a stackup, and the four fields are then read-only.
+A field with more than one value joins them with " / ".
 
 > When the stackup has changes that you did not save, RFsim asks which values to use.
 
-The other presets make a uniform stackup. They fill εr and tanδ, and "Custom" leaves the two fields to you:
+The other presets make a uniform stackup.
+They fill εr and tanδ, and "Custom" leaves the two fields to you:
 
 | Preset                      | εr   | tanδ   |
 |-----------------------------|------|--------|
@@ -101,10 +130,10 @@ The other presets make a uniform stackup. They fill εr and tanδ, and "Custom" 
 Rogers gives two εr for each grade: a stripline value and a larger design value for a microstrip.
 
 **The loss of the substrate is correct at one frequency only**, the center of the sweep.
-Over a sweep of 1 to 6 GHz, the model gave 3.1 times the real loss at 1 GHz and 0.66 times at 5.5 GHz.
-When the loss is important, put the center of the sweep at the frequency that matters, or keep the sweep narrow.
+Put the center of the sweep at the frequency that matters, or keep the sweep narrow.
 
-The domain is the board, the margin of air around it, and an absorber 8 cells deep. Copper that crosses the outer edge ends in the absorber and does not reflect.
+The domain is the board, the margin of air around it, and an absorber 8 cells deep.
+Copper that crosses the outer edge ends in the absorber and does not reflect.
 
 ### Accuracy
 
@@ -117,16 +146,23 @@ The mesh preset sets the cells for each wavelength, at the shortest wavelength o
 | Fine      | 40                   | 0.59 mm                      |
 | Ultrafine | 80                   | 0.29 mm                      |
 
-The preset sets only this step. The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
+The preset sets only this step.
+The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
 
-The coarse preset is for a first look, and a small lumped element reads too large there. Use medium or fine when a number is important. For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+The coarse preset is for a first look, and a small lumped element reads too large there.
+Use medium or fine when a number is important.
+For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
 
 ### Lumped elements
 
 Each footprint with 2 numbered SMD pads on one copper layer gives a row in the "Lumped Elements" part of the dialog.
-**The first letter of the reference gives the type**: R, L or C. Each other 2-terminal part, for example a diode, starts at "Unknown" with "Model" off. It changes nothing until you select a type and give a value.
+**The first letter of the reference gives the type**: R, L or C.
+Each other 2-terminal part, for example a diode, starts at "Unknown" with "Model" off.
+It changes nothing until you select a type and give a value.
 
-**The Value field of the footprint gives the value.** The same letters serve the three types, and the type gives the unit. The case is important: `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
+**The Value field of the footprint gives the value.**
+The same letters serve the three types, and the type gives the unit.
+The case is important: `4m7` is 4.7 mohm and `4M7` is 4.7 Mohm.
 
 | Letter      | Prefix | Text              | Resistor | Capacitor | Inductor |
 |-------------|--------|-------------------|----------|-----------|----------|
@@ -142,22 +178,36 @@ Each footprint with 2 numbered SMD pads on one copper layer gives a row in the "
 
 **Each type has its own mark for the unit**, in upper or lower case: `4F7` on a resistor and `4R7` on an inductor give no value. Give such a value in the dialog.
 
-The letter can also come after the number (`4.7k`, `22p`). The unit letter is optional (`10uH` reads as `10u`), and the unit can be a word (`10 kOhm`, `4.7 uF`). A word after a space, such as `10%` or `25V`, has no effect, and "DNP" gives no value. The dialog shows the value that the plugin read.
+The letter can also come after the number (`4.7k`, `22p`).
+The unit letter is optional (`10uH` reads as `10u`).
+A word after a space, such as `10%` or `25V`, has no effect.
+
+**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
+Its row holds R in ohm, L in nH and C in pF, in series. 0 leaves that component out.
+
+**"Edit States..." gives the parts more than one set of values**, for example the states of a phase shifter: a varactor at each bias, or PIN diodes that are on or off.
+The grid has a column for each state and a row for each part with "Model" on.
+State 1 is the part values that you set in the settings dialog, and its column in the grid is read-only.
+A cell holds the value in the unit of its row, or `R / L / C` for a Series RLC (`2 / 0.5 / 0` is a PIN diode that is on, `0 / 0.5 / 0.15` one that is off).
+An empty cell keeps the value of State 1. Each state is one run, in the folder `state_N` of the output directory.
+The plots show each state as a trace, for example "S21 (State 2)", and "Phase Difference" gives the shift of each state from a reference trace.
+
+#### Parasitics and run time
 
 **Each row also holds the parasitics of the body** that its type uses: a resistor has an ESL, a capacitor has an ESR and an ESL, and an inductor has an ESR (its DCR).
 The plugin reads the package from the name of the footprint (`R_0402_1005Metric` gives `0402`), from 8 codes between 0201 and 2512.
 Any other name gives "Custom", and "No parasitics" makes an ideal element.
-The run leaves out a body that changes |Z| of its part by 2% or less over the sweep, for example the ESL of a 1 kohm pull-up. The Optimizations view of the results names these parts.
+The run leaves out a body that changes |Z| of its part by 2% or less over the sweep.
 
-**An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet. The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
-The resonance reads about 1% high on a wide land and about 9% high on an 0402 land. A land of one mesh cell cannot hold the capacitance, and the run says so.
+**An inductor row also holds its SRF**, the self-resonant frequency in GHz from its datasheet.
+The plugin then adds the capacitance of the winding in parallel, and the run shows the resonance. 0 gives no self-resonance.
 
-**An inductance makes the run longer.** 0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times. The ESL of a body counts as well.
+**An inductance makes the run longer.**
+0.25 nH or less costs nothing, 1 nH makes the run about 2 times longer, and 10 nH about 6 times.
+The ESL of a body counts as well.
 The label under the rows of the parts gives the number before you start the run.
-A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit. The run leaves it out at no cost, and the label names it.
-
-**"Series RLC" is the type for a part that no single R, L or C describes**, for example a PIN diode that is off.
-Its row holds R in ohm, L in nH and C in pF, in series, with no parasitics. 0 leaves that component out.
+A part with an impedance of 200 times the port impedance or more over all the sweep is an open circuit.
+The run leaves it out and the label names it.
 
 ## Examples
 
@@ -175,7 +225,11 @@ The board layout that the solver used:
 
 The E-field on the mid-plane of the substrate, with one view for each excited port:
 
-![E-field animation](docs/example-5.png)
+![E-field picture](docs/example-5.png)
+
+The same E-field as a GIF animation:
+
+![E-field animation](docs/example-gif.gif)
 
 The 3D radiation pattern, which you can rotate:
 
@@ -183,55 +237,9 @@ The 3D radiation pattern, which you can rotate:
 
 ## Validation
 
-The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory. Run the files with the Python of KiCad, and the files marked "solver Python" with `C:\openEMS\venv\Scripts\python.exe`:
-
-```bat
-set KIPY="C:\Program Files\KiCad\10.0\bin\python.exe"
-%KIPY% validation\run_rlc.py coarse
-```
-
-* **`run_rlc.py [mesh] [R1|L1|C1]`**  
-R, L and C in series between two lines. |S21| must stay flat for R, fall for L and rise for C.
-* **`run_lumped.py [mesh]`**  
-A series resistor of 50 Ω in a 50 Ω line. It must give S11 ≈ −9.5 dB and S21 ≈ −3.5 dB.
-* **`run_shunt.py [mesh] [packages|two]`**  
-A capacitor in shunt to ground. The notch in |S21| gives the inductance of its body. `packages` tests the 8 chip packages on their KiCad lands, and `two` puts two parts in series.
-* **`run_cpw.py [mesh] [cpw|stripline]`**  
-The CPW port and the stripline port against theory, for Z0 and eps_eff. The eps_eff of a stripline must be εr.
-* **`run_atten.py [mesh]`** (solver Python)  
-The loss of a line, from two lines of 20 mm and 100 mm. It must agree with the closed form within 15%.
-* **`run_zone_holes.py [mesh]`**  
-A zone with a void below the line, against the same board with no void. The void must make a large step in S11.
-* **`run_feature.py [mesh] [stub width in mm]`** (solver Python)  
-An open stub that no port covers, against theory. Its notch in |S21| gives eps_eff, which tests the mesh cells across a narrow feature.
-* **`run_via.py [mesh]`** (solver Python)  
-The inductance of one via against Goldfarb and Pucel, for four drill sizes. Each is within 20% at the medium preset. At coarse, a drill of 0.3 mm reads −16%: use a finer preset for such a via.
-* **`run_epc.py [mesh]`**  
-The self-resonance of an inductor on an 0402 land, against 1/(2π√(LC)). The notch in |S21| must be at that frequency.
-* **`run_stability.py [fast|slow|all]`**  
-The timestep rule for a lumped inductor. `fast` measures the margin to divergence on 8 geometries, in about 40 minutes. `slow` shows that a normal run ends before a mode that grows late.
-* **`test_ports.py`** (solver Python)  
-The boxes of the ports and the mesh lines, with no solver run. It takes seconds.
-* **`mesh_diff.py [revision]`** (solver Python)  
-Lists each board whose mesh changes against a git revision (HEAD by default). Use it to see which results a change can move before you run the solver.
-* **`via_nodes.py [-v] [revision]`** (solver Python)  
-Counts the mesh nodes in the barrel of each via. A via with no node conducts nothing. It takes a revision in the same way as `mesh_diff.py`.
-* **`run_headless.py [mesh] [msl|lumped]`**  
-The full path from the board to the Touchstone file. A microstrip of about 50 Ω must give S11 < −10 dB and S21 > −0.5 dB from 1 GHz to 6 GHz.
-* **`diag_lumped.py board.kicad_pcb`**  
-Shows why the plugin does not simulate an R/L/C part, test by test.
-* **`test_dialog.py`**  
-The settings dialog with no display: the rows of the parts and the settings that it gives back.
-* **`test_views.py`**  
-Each view of the results window, with no display. It needs `validation/out_coarse` from `run_headless.py coarse`.
-* **`test_touchstone.py`**  
-The Touchstone writer. skrf must read back the same S-matrix, for 1 to 5 ports.
-* **`test_growth.py`**  
-The guard that refuses a run whose field grew. Three good traces must pass, and one that grows must be refused.
-* **`make_test_board.py`**  
-Makes the boards of `run_headless.py` and `run_cpw.py`.
-
-`%KIPY% plugins\board_reader.py` is the self-test of the value parser (67 cases).
+The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory.
+[validation/README.md](validation/README.md) lists the tests and tells how to run them.
+All the tests pass on the current version with openEMS and with EMerge, and [the results](validation/README.md#results) give the numbers.
 
 ## License
 

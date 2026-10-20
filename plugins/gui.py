@@ -25,8 +25,13 @@ except ImportError:  # a top-level module
     import solverenv
 
 PORT_TYPES = [("Lumped Port", "lumped"), ("Microstrip (MSL) Port", "msl"),
-              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline")]
+              ("Coplanar (CPW) Port", "cpw"), ("Stripline Port", "stripline"),
+              ("Coaxial Feed Port", "coax")]
 MESH_LEVELS = ["coarse", "medium", "fine", "ultrafine"]
+# The solvers, in the sequence of the buttons. `solverenv.SOLVER_INFO` holds
+# them, and `SOLVERS` holds the keys that model.json gets.
+SOLVERS = solverenv.SOLVERS
+SOLVER_NAMES = {k: v["name"] for k, v in solverenv.SOLVER_INFO.items()}
 # The rows of the R/L/C parts that the dialog shows without a scroll. Each
 # row is about 29 px tall. With one part, the dialog is 1053 px tall on a
 # screen of 1920x1080.
@@ -42,12 +47,13 @@ MAX_PART_ROWS = 6
 # hours, thus a user can let a choke run during the night. The value of
 # 90000 nH that started this rule causes 180 million steps. That is about
 # 135 hours on the SMALL board of the rigs, and more on the board of a
-# user. A user who wants such a run gives a "Timestep" of their own,
+# user. For such a run, a user gives a "Timestep" of their own,
 # which this rule reads.
 MAX_DERIVED_STEPS = 50e6
 CUSTOM_PKG = "Custom"       # the user gives the ESL and the ESR
 NO_PARASITICS = "No parasitics"   # an ideal element: no ESL and no ESR
 DECISIONS_VIEW = "Optimizations"  # the view of optimizations.log: text, no plot
+FRAME_MS = 60   # the time of one frame of a field animation, also in a GIF
 # "Series RLC" is a type of its own, for a part that no single R, L or C
 # can model. A PIN diode that is off is C_T in series with L_s and R_s. Its
 # row has three fields and not one value, and it has no parasitics: its R
@@ -75,7 +81,7 @@ RLC_FIELDS = (("R", "r"), ("L", "l"), ("C", "c"))
 # frequency: C = 1 / ((2 pi f)^2 L). An empty field keeps the part as it
 # was. Thus this field changes no board that does not fill it in.
 SRF_LABEL, SRF_UNIT = "SRF:", "GHz"
-# The parasitic fields that each type USES. `runner._parasitic_components`
+# The parasitic fields that each type USES. `solverenv.parasitic_components`
 # gives the ESL only to an R and a C, and the ESR only to a C and an L. An
 # inductor IS an inductance, and a resistor IS a resistance, thus the
 # runner does not read those fields. The SRF gives the EPC of an inductor
@@ -140,6 +146,53 @@ def _entry_text(kind, value_si):
     return "%g" % (value_si / ENTRY_SCALE[kind])
 
 
+# The rule of a cell of the states grid (F30), for the message that refuses
+# it. A cell uses the units of the row of its part.
+STATE_RULES = {"R": "a number of 0 or more, in ohm (0 is a short)",
+               "C": "a positive number, in pF",
+               "L": "a positive number, in nH",
+               RLC_KIND: "R / L / C in ohm / nH / pF, each 0 or more and one "
+                         "or more above 0 (0 leaves that component out)"}
+
+
+def _state_text(kind, entry):
+    """Give the text of a cell of the states grid for the part `entry`
+    ({"value"} or {"r", "l", "c"} in SI) of type `kind`."""
+    if kind == RLC_KIND:
+        return " / ".join("%g" % ((entry.get(key) or 0.0) / ENTRY_SCALE[k])
+                          for k, key in RLC_FIELDS)
+    return _entry_text(kind, entry.get("value"))
+
+
+def _state_value(kind, text):
+    """Read a cell of the states grid: give the entry of the part in SI,
+    {"value"} or {"r", "l", "c"}. A cell that does not obey
+    `STATE_RULES` gives a ValueError.
+
+    A Series RLC cell is three numbers with "/" between them, in the units
+    of the three fields of its row. "2 / 0.5 / 0" is 2 ohm and 0.5 nH, with
+    no C (a PIN diode that is on). "0 / 0.5 / 0.15" is a PIN diode that is
+    off.
+    """
+    if kind == RLC_KIND:
+        words = text.split("/")
+        if len(words) != 3:
+            raise ValueError(text)
+        out = {}
+        for (k, key), word in zip(RLC_FIELDS, words):
+            v = float(word) if word.strip() else 0.0
+            if v < 0:
+                raise ValueError(text)
+            out[key] = v * ENTRY_SCALE[k] if v else None
+        if all(v is None for v in out.values()):
+            raise ValueError(text)
+        return out
+    v = float(text)
+    if v < 0 or (v == 0 and kind != "R"):
+        raise ValueError(text)
+    return {"value": v * ENTRY_SCALE[kind]}
+
+
 # The er and the tan d of each preset. **FR-4 must agree with
 # `board_reader.DEF_EPSILON`**, which is the value that the plugin uses
 # when the board file has no stackup. Until 2026-08-05, the two were 4.2
@@ -201,8 +254,21 @@ def _port_choices(p):
     arbitrary. Three decimals are also necessary. A stackup that comes from
     mil gives 0.127 mm and 0.254 mm, and two decimals make the two values
     equal. The label of the port row names what the geometry does not give.
+
+    **A through-hole pad gets a coaxial feed and no lumped port.** There
+    is one entry for each side that has a gap around the pad. The default
+    side, where the connector is, is first. Its value is
+    "coax:" and the layer. A lumped port of such a pad goes to the adjacent
+    layer, and there the copper below the pad is the ring of the pad.
     """
     out = [PORT_TYPES[0]]
+    if p.get("drill"):
+        coax = p.get("coax") or {}
+        out = [("%s [Side: %s, Gap: %.3f mm]"
+                % (PORT_TYPES[4][0], side,
+                   coax[side]["r_out"] - coax[side]["r_in"]),
+                "coax:" + side)
+               for side in sorted(coax, key=lambda n: n != p.get("coax_side"))]
     if p.get("direction"):
         out.append(PORT_TYPES[1])
         if p.get("gap"):
@@ -235,7 +301,7 @@ def _use_wxagg():
 
 
 def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
-                pml_mm=None):
+                pml_mm=None, subregion=False):
     """Show the top view of the model.
 
     B.Cu is blue, F.Cu is red, the ports are green and the R/L/C parts are
@@ -253,6 +319,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
                   depth before 2026-09-20.
     show_lumped   Show the R/L/C parts or do not show them. The dialog
                   gives False when no part has its "Model" checkbox.
+    subregion     With `margin_mm`: the domain around the port pads, and
+                  not around the board (F20), as `extract` makes it.
     """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -275,14 +343,33 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
         rg = m["region"]
     else:  # extract() adds the clear air AND the band to the board bbox
         d = float(margin_mm) + float(margin_mm if pml_mm is None else pml_mm)
-        rg = {"x0": br["x0"] - d, "x1": br["x1"] + d,
-              "y0": br["y0"] - d, "y1": br["y1"] + d}
+        box = br
+        if subregion and m["ports"]:
+            ps = m["ports"]
+            box = {"x0": min(p["x"] - p["length"] / 2.0 for p in ps),
+                   "x1": max(p["x"] + p["length"] / 2.0 for p in ps),
+                   "y0": min(p["y"] - p["width"] / 2.0 for p in ps),
+                   "y1": max(p["y"] + p["width"] / 2.0 for p in ps)}
+        rg = {"x0": box["x0"] - d, "x1": box["x1"] + d,
+              "y0": box["y0"] - d, "y1": box["y1"] + d}
     ax.plot([br["x0"], br["x1"], br["x1"], br["x0"], br["x0"]],
             [br["y0"], br["y0"], br["y1"], br["y1"], br["y0"]],
             color="0.25", lw=1.2)
     ax.plot([rg["x0"], rg["x1"], rg["x1"], rg["x0"], rg["x0"]],
             [rg["y0"], rg["y0"], rg["y1"], rg["y1"], rg["y0"]],
             "--", color="0.6", lw=0.8)
+    # The inner face of the absorber. The copper out of this line ends in
+    # the absorber, as a matched load. In a subregion (F20), the board goes
+    # into the band, and only this line shows where the copper stops.
+    if margin_mm is None:
+        pml = m.get("pml_mm") or m.get("settings", {}).get("margin_mm")
+    else:
+        pml = margin_mm if pml_mm is None else pml_mm
+    if pml:
+        fx0, fx1 = rg["x0"] + pml, rg["x1"] - pml
+        fy0, fy1 = rg["y0"] + pml, rg["y1"] - pml
+        ax.plot([fx0, fx1, fx1, fx0, fx0], [fy0, fy0, fy1, fy1, fy0],
+                ":", color="0.4", lw=0.9)
 
     fs = 7 if compact else 9
     for p in m["ports"]:
@@ -316,6 +403,8 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
                               label="R/L/C"))
     handles.append(Line2D([], [], color="0.25", lw=1.2, label="Board edge"))
     handles.append(Line2D([], [], ls="--", color="0.6", label="Domain"))
+    if pml:
+        handles.append(Line2D([], [], ls=":", color="0.4", label="Absorber"))
 
     ax.set_aspect("equal")
     if compact:
@@ -338,10 +427,20 @@ def _draw_board(ax, model, compact=False, margin_mm=None, show_lumped=True,
         ax.set_title("Board Layout")
 
 
+def _legend(ax, **kw):
+    """Draw the legend of `ax` if it has a trace. When the user hid all the
+    traces of a graph, it has no legend, and matplotlib gives no warning."""
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(**kw)
+
+
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, ports, default_outdir, lumped=(), preview=None,
-                 packages=None, esr=None):
+                 packages=None, esr=None, solvers=None):
         wx.Dialog.__init__(self, parent, title="RFsim")
+        # {the key of a solver: None when it can run, or the cause when it
+        # cannot}, from `rfsim._solver_state`. None: each solver can run.
+        self._solver_state = dict(solvers or {})
         # {the code of the package: the ESL in H} and {the type of the
         # part: the ESR in ohm}. board_reader keeps the two tables, thus
         # there is one source of truth. This module must not import it:
@@ -355,7 +454,7 @@ class SettingsDialog(wx.Dialog):
     def _build(self, ports, default_outdir, lumped, preview=None):
         top = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(self, label="RFsim v1.2")
+        title = wx.StaticText(self, label="RFsim v1.3")
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL,
                               wx.FONTWEIGHT_BOLD))
         top.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 10)
@@ -395,6 +494,33 @@ class SettingsDialog(wx.Dialog):
                 g.Add(ctrl, 0, wx.EXPAND)
             return ctrl
 
+        # The solver comes first, because it sets which fields below the
+        # run uses.
+        #
+        # **A wx.RadioBox, and not a wx.Choice**: a solver that is not
+        # installed stays in the list, but it is grey. A wx.Choice cannot
+        # disable one item. Its tooltip and the line below give the cause.
+        # The first solver that can run is the default.
+        self.solver = wx.RadioBox(self, label="Solver",
+                                  choices=[SOLVER_NAMES[k] for k in SOLVERS],
+                                  majorDimension=1, style=wx.RA_SPECIFY_ROWS)
+        top.Add(self.solver, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+        absent = []
+        for i, k in enumerate(SOLVERS):
+            why = self._solver_state.get(k)
+            if why:
+                self.solver.EnableItem(i, False)
+                self.solver.SetItemToolTip(i, "Not installed: %s" % why)
+                absent.append(SOLVER_NAMES[k].split(" (")[0])
+        can_run = [i for i, k in enumerate(SOLVERS)
+                   if not self._solver_state.get(k)]
+        self.solver.SetSelection(can_run[0] if can_run else 0)
+        self.solver_note = wx.StaticText(self, label=(
+            "Not installed: %s. The README tells how to install it."
+            % ", ".join(absent)) if absent else "")
+        if absent:
+            top.Add(self.solver_note, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+
         fbox = section("Frequency")
         fs = wx.BoxSizer(wx.HORIZONTAL)
         fs.Add(wx.StaticText(self, label="Start:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -409,11 +535,34 @@ class SettingsDialog(wx.Dialog):
         fs.Add(wx.StaticText(self, label="GHz"), 0,
                wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
         fbox.Add(fs, 0, wx.ALL | wx.EXPAND, 6)
-        fg = grid_in(fbox)
         # The solver calculates the field dumps, which give the E/H
         # animation, and the far field at this frequency.
-        self.f_field = row(fg, "Define at:",
-                           wx.TextCtrl(self, value="2.4"), "GHz")
+        fd = wx.BoxSizer(wx.HORIZONTAL)
+        fd.Add(wx.StaticText(self, label="Define at:"), 0,
+               wx.ALIGN_CENTER_VERTICAL)
+        self.f_field = wx.TextCtrl(self, value="2.4", size=(60, -1))
+        fd.Add(self.f_field, 1, wx.LEFT, 4)
+        fd.Add(wx.StaticText(self, label="GHz"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        # The count of solved frequencies of EMerge. The FDTD run of
+        # openEMS gives all the sweep from one run, thus the field is off
+        # for it.
+        #
+        # **A SpinCtrlDouble, and not a SpinCtrl.** The dialog moves each
+        # control into its scrolled body below. On Windows a wx.SpinCtrl is
+        # a text box and an adjacent button. After that move, it got the
+        # dimensions 0 x 0: the row showed "Frequencies:" and no field.
+        fd.Add(wx.StaticText(self, label="Frequencies:"), 0,
+               wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+        self.fem_points = wx.SpinCtrlDouble(self, min=2, max=201,
+                                            initial=21, inc=1,
+                                            size=(60, -1))
+        self.fem_points.SetDigits(0)
+        self.fem_points.SetToolTip(
+            "EMerge solves at this number of frequencies. A vector fit "
+            "gives the other points of the sweep.")
+        fd.Add(self.fem_points, 1, wx.LEFT, 4)
+        fbox.Add(fd, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 6)
 
         pbox = section("Port")
         pg = grid_in(pbox)
@@ -452,8 +601,9 @@ class SettingsDialog(wx.Dialog):
             exc.SetValue(True)
             exc.SetToolTip("Drive this port: one FDTD run for each "
                            "excited port.")
-            # _refresh_port_badges puts the text in. The pad, the
-            # footprint and the net go into the tooltip.
+            # _refresh_port_badges puts the text in: the footprint, the pad
+            # and the net, as on 2026-07-31. The tooltip holds the same text,
+            # for a label that the row cuts.
             label = wx.StaticText(self, label="")
             label.SetToolTip(p["label"])
             self.port_badges.append(p)
@@ -517,6 +667,13 @@ class SettingsDialog(wx.Dialog):
                                   for i in range(len(ports))]
         self._refresh_port_badges()
 
+        # F30: the states of the parts, from `StatesDialog`. A list of
+        # {"name", "cells": {ref: text}}, State 1 first; [] is one state.
+        # `_state_kinds` keeps the type of each part when the user edited
+        # the states, because a cell holds a number in the unit of that
+        # type.
+        self._states = []
+        self._state_kinds = {}
         # (ref, the Model checkbox, the package choice, the ESL, the ESR)
         self.para_rows = []
         if lumped:
@@ -641,7 +798,7 @@ class SettingsDialog(wx.Dialog):
                 # **The unit also keeps ONE width** for all the types. An
                 # "Unknown" row has no unit. When it became an inductor,
                 # "nH" made the row 20 px wider than the window of the
-                # rows, and the Model checkboxes moved out of view.
+                # rows. The Model checkboxes then moved out of view.
                 uni.SetMinSize((max(pane.GetTextExtent(u)[0]
                                     for u in ENTRY_UNITS.values()), -1))
                 single = wx.BoxSizer(wx.HORIZONTAL)
@@ -678,7 +835,7 @@ class SettingsDialog(wx.Dialog):
                 # these parts.
                 srf_ctrls = []
                 # **Each field shows only for a type that uses it**
-                # (`PARA_FIELDS`), and the fields that show sit next to
+                # (`PARA_FIELDS`). The fields that show are adjacent to
                 # each other from the left: a resistor has its ESL where
                 # the other types have the ESR. Each field has the SAME
                 # width (one label width and one unit width for the
@@ -715,8 +872,8 @@ class SettingsDialog(wx.Dialog):
                 # three fields of a Series RLC.** A Series RLC row hides
                 # its parasitics, thus its three fields use their space.
                 # When they had a cell of their own, the value cell of
-                # EACH row kept space for them, and the dialog was 266 px
-                # wider with no Series RLC row.
+                # EACH row kept space for them. Thus the dialog was 266 px
+                # wider, also with no Series RLC row.
                 area = wx.BoxSizer(wx.HORIZONTAL)
                 area.Add(single, 0, mid)
                 area.Add(triple, 0, mid)
@@ -779,6 +936,21 @@ class SettingsDialog(wx.Dialog):
             self.lumped_warn.SetForegroundColour(wx.Colour(150, 90, 0))
             lbox.Add(self.lumped_warn, 0,
                      wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            # **F30: the states of the parts**, for example the states of
+            # a phase shifter. Each state is a run of its own, and the
+            # results window compares them. The rows above are State 1.
+            srow = wx.BoxSizer(wx.HORIZONTAL)
+            self.states_btn = wx.Button(lbox.GetStaticBox(),
+                                        label="Edit States...")
+            self.states_btn.SetToolTip(
+                "Give the parts other values, one set for each state. Each "
+                "state is one run, and the results compare them.")
+            self.states_lbl = wx.StaticText(lbox.GetStaticBox(), label="")
+            srow.Add(self.states_btn, 0, mid)
+            srow.Add(self.states_lbl, 0, mid | wx.LEFT, 8)
+            lbox.Add(srow, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            self.states_btn.Bind(wx.EVT_BUTTON, self._on_states)
+            self._refresh_states_label()
 
         sbox = section("Substrate")
         sg = grid_in(sbox)
@@ -807,7 +979,7 @@ class SettingsDialog(wx.Dialog):
         # `board_reader.extract` with no substrate, thus its stackup is the
         # stackup of the board.
         #
-        # An earlier version filled the four fields from the file and kept
+        # A previous version filled the four fields from the file and kept
         # them OPEN, with a label below them that named the source. The
         # code got that version, and the owner removed it again on
         # 2026-08-05. At this time, the fields are READ-ONLY with this
@@ -835,6 +1007,14 @@ class SettingsDialog(wx.Dialog):
         self.mesh.SetSelection(1)
         self.margin = row(rg, "Domain margin:", wx.SpinCtrlDouble(
             self, min=2.0, max=50.0, initial=4.0, inc=0.5), "mm")
+        # F20: the domain around the port pads, and not the full board.
+        self.subregion = row(rg, "Domain:", wx.CheckBox(
+            self, label="Only the area around the ports"))
+        self.subregion.SetToolTip(
+            "The domain is the box of the port pads plus the margin. The "
+            "copper, the vias and the parts outside it are not in the "
+            "model. This is faster on a large board. The copper that the "
+            "edge cuts ends in the absorber.")
         # A structure with a high Q rings for a long time. The run then
         # stops at the step limit before the energy decreases to the end
         # criteria, and the S-parameters are not correct. Before this, the
@@ -913,7 +1093,7 @@ class SettingsDialog(wx.Dialog):
         content = top.GetMinSize()
         # **Keep the width of the scroll bar at all times.** The bar comes
         # into view when the content becomes taller than the body: a new
-        # line of the warning is sufficient. It then took 17 px from
+        # line of the warning is sufficient. It then removed 17 px from
         # content that had no more width, and the right edge went out of
         # view.
         content.SetWidth(content.GetWidth()
@@ -932,6 +1112,8 @@ class SettingsDialog(wx.Dialog):
         self._fit_to_screen()
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.solver.Bind(wx.EVT_RADIOBOX, self._on_solver)
+        self._on_solver(None)
         # The preview uses self.margin and the rows. Thus make it last, and
         # keep it in agreement with the two controls.
         if self._prev_fig is not None:
@@ -943,6 +1125,7 @@ class SettingsDialog(wx.Dialog):
             for c in (self.f_stop, self.er):
                 c.Bind(wx.EVT_TEXT, self._on_preview_change)
             self.mesh.Bind(wx.EVT_CHOICE, self._on_preview_change)
+            self.subregion.Bind(wx.EVT_CHECKBOX, self._on_preview_change)
             self._redraw_preview()
         if self.para_rows:
             for _, cb, _, _, _ in self.para_rows:
@@ -1015,7 +1198,9 @@ class SettingsDialog(wx.Dialog):
         type that went away changes to Lumped. The control goes off when
         Lumped is the one entry.
         """
-        rows = _port_choices(p)
+        # A through-hole pad with no gap and no line has no type. `extract`
+        # stops such a pad, thus the Lumped entry here is a safe value.
+        rows = _port_choices(p) or [PORT_TYPES[0]]
         ch = self.port_choices[k]
         old = self.port_types[k]
         cur = old[ch.GetSelection()] if old and ch.GetSelection() >= 0 \
@@ -1048,21 +1233,21 @@ class SettingsDialog(wx.Dialog):
         return ([[1, 0], [-1, 0], [0, 1], [0, -1]][sel - 1], w)
 
     def _refresh_port_badges(self):
-        """Put "Port N" and its problem tag into the label of each port.
+        """Put the pad and its problem tag into the label of each port.
 
-        N is the number that the choice of that row gives at this time, and
-        not the number of the selection. Two rows can have the same number
-        for a short time; _on_ok refuses that. A tag names what stops all
-        the de-embedded types: "[No Track]". A coplanar gap that is missing
-        gets no tag. It stops only the CPW type, and a board that is not a
-        CPW is the usual case. The type choice shows the measured gap, or
-        it does not show the CPW entry.
+        The label is the footprint, the pad and the net: "P1 Pad 1 (RF1)",
+        as in the dialog of 2026-07-31. The owner keeps the net in view.
+        The number of the port is the choice of the row, thus the label
+        does not repeat it. A tag names what stops all the de-embedded
+        types: "[No Track]". A coplanar gap that is missing gets no tag. It
+        stops only the CPW type, and a board that is not a CPW is the usual
+        case. The type choice shows the measured gap, or it does not show
+        the CPW entry.
         """
-        for badge, num, p in zip(self._port_badge_ctrls, self.port_order,
-                                 self.port_badges):
-            label = "Port %d" % (num.GetSelection() + 1)
+        for badge, p in zip(self._port_badge_ctrls, self.port_badges):
+            label = p["label"]
             if not p.get("direction"):
-                label += " [No Track]"
+                label += "  [No Track]"
             badge.SetLabel(label)
         self.Layout()
 
@@ -1109,7 +1294,7 @@ class SettingsDialog(wx.Dialog):
         if area is None:
             return
         rows = max(1, len(self.part_rows))
-        # A hidden ESR, ESL or SRF keeps a blank space of its width, thus
+        # A hidden ESR, ESL or SRF keeps an empty space of its width. Thus
         # a change of the type does not change the width of a row.
         best = area.GetSizer().GetMinSize()
         one = best.GetHeight() / float(rows)
@@ -1149,12 +1334,12 @@ class SettingsDialog(wx.Dialog):
     def _lumped_limit(self):
         """Give (the timestep factor, the source, the value, the row).
 
-        The factor is the SMALLEST factor of all the elements. The two laws
-        are not the same. An inductance gives its factor through
-        `solverenv.time_step_factor`. A resistance in a series branch gives
-        its factor through `solverenv.series_r_factor`.
-        `runner._time_step_factor` uses the smaller of the same two. Thus
-        the number here and the run agree. The label and the refusal of
+        The factor is the SMALLEST factor of all the elements. The two laws are
+        not the same. An inductance gives its factor through
+        `solverenv.time_step_factor`. A resistance in a series branch gives its
+        factor through `solverenv.series_r_factor`.
+        `openems_runner._time_step_factor` uses the smaller of the same two.
+        Thus the number here and the run agree. The label and the refusal of
         `_on_ok` read THIS function.
 
         **Each candidate has the SOURCE of its value** (B49). The largest
@@ -1163,83 +1348,96 @@ class SettingsDialog(wx.Dialog):
         worse than no text.
 
         A factor of 1.0 comes back with no source and no row.
+
+        **Each state of F30 is a run of its own**, thus the values of each
+        state also count. The run of the worst state sets the cost and the
+        refusal. Their source names the state.
         """
         cand = [(1.0, "", "", -1)]
         for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
-            if not cb.GetValue():
-                continue
-            # An OPEN at all frequencies of the sweep is not in the grid.
-            # Thus it sets no timestep: `runner._open_parts`.
-            if self._open_over_sweep(i)[0]:
-                continue
-            kind = self._kind_of(i)
-            if kind == RLC_KIND:
-                # The three fields ARE the part: a series RLC gets no
-                # package parasitics. A text that is not a number counts as
-                # nothing here, and `_on_ok` refuses it.
-                try:
-                    v = self._rlc_values(i)
-                except ValueError:
-                    continue
-                nh = 1e9 * (v["l"] or 0.0)
-                cand.append((solverenv.time_step_factor(nh),
-                             "The L of %s" % ref, "%g nH" % nh, i))
-                # The R uses the series law only when the branch has more
-                # than ONE component. `runner._le_topology` holds that
-                # rule.
-                if (v["r"] or 0) > 0 and sum(
-                        x is not None for x in v.values()) > 1:
-                    cand.append((solverenv.series_r_factor(v["r"]),
-                                 "The R of %s" % ref,
-                                 "%g ohm" % v["r"], i))
-                continue
-            if kind == "L":
-                nh = 1e9 * (self._part_value(i) or 0.0)
-                cand.append((solverenv.time_step_factor(nh),
-                             "The inductor %s" % ref, "%g nH" % nh, i))
-            # The ESL counts only where the element holds it. An inductor
-            # has no ESL in its element. A body that does not change its
-            # part stays out, as in `runner._time_step_rule`.
-            comp = self._row_components(i) or {}
-            body = comp.get("L", 0.0) if kind in ("R", "C") else 0.0
-            cand.append((solverenv.time_step_factor(1e9 * body),
-                         "The body of %s" % ref,
-                         "%g nH" % (1e9 * body), i))
-            # A part with a body ESL is a branch of two components. Thus a
-            # RESISTOR then also uses the series law. The ESR of a
-            # capacitor and the DCR of an inductor are some ohms at most.
-            # `series_r_factor` gives 1.0 below 34 ohm, thus they cannot
-            # set this minimum. For that cause, they stay out.
-            if kind == "R" and body > 0:
-                cand.append((solverenv.series_r_factor(
-                    self._part_value(i) or 0.0),
-                    "The resistor %s" % ref,
-                    "%g ohm" % (self._part_value(i) or 0.0), i))
+            if cb.GetValue():
+                cand += self._limit_candidates(i, ref)
+        for name, i, entry in self._state_entries():
+            cand += self._limit_candidates(
+                i, '%s in "%s"' % (self.para_rows[i][0], name), entry)
         return min(cand)
 
-    def _row_components(self, i, whole=False):
+    def _limit_candidates(self, i, ref, entry=None):
+        """Give the candidates of `_lumped_limit` for row `i`, with the
+        values of the row, or with `entry` of a state (`_state_value`).
+        `ref` names the part in the source."""
+        out = []
+        # An OPEN at all frequencies of the sweep is not in the grid.
+        # Thus it sets no timestep: `openems_runner._open_parts`.
+        if self._open_over_sweep(i, entry)[0]:
+            return out
+        kind = self._kind_of(i)
+        if kind == RLC_KIND:
+            # The three fields ARE the part: a series RLC gets no
+            # package parasitics. A text that is not a number counts as
+            # nothing here, and `_on_ok` refuses it.
+            try:
+                v = entry if entry is not None else self._rlc_values(i)
+            except ValueError:
+                return out
+            nh = 1e9 * (v["l"] or 0.0)
+            out.append((solverenv.time_step_factor(nh),
+                        "The L of %s" % ref, "%g nH" % nh, i))
+            # The R uses the series law only when the branch has more
+            # than ONE component. `openems_runner._le_topology` holds that
+            # rule.
+            if (v["r"] or 0) > 0 and sum(
+                    x is not None for x in v.values()) > 1:
+                out.append((solverenv.series_r_factor(v["r"]),
+                            "The R of %s" % ref, "%g ohm" % v["r"], i))
+            return out
+        val = (entry["value"] if entry is not None
+               else self._part_value(i)) or 0.0
+        if kind == "L":
+            out.append((solverenv.time_step_factor(1e9 * val),
+                        "The inductor %s" % ref, "%g nH" % (1e9 * val), i))
+        # The ESL counts only where the element holds it. An inductor
+        # has no ESL in its element. A body that does not change its
+        # part stays out, as in `openems_runner._time_step_rule`.
+        comp = self._row_components(i, entry=entry) or {}
+        body = comp.get("L", 0.0) if kind in ("R", "C") else 0.0
+        out.append((solverenv.time_step_factor(1e9 * body),
+                    "The body of %s" % ref, "%g nH" % (1e9 * body), i))
+        # A part with a body ESL is a branch of two components. Thus a
+        # RESISTOR then also uses the series law. The ESR of a
+        # capacitor and the DCR of an inductor are some ohms at most.
+        # `series_r_factor` gives 1.0 below 34 ohm, thus they cannot
+        # set this minimum. For that cause, they stay out.
+        if kind == "R" and body > 0:
+            out.append((solverenv.series_r_factor(val),
+                        "The resistor %s" % ref, "%g ohm" % val, i))
+        return out
+
+    def _row_components(self, i, whole=False, entry=None):
         """Give the R, L and C that the runner puts in ONE element for row
         `i`, in SI. Give None for a text that is not a number.
 
-        It is `runner._components` with the parasitics of the row: the ESL
-        of a resistor or a capacitor, and the ESR of a capacitor or an
-        inductor. "No parasitics" gives 0 for the two. The open rule of the
-        dialog and of the runner must read the same branch. If not, the
+        It is `solverenv.components` with the parasitics of the row. These
+        are the ESL of a resistor or a capacitor, and the ESR of a capacitor
+        or an inductor. "No parasitics" gives 0 for the two. The open rule of
+        the dialog and of the runner must read the same branch. If not, the
         dialog can tell "open" for a part that the run puts in the grid.
-        `whole` keeps a body that the run does not include.
+        `whole` keeps a body that the run does not include. `entry` is the
+        value of a state (F30), and not the value of the row. A state keeps the
+        body of its row (`solverenv.apply_state`).
         """
         _, cb, ch, esl, esr = self.para_rows[i]
         kind = self._kind_of(i)
         try:
             if kind == RLC_KIND:
-                v = self._rlc_values(i)
+                v = entry if entry is not None else self._rlc_values(i)
                 return {"R": v["r"], "L": v["l"], "C": v["c"]}
-            val = self._part_value(i)
+            val = entry["value"] if entry is not None else self._part_value(i)
         except ValueError:
             return None
         if kind is None or val is None:
             return None
-        # A 0 ohm part is a short, as in `runner._components`: no body.
+        # A 0 ohm part is a short, as in `solverenv.components`: no body.
         if kind == "R" and val == 0:
             return {"R": 0.0}
         comp = {kind: val}
@@ -1250,15 +1448,15 @@ class SettingsDialog(wx.Dialog):
         if kind in ("C", "L") and body_r > 0:
             comp["R"] = body_r
         # **A body that does not change its part stays out**, as in
-        # `runner._components`: the part then uses the classic path.
+        # `solverenv.components`: the part is then one component.
         sweep = None if whole else self._sweep()
         if sweep and solverenv.body_is_idle(comp, kind, *sweep[:2]):
             return {kind: val}
         return comp
 
     def _sweep(self):
-        """Give (f_start, f_stop, z0) in Hz and ohm, or give None for a
-        text that is not a number or a sweep that is not a sweep."""
+        """Give (f_start, f_stop, z0) in Hz and ohm. Give None for a text
+        that is not a number, or for a sweep that is not a sweep."""
         try:
             fa = float(self.f_start.GetValue()) * 1e9
             fb = float(self.f_stop.GetValue()) * 1e9
@@ -1267,16 +1465,17 @@ class SettingsDialog(wx.Dialog):
             return None
         return (fa, fb, z0) if 0 < fa <= fb and z0 > 0 else None
 
-    def _open_over_sweep(self, i):
+    def _open_over_sweep(self, i, entry=None):
         """Give (True, the smallest |Z| of the sweep) when the part of row
         `i` is an open circuit at ALL frequencies of the sweep.
 
         `solverenv.is_open` holds the rule, and the runner also reads it:
         **such a part does not go into the grid.** Its gap stays open. The
         EPC of an inductor stays without the part, because at GHz a choke
-        on a board IS that capacitance. It costs no timestep.
+        on a board IS that capacitance. It costs no timestep. `entry` is
+        the value of a state, as in `_row_components`.
         """
-        comp = self._row_components(i)
+        comp = self._row_components(i, entry=entry)
         sweep = self._sweep()
         if not comp or not sweep:
             return False, 0.0
@@ -1288,10 +1487,10 @@ class SettingsDialog(wx.Dialog):
     def _derived_steps(self):
         """Give the step limit that openEMS receives, or give None.
 
-        `runner._max_timesteps` divides "Max steps" by the timestep factor.
-        Thus the SIMULATED time does not change, but the count changes. A
-        "Timestep" that the user gives is more important than the
-        rule, in the runner and thus here.
+        `openems_runner._max_timesteps` divides "Max steps" by the timestep
+        factor. Thus the SIMULATED time does not change, but the count changes.
+        A "Timestep" that the user gives is more important than the rule, in
+        the runner and thus here.
         """
         try:
             steps = float(self.max_steps.GetValue())
@@ -1308,7 +1507,7 @@ class SettingsDialog(wx.Dialog):
         that keeps the run stable. The runner divides the step limit by
         that part for the same simulated time. Thus 1/factor is the run
         time that the inductor costs, and the user must see it BEFORE the
-        run and not after it. The dialog and `runner._time_step_factor`
+        run and not after it. The dialog and `openems_runner._time_step_factor`
         read the ONE function. If not, the number here and the run do not
         agree.
         """
@@ -1318,6 +1517,10 @@ class SettingsDialog(wx.Dialog):
         factor, source, value, row = self._lumped_limit()
         cost = 1.0 / factor
         text = ""
+        # **The two lines are for openEMS only.** EMerge has no timestep,
+        # thus an inductor costs no run time. It also keeps each part in
+        # the model, also a part that is an open circuit across the sweep.
+        fdtd = self._solver_key() == "openems"
         # The rule starts to cost at 0.25 nH. A body ESL of 0603 to 2512
         # (0.35 to 0.90 nH) costs 1.2 to 1.9 times. Below 1.05, the number
         # rounds to "1.0 times longer", which is a warning that gives no
@@ -1327,7 +1530,7 @@ class SettingsDialog(wx.Dialog):
         # 2026-09-21. A body costs the same run time as a value that the
         # user typed, thus it must show the same warning. The words tell
         # which one it is.
-        if cost >= 1.05:
+        if fdtd and cost >= 1.05:
             # **The COUNT of steps, and not only the multiplier** (P20).
             # "600 times longer" does not tell if the run is one hour or
             # one week long. The step limit that openEMS receives tells it.
@@ -1342,14 +1545,14 @@ class SettingsDialog(wx.Dialog):
                        "" if steps is None
                        else " (up to %s timesteps)" % _count_text(steps),
                        _cause_text(source, value)))
-        # **A part that is open over the sweep is not in the run.** The
+        # **A part that is open across the sweep is not in the run.** The
         # user typed its value, and the run ignores the part. Without this
         # line, the run-time line went away with no cause when a value
-        # became large. A body that the run leaves out changes |Z| by 2%
+        # became large. A body that the run removes changes |Z| by 2%
         # or less, thus it is only in the Optimizations list.
         opens = []
         for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
-            if cb.GetValue():
+            if fdtd and cb.GetValue():
                 is_open, z = self._open_over_sweep(i)
                 if is_open:
                     opens.append("%s (%s)" % (ref, _ohm_text(z)))
@@ -1368,7 +1571,7 @@ class SettingsDialog(wx.Dialog):
                              + ", ".join(opens))
         else:
             label.UnsetToolTip()
-        # **The text must never make the dialog wider.** Its borders are
+        # **The text must not make the dialog wider.** Its borders are
         # 8 px and those of the rows are 6 px, thus it has 4 px less
         # width than the rows. A text that wrapped at the width of the
         # rows was 4 px too wide, and it pushed the right edge of the
@@ -1385,8 +1588,8 @@ class SettingsDialog(wx.Dialog):
         self.Layout()
         # **Paint all the dialog again.** A new warning makes its box
         # taller, and the Layout moves the controls. The window of the
-        # rows then kept areas that it did not paint again: the label of a
-        # row became empty when a row became an inductor.
+        # rows then kept areas that it did not paint again. Thus the label
+        # of a row became empty when a row became an inductor.
         self.Refresh()
 
     def _pml_mm(self):
@@ -1416,6 +1619,7 @@ class SettingsDialog(wx.Dialog):
             _draw_board(ax, self._preview_model, compact=True,
                         margin_mm=self.margin.GetValue(),
                         pml_mm=self._pml_mm(),
+                        subregion=self.subregion.GetValue(),
                         show_lumped=(not self.para_rows
                                      or self._any_modelled()))
         except Exception as e:  # the preview must not stop the dialog
@@ -1482,7 +1686,33 @@ class SettingsDialog(wx.Dialog):
         else:
             self.Destroy()
 
+    def _solver_key(self):
+        return SOLVERS[self.solver.GetSelection()]
+
+    def _on_solver(self, evt):
+        """Enable the fields of the solver that the user selected.
+
+        The threads, the run limits and the timestep are for the FDTD run
+        only. The frequency count is for EMerge only.
+        """
+        fem = self._solver_key() == "emerge"
+        self.fem_points.Enable(fem)
+        for c in (self.threads, self.max_steps, self.end_crit, self.tsf):
+            c.Enable(not fem)
+        self._update_lumped_warning()
+        if evt is not None:
+            evt.Skip()
+
     def _on_ok(self, evt):
+        # With no solver that can run, the selection stays on a grey
+        # solver. `rfsim` stops before the dialog in that case. A dialog
+        # that is made directly gets the same refusal here.
+        why = self._solver_state.get(self._solver_key())
+        if why:
+            wx.MessageBox("%s is not installed: %s"
+                          % (SOLVER_NAMES[self._solver_key()], why),
+                          "RFsim", wx.ICON_ERROR)
+            return
         # **Each message names ONE field**, with the label that the dialog
         # shows. A single message for all the fields did not tell the user
         # which field to correct. `got` holds the values that passed, thus
@@ -1585,6 +1815,11 @@ class SettingsDialog(wx.Dialog):
                         "the part with no self-resonance." % r["ref"],
                         "RFsim", wx.ICON_ERROR)
                     return
+        # The cells of the states (F30) obey the rules of the rows.
+        bad = self._check_states()
+        if bad:
+            wx.MessageBox(bad, "RFsim", wx.ICON_ERROR)
+            return
         order = [c.GetSelection() for c in self.port_order]
         if sorted(order) != list(range(len(order))):
             wx.MessageBox("Each pad must have a different port number.",
@@ -1600,7 +1835,8 @@ class SettingsDialog(wx.Dialog):
         # width that is not a number.
         for i, (ch, vals) in enumerate(zip(self.port_choices,
                                            self.port_types)):
-            if (self.port_feed[i] and vals[ch.GetSelection()] != "lumped"
+            if (self.port_feed[i]
+                    and vals[ch.GetSelection()] in ("msl", "cpw", "stripline")
                     and self._feed_of(i) is None):
                 wx.MessageBox(
                     "Port %d: a de-embedded port must have a feed direction "
@@ -1608,6 +1844,11 @@ class SettingsDialog(wx.Dialog):
                     % (self.port_order[i].GetSelection() + 1),
                     "RFsim", wx.ICON_ERROR)
                 return
+        # The rules below are for the FDTD run of openEMS: its limits and
+        # its timesteps. EMerge does not use those fields.
+        if self._solver_key() != "openems":
+            evt.Skip()
+            return
         # The three limits of the run. An empty timestep factor is
         # correct: the runner then selects the value itself.
         for ctrl, name, low, high in (
@@ -1632,7 +1873,7 @@ class SettingsDialog(wx.Dialog):
         # 90000 nH causes 180 million steps for the 300000 of the default.
         # That is about 135 hours on the SMALL board of the rigs.
         #
-        # A user who wants such a run can also give a "Timestep",
+        # For such a run, a user can also give a "Timestep",
         # which `_derived_steps` reads. That user then accepts the risk of
         # a run that diverges.
         steps = self._derived_steps()
@@ -1873,6 +2114,102 @@ class SettingsDialog(wx.Dialog):
         self._update_lumped_warning()
         evt.Skip()
 
+    # ------------------------------------------------ the states (F30)
+    def _state_rows(self):
+        """Give (ref, type, the text of the row) of each part that a state
+        can change. That is a part with its Model box on and a type."""
+        out = []
+        for i, (ref, cb, _, _, _) in enumerate(self.para_rows):
+            kind = self._kind_of(i)
+            if not cb.GetValue() or kind is None:
+                continue
+            try:
+                entry = (self._rlc_values(i) if kind == RLC_KIND
+                         else {"value": self._part_value(i)})
+            except ValueError:
+                entry = {}
+            out.append((ref, kind, _state_text(kind, entry)))
+        return out
+
+    def _on_states(self, evt):
+        rows = self._state_rows()
+        if not rows:
+            wx.MessageBox("A state changes the values of the parts. Turn on "
+                          "Model for a part and give it a type first.",
+                          "RFsim", wx.ICON_INFORMATION)
+            return
+        dlg = StatesDialog(self, rows, self._states)
+        if dlg.ShowModal() == wx.ID_OK:
+            self._states = dlg.get_states()
+            self._state_kinds = {ref: kind for ref, kind, _ in rows}
+        dlg.Destroy()
+        self._refresh_states_label()
+        self._update_lumped_warning()
+
+    def _refresh_states_label(self):
+        label = getattr(self, "states_lbl", None)
+        if label is None:
+            return
+        n = len(self._states)
+        label.SetLabel("Default state only. Edit to add more." if n <= 1 else
+                       "%d states, one run each." % n)
+        self.Layout()
+
+    def _state_entries(self):
+        """Give (the name of the state, the row, the entry in SI) of each
+        cell of State 2 and above that the run uses.
+
+        A cell of a part that is off, or with no type, gives nothing. The
+        same is true for a cell that is not a number, or a part that changed
+        its type after the user edited the states. `_on_ok` refuses those.
+        """
+        rows = {ref: i for i, (ref, _, _, _, _) in enumerate(self.para_rows)}
+        for st in self._states[1:]:
+            for ref, text in st.get("cells", {}).items():
+                i = rows.get(ref)
+                if i is None or not self.para_rows[i][1].GetValue():
+                    continue
+                kind = self._kind_of(i)
+                if kind is None or self._state_kinds.get(ref) != kind:
+                    continue
+                try:
+                    yield st["name"], i, _state_value(kind, text)
+                except ValueError:
+                    continue
+
+    def _state_settings(self):
+        """Give `settings["states"]`: [{"name", "parts": {ref: entry}}],
+        State 1 first with no parts, or None for one state."""
+        if len(self._states) <= 1:
+            return None
+        out = [{"name": st["name"], "parts": {}} for st in self._states]
+        by_name = {st["name"]: st for st in out}
+        for name, i, entry in self._state_entries():
+            by_name[name]["parts"][self.para_rows[i][0]] = entry
+        return out
+
+    def _check_states(self):
+        """Give the text that refuses a cell of the states, or None."""
+        rows = {ref: i for i, (ref, _, _, _, _) in enumerate(self.para_rows)}
+        for st in self._states[1:]:
+            for ref, text in st.get("cells", {}).items():
+                i = rows.get(ref)
+                if i is None or not self.para_rows[i][1].GetValue():
+                    continue
+                kind = self._kind_of(i)
+                if kind is None:
+                    continue
+                if self._state_kinds.get(ref) != kind:
+                    return ('Element "%s" has a different type than when you '
+                            'edited the states. Click "Edit States..." '
+                            "again." % ref)
+                try:
+                    _state_value(kind, text)
+                except ValueError:
+                    return ('State "%s", element "%s": give %s.'
+                            % (st["name"], ref, STATE_RULES[kind]))
+        return None
+
     def get_settings(self):
         board = self.uses_board_stackup()
         return {
@@ -1889,10 +2226,13 @@ class SettingsDialog(wx.Dialog):
             "h": None if board else float(self.h.GetValue()),
             "cu_t": None if board else float(self.cu_t.GetValue()),
             "margin_mm": self.margin.GetValue(),
+            "subregion": self.subregion.GetValue(),
             # "Auto" is item 0 and it gives None: the runner then reads the
             # cell count and selects the value. Item i gives i threads.
             "threads": self.threads.GetSelection() or None,
             "mesh": MESH_LEVELS[self.mesh.GetSelection()],
+            "solver": self._solver_key(),
+            "fem_points": int(round(self.fem_points.GetValue())),
             "port_types": [vals[c.GetSelection()] for c, vals
                            in zip(self.port_choices, self.port_types)],
             # The manual feed of each pad that has no track: (direction,
@@ -1915,7 +2255,7 @@ class SettingsDialog(wx.Dialog):
             # elements, thus model.json keeps the values that the solver
             # uses. "Custom" goes through as it is. Thus the log of the
             # solver shows the difference between a value that the user
-            # selected and a package that the code could not read. Each row
+            # selected and a package that the code cannot read. Each row
             # gives its type and its value, also a row that the user did
             # not touch. The dialog SHOWS what the parser read. Thus what
             # the dialog shows is what model.json holds. "type" is None for
@@ -1925,13 +2265,16 @@ class SettingsDialog(wx.Dialog):
             "lumped_parasitics": {
                 ref: self._part_settings(i)
                 for i, (ref, _, _, _, _) in enumerate(self.para_rows)},
+            # F30: None for one state. rfsim.py makes one run for each
+            # state, with `solverenv.apply_state`.
+            "states": self._state_settings(),
             "outdir": self.outdir.GetPath(),
             "n_freq": 401,
             "max_timesteps": int(float(self.max_steps.GetValue())),
             "end_criteria": float(self.end_crit.GetValue()),
-            # An empty field gives None. `runner._time_step_factor` then
-            # selects the value from the largest inductance of the model. A
-            # value here is more important than that value.
+            # An empty field gives None. `openems_runner._time_step_factor`
+            # then selects the value from the largest inductance of the model.
+            # A value here is more important than that value.
             "time_step_factor": (float(self.tsf.GetValue())
                                  if self.tsf.GetValue().strip() else None),
         }
@@ -1980,6 +2323,10 @@ class RunDialog(wx.Dialog):
     """
 
     def __init__(self, parent, cmd, log_path=None):
+        """`cmd` is one command, or a list of (title, command) that run
+        one after the other: a run for each state of F30. The title of
+        each one goes into the window first. The window stops at the first
+        command that stops with an error, and Cancel stops all of them."""
         wx.Dialog.__init__(self, parent, title="RFsim",
                            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY,
@@ -1999,12 +2346,19 @@ class RunDialog(wx.Dialog):
                 self._log_file = open(log_path, "w", encoding="utf-8")
             except OSError:
                 self._log_file = None
-        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT,
-                                     creationflags=flags)
+        self._steps = (list(cmd) if cmd and isinstance(cmd[0], tuple)
+                       else [(None, cmd)])
+        self._stop = False
+        self._pending = ""
+        self.proc = self._start(self._steps[0][1])
         self.Bind(wx.EVT_BUTTON, self._on_cancel, id=wx.ID_CANCEL)
         threading.Thread(target=self._pump, daemon=True).start()
+
+    @staticmethod
+    def _start(cmd):
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, creationflags=flags)
 
     def _log_lines(self, lines):
         """Write complete lines to run.log, each with "- " in front, thus
@@ -2013,27 +2367,41 @@ class RunDialog(wx.Dialog):
             self._log_file.write(("- " + line if line.strip() else "")
                                  + "\n")
 
+    def _emit(self, text):
+        """Show `text` and write its complete lines to run.log. A chunk can
+        end in the middle of a line, thus the file keeps the part after the
+        last line end until the next chunk."""
+        if self._log_file:
+            *done, self._pending = (self._pending + text).split("\n")
+            self._log_lines(done)
+        wx.CallAfter(self._append, text)
+
     def _pump(self):
-        stream = self.proc.stdout
-        # A chunk can end in the middle of a line. Thus the file keeps the
-        # part after the last line end until the next chunk.
-        pending = ""
-        while True:
-            chunk = stream.read(256)
-            if not chunk:
+        rc = 0
+        for k, (title, cmd) in enumerate(self._steps):
+            if self._stop:
+                rc = rc or 1
                 break
-            text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
-            text = text.replace("\r", "\n")
-            if self._log_file:
-                *done, pending = (pending + text).split("\n")
-                self._log_lines(done)
-            wx.CallAfter(self._append, text)
-        rc = self.proc.wait()
+            if k:
+                self.proc = self._start(cmd)
+            if title:
+                self._emit("%s[rfsim] ===== %s =====\n"
+                           % ("\n" if k else "", title))
+            stream = self.proc.stdout
+            while True:
+                chunk = stream.read(256)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", "replace").replace("\r\n", "\n")
+                self._emit(text.replace("\r", "\n"))
+            rc = self.proc.wait()
+            if rc:
+                break
         # Close the file BEFORE the dialog ends. Thus the caller can read
         # it immediately when ShowModal returns.
         if self._log_file:
-            if pending:
-                self._log_lines([pending])
+            if self._pending:
+                self._log_lines([self._pending])
             if rc:
                 self._log_lines(["*** the solver stopped with an error "
                                  "(exit code %s) ***" % rc])
@@ -2054,9 +2422,140 @@ class RunDialog(wx.Dialog):
             self.btn.SetLabel("Close")
 
     def _on_cancel(self, evt):
+        self._stop = True
         if self.proc.poll() is None:
             self.proc.kill()
         evt.Skip()
+
+
+class StatesDialog(wx.Dialog):
+    """Edit the states of the parts (F30). The grid has one column for each
+    state, and one row for each part with its Model box on and a type.
+
+    The first row holds the names of the states. **State 1 is the values
+    of the rows of the settings dialog**: its cells are read-only here, and
+    the rows change them. A cell holds the value in the unit of its row, or "R / L /
+    C" in ohm / nH / pF for a Series RLC (`_state_value`). An EMPTY cell
+    keeps the value of State 1, thus a state names only the parts that it
+    changes. A new state starts as a copy of the last one.
+
+    `rows` is [(ref, type, the text of the row)], and `states` is what
+    `get_states` gave the last time, or [].
+    """
+
+    def __init__(self, parent, rows, states):
+        import wx.grid
+        wx.Dialog.__init__(self, parent, title="RFsim",
+                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._rows = rows
+        g = self.grid = wx.grid.Grid(self)
+        n = max(len(states), 2)
+        g.CreateGrid(1 + len(rows), n)
+        g.SetRowLabelValue(0, "Name")
+        for r, (ref, kind, _) in enumerate(rows, 1):
+            unit = ("ohm / nH / pF" if kind == RLC_KIND
+                    else ENTRY_UNITS[kind])
+            g.SetRowLabelValue(r, "%s (%s, %s)" % (ref, KIND_NAMES[kind],
+                                                   unit))
+        g.SetRowLabelSize(wx.grid.GRID_AUTOSIZE)
+        for c in range(n):
+            st = states[c] if c < len(states) else {}
+            self._fill(c, st.get("name") or "State %d" % (c + 1),
+                       st.get("cells"))
+        g.AutoSizeColumns()
+        add = wx.Button(self, label="Add State")
+        rem = wx.Button(self, label="Remove State")
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        top.Add(add, 0, wx.RIGHT, 8)
+        top.Add(rem, 0)
+        s = wx.BoxSizer(wx.VERTICAL)
+        s.Add(top, 0, wx.ALL, 8)
+        s.Add(g, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        s.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0,
+              wx.ALL | wx.ALIGN_RIGHT, 8)
+        self.SetSizerAndFit(s)
+        add.Bind(wx.EVT_BUTTON, self._on_add)
+        rem.Bind(wx.EVT_BUTTON, self._on_remove)
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+
+    def _fill(self, c, name, cells):
+        """Fill column `c`. Column 0 shows the rows, read-only. A state
+        with no `cells` (a new one) starts with the values of the rows. A
+        state from before keeps its empty cells empty."""
+        import wx.grid
+        g = self.grid
+        g.SetColLabelValue(c, "State %d" % (c + 1))
+        g.SetCellValue(0, c, name)
+        for r, (ref, _, text) in enumerate(self._rows, 1):
+            if c == 0:
+                g.SetCellValue(r, c, text)
+                g.SetReadOnly(r, c)
+                g.SetCellBackgroundColour(r, c, wx.Colour(235, 235, 235))
+            else:
+                g.SetCellValue(r, c, text if cells is None
+                               else cells.get(ref, ""))
+
+    def _on_add(self, evt):
+        g = self.grid
+        g.AppendCols(1)
+        c = g.GetNumberCols() - 1
+        self._fill(c, "State %d" % (c + 1), {
+            ref: g.GetCellValue(r, c - 1)
+            for r, (ref, _, _) in enumerate(self._rows, 1)})
+        g.AutoSizeColumns()
+
+    def _on_remove(self, evt):
+        """Remove the last state. When one column stays, there is one state:
+        no states."""
+        g = self.grid
+        if g.GetNumberCols() > 1:
+            g.DeleteCols(g.GetNumberCols() - 1, 1)
+
+    def _on_ok(self, evt):
+        g = self.grid
+        if g.IsCellEditControlEnabled():
+            g.SaveEditControlValue()
+        names = []
+        for c in range(g.GetNumberCols()):
+            name = g.GetCellValue(0, c).strip() or "State %d" % (c + 1)
+            if name in names:
+                wx.MessageBox('Two states have the name "%s". Give each '
+                              "state a different name." % name, "RFsim",
+                              wx.ICON_ERROR)
+                return
+            names.append(name)
+            for r, (ref, kind, _) in enumerate(self._rows, 1):
+                text = g.GetCellValue(r, c).strip()
+                if c == 0 or not text:
+                    continue
+                try:
+                    _state_value(kind, text)
+                except ValueError:
+                    g.SetGridCursor(r, c)
+                    wx.MessageBox('State "%s", element "%s": give %s.'
+                                  % (name, ref, STATE_RULES[kind]),
+                                  "RFsim", wx.ICON_ERROR)
+                    return
+        evt.Skip()
+
+    def get_states(self):
+        """Give [{"name", "cells": {ref: text}}], State 1 first, or [] for
+        one state. An empty cell is not in "cells": it follows the row.
+        Each other cell keeps its value when the row changes after this,
+        thus the grid shows what the run uses."""
+        g = self.grid
+        if g.GetNumberCols() <= 1:
+            return []
+        out = []
+        for c in range(g.GetNumberCols()):
+            cells = {}
+            for r, (ref, _, _) in enumerate(self._rows, 1):
+                cell = g.GetCellValue(r, c).strip()
+                if c and cell:
+                    cells[ref] = cell
+            out.append({"name": g.GetCellValue(0, c).strip()
+                        or "State %d" % (c + 1), "cells": cells})
+        return out
 
 
 def _load_field(h5_path):
@@ -2134,6 +2633,73 @@ def _lobe_stats(ang_deg, D):
             "width": float(width), "sll": sll}
 
 
+def _define_at(model):
+    """Give the frequency of "Define at" of a model, in Hz, or None."""
+    s = (model or {}).get("settings", {})
+    return s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
+                                if "f_start" in s else None)
+
+
+def _read_states(touchstone_path):
+    """Give the runs of the states (F30) of the run of `touchstone_path`,
+    or None.
+
+    The run of each state is in a folder of its own, and
+    `solverenv.STATES_FILE` in the folder above lists them, State 1 first.
+    The result is {"names", "paths", "nets", "index"}, where "index" is the
+    state of `touchstone_path`. A state that has no results (a run that
+    stopped) is not in it. Fewer than two states give None.
+    """
+    import skrf
+    here = os.path.dirname(os.path.abspath(touchstone_path))
+    root = os.path.dirname(here)
+    try:
+        with open(os.path.join(root, solverenv.STATES_FILE)) as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    out = {"names": [], "paths": [], "nets": []}
+    for st in data.get("states", []):
+        path = os.path.join(root, st["dir"], os.path.basename(touchstone_path))
+        try:
+            out["nets"].append(skrf.Network(path))
+        except Exception:
+            continue
+        out["names"].append(st["name"])
+        out["paths"].append(path)
+    keys = [os.path.normcase(os.path.abspath(q)) for q in out["paths"]]
+    me = os.path.normcase(os.path.abspath(touchstone_path))
+    if len(keys) < 2 or me not in keys:
+        return None
+    out["index"] = keys.index(me)
+    return out
+
+
+PHASE_DIFF_VIEW = "Phase Difference"
+# The views of the frequency sweep. They show all the states (F30).
+SWEEP_VIEWS = ("S-Parameters", PHASE_DIFF_VIEW, "Smith", "VSWR",
+               "Group delay")
+
+
+def _s_names(net):
+    """Give the names of the S-parameters that have data, as "S21", in the
+    order of the rows. A column of a port that is not excited has no
+    data."""
+    import numpy as np
+    return ["S%d%d" % (j + 1, k + 1) for j in range(net.nports)
+            for k in range(net.nports)
+            if np.any(np.abs(net.s[:, j, k]) > 1e-9)]
+
+
+def _through(names):
+    """Give the S-parameter that is the usual reference of the phase
+    difference: the first S_jk with j > k (S21 for a 2-port that excites
+    port 1). If not, one with j < k, and if not, the first name."""
+    pairs = [(int(n[1]), int(n[2]), n) for n in names]
+    return next((n for j, k, n in pairs if j > k),
+                next((n for j, k, n in pairs if j < k), names[0]))
+
+
 class ResultsFrame(wx.Frame):
     """Show the plots of the Touchstone file. It uses skrf and matplotlib."""
 
@@ -2145,9 +2711,129 @@ class ResultsFrame(wx.Frame):
         import skrf
 
         wx.Frame.__init__(self, parent, title="RFsim", size=(820, 620))
-        self.net = skrf.Network(touchstone_path)
+        self._anim = None
+        # **F30: the runs of the states of the parts**, when this run is one
+        # of them. The views of the sweep show all the states, with a check
+        # box for each state. A choice selects the state of the other views.
+        self._states = _read_states(touchstone_path)
+        plots = self._load(touchstone_path)
+        self.choice = wx.Choice(self, choices=plots)
+        self.choice.SetSelection(0)
+        self.figure = Figure(figsize=(8, 5.5), layout="constrained")
+        self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
+        # The default minimum dimensions are the native dimensions of the
+        # figure, 800x550. The sizer then cannot make the canvas smaller,
+        # and it cuts the bottom axis.
+        self.canvas.SetMinSize((320, 240))
+        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
+        self.toolbar.Realize()
+        self.text = wx.TextCtrl(self, value=self._decisions or "",
+                                style=wx.TE_MULTILINE | wx.TE_READONLY
+                                | wx.TE_DONTWRAP)
+        self.text.Hide()
+        # **A check box for each trace of a graph**: when the user clears
+        # the box of a trace, the graph does not show that trace. The scale
+        # fits the traces that stay.
+        # The choice holds for each name in each view, thus S11 hidden in
+        # the magnitude is also hidden in the phase and the Smith chart.
+        # The list is on a white panel of the height of the canvas. Thus
+        # the column at the right of the graph is white as the figure.
+        self.side = wx.Panel(self)
+        self.side.SetThemeEnabled(False)
+        self.side.SetBackgroundStyle(wx.BG_STYLE_COLOUR)
+        self.side.SetBackgroundColour(wx.WHITE)
+        self.traces = wx.CheckListBox(self.side)
+        self.traces.SetBackgroundColour(wx.WHITE)
+        # The frame is also white. Thus no grey strip stays if the panel
+        # does not fill the column.
+        self.SetBackgroundColour(wx.WHITE)
+        # A second list below it has a check box for each state (F30). It
+        # shows on the views of the sweep of a run of states.
+        self.state_box = wx.CheckListBox(self.side)
+        self.state_box.SetBackgroundColour(wx.WHITE)
+        side = wx.BoxSizer(wx.VERTICAL)
+        self._gap = side.Add((0, 6))  # `_place_traces` sets its height
+        side.Add(self.traces, 0, wx.RIGHT, 6)
+        side.Add(self.state_box, 0, wx.RIGHT | wx.TOP, 12)
+        self.side.SetSizer(side)
+        self.side.Hide()
+        self._hidden = set()
+        self._hidden_states = set()
+        self._labels = []
+        self._traces_h = 0  # the height of the rows of the list, in pixels
+
+        s = wx.BoxSizer(wx.VERTICAL)
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        top.Add(self.choice, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.state_choice = None
+        self.state_label = None
+        if self._states:
+            self.state_choice = wx.Choice(self, choices=self._states["names"])
+            self.state_choice.SetSelection(self._states["index"])
+            self.state_choice.SetToolTip(
+                "The state that the views of the fields, the far field and "
+                "the board show.")
+            self.state_label = wx.StaticText(self, label="State:")
+            top.Add(self.state_label, 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+            top.Add(self.state_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+            self.state_choice.Bind(wx.EVT_CHOICE, self._on_state)
+        # **The reference of the phase difference**: one trace, as
+        # "S21 (State 1)". It shows only on that view, as a flat line.
+        refs = [label for label, _, _ in self._combos(
+            _s_names(self._nets()[0][1]))]
+        self.ref_choice = wx.Choice(self, choices=refs)
+        first = self._nets()[0][0]
+        self.ref_choice.SetStringSelection(
+            self._trace_label(_through(_s_names(self._nets()[0][1])), first))
+        self.ref_choice.SetToolTip(
+            "The trace that the other traces of this view are compared to.")
+        self.ref_label = wx.StaticText(self, label="Reference:")
+        top.Add(self.ref_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+        top.Add(self.ref_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        self.ref_choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
+        self.ref_label.Hide()
+        self.ref_choice.Hide()
+        # **F21: the animation of a field or current view as a GIF.** The
+        # button shows only on the views that animate.
+        self.gif_button = wx.Button(self, label="Export GIF")
+        self.gif_button.SetToolTip(
+            "Save the animation of this view as a GIF file.")
+        self.gif_button.Bind(wx.EVT_BUTTON, self._on_gif)
+        self.gif_button.Hide()
+        top.Add(self.gif_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 16)
+        s.Add(top, 0, wx.ALL, 6)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(self.canvas, 1, wx.EXPAND)
+        row.Add(self.side, 0, wx.EXPAND)
+        s.Add(row, 1, wx.EXPAND)
+        s.Add(self.text, 1, wx.EXPAND)
+        s.Add(self.toolbar, 0, wx.EXPAND)
+        self.SetSizer(s)
+        self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
+        self.traces.Bind(wx.EVT_CHECKLISTBOX, self._on_trace)
+        self.state_box.Bind(wx.EVT_CHECKLISTBOX, self._on_state_box)
+        self.canvas.mpl_connect("draw_event", self._place_traces)
+        self._plot()
+        # The canvas gets its dimensions from the sizer only after an
+        # EVT_SIZE. Without this call, the figure paints at its native
+        # dimensions. The label of the bottom axis then stays cut until the
+        # user changes the dimensions of the window.
+        wx.CallAfter(self.SendSizeEvent)
+
+    def _load(self, touchstone_path):
+        """Read the results of one run, and give the list of its views.
+
+        The results window calls it again when the user selects a different
+        state (F30). The views of the sweep read all the states, thus they
+        do not change with it.
+        """
         import numpy as np
+        import skrf
+        self.net = skrf.Network(touchstone_path)
         plots = ["S-Parameters [Magnitude]", "S-Parameters [Phase]"]
+        if len(self._combos(_s_names(self._nets()[0][1]))) >= 2:
+            plots += [PHASE_DIFF_VIEW]
         if self.net.nports >= 1:
             plots += ["Smith Chart", "VSWR"]
         if any(np.any(np.abs(self.net.s[:, j, k]) > 1e-9)
@@ -2170,6 +2856,14 @@ class ResultsFrame(wx.Frame):
                                               k + "f.h5")):
                 p = int(re.search(r"exc(\d+)", hit).group(1))
                 self.field_h5s[(k, p)] = hit
+        # The current on a copper layer (F4): the kind is "J:" and the
+        # name of the layer, from Jf_<layer>.h5.
+        pre = solverenv.CURRENT_PREFIX
+        for hit in glob.glob(os.path.join(self.outdir, "exc*",
+                                          pre + "*.h5")):
+            p = int(re.search(r"exc(\d+)", hit).group(1))
+            layer = os.path.basename(hit)[len(pre):-3]
+            self.field_h5s[("J:" + layer, p)] = hit
         self._ff = {}  # port (0 = previous or unknown) -> the far-field dict
         for path in glob.glob(os.path.join(self.outdir, "farfield*.json")):
             m = re.search(r"farfield_p(\d+)", os.path.basename(path))
@@ -2189,7 +2883,6 @@ class ResultsFrame(wx.Frame):
         if self._lines and self._lines.get("ports"):
             plots.append("Line Impedance")
         self._field = {}
-        self._anim = None
         if self.model:
             s = self.model.get("settings", {})
             f_hz = s.get("f_field") or (0.5 * (s["f_start"] + s["f_stop"])
@@ -2202,6 +2895,18 @@ class ResultsFrame(wx.Frame):
                     if (k, p) in self.field_h5s:
                         plots.append("%s-Field%s%s" % (
                             k, ftag,
+                            " (Port %d)" % p if len(fports) > 1 else ""))
+            # The current views, in the order of the layers from the top.
+            order = [c["name"] for c in self.model.get("copper_layers", [])]
+            layers = sorted({k[2:] for k, _ in self.field_h5s
+                             if k.startswith("J:")},
+                            key=lambda n: order.index(n) if n in order
+                            else len(order))
+            for layer in layers:
+                for p in fports:
+                    if ("J:" + layer, p) in self.field_h5s:
+                        plots.append("Current on %s%s%s" % (
+                            layer, ftag,
                             " (Port %d)" % p if len(fports) > 1 else ""))
             for p in sorted(self._ff):
                 ff = self._ff[p]
@@ -2224,34 +2929,7 @@ class ResultsFrame(wx.Frame):
             pass
         if self._decisions:
             plots.append(DECISIONS_VIEW)
-        self.choice = wx.Choice(self, choices=plots)
-        self.choice.SetSelection(0)
-        self.figure = Figure(figsize=(8, 5.5), layout="constrained")
-        self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-        # The default minimum dimensions are the native dimensions of the
-        # figure, 800x550. The sizer then cannot make the canvas smaller,
-        # and it cuts the bottom axis.
-        self.canvas.SetMinSize((320, 240))
-        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
-        self.toolbar.Realize()
-        self.text = wx.TextCtrl(self, value=self._decisions or "",
-                                style=wx.TE_MULTILINE | wx.TE_READONLY
-                                | wx.TE_DONTWRAP)
-        self.text.Hide()
-
-        s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self.choice, 0, wx.ALL, 6)
-        s.Add(self.canvas, 1, wx.EXPAND)
-        s.Add(self.text, 1, wx.EXPAND)
-        s.Add(self.toolbar, 0, wx.EXPAND)
-        self.SetSizer(s)
-        self.choice.Bind(wx.EVT_CHOICE, lambda e: self._plot())
-        self._plot()
-        # The canvas gets its dimensions from the sizer only after an
-        # EVT_SIZE. Without this call, the figure paints at its native
-        # dimensions. The label of the bottom axis then stays cut until the
-        # user changes the dimensions of the window.
-        wx.CallAfter(self.SendSizeEvent)
+        return plots
 
     def _plot(self):
         import numpy as np
@@ -2259,16 +2937,29 @@ class ResultsFrame(wx.Frame):
             self._anim.event_source.stop()
             self._anim = None
         self.figure.clear()
+        self._labels = []
         sel = self.choice.GetStringSelection()
         text = sel == DECISIONS_VIEW
         self.text.Show(text)
         self.canvas.Show(not text)
         self.toolbar.Show(not text)
+        self.gif_button.Show(sel.startswith(("E-Field", "H-Field",
+                                             "Current on ")))
+        # The views of the sweep show all the states, thus the State choice
+        # does not apply to them.
+        sweep = sel.startswith(SWEEP_VIEWS)
+        if self.state_choice:
+            self.state_label.Show(not sweep)
+            self.state_choice.Show(not sweep)
+        self.ref_label.Show(sel == PHASE_DIFF_VIEW)
+        self.ref_choice.Show(sel == PHASE_DIFF_VIEW)
+        self.side.Hide()
         self.Layout()
         if text:
             return
         ax = self.figure.add_subplot(111)
-        net, f_ghz = self.net, self.net.f / 1e9
+        net = self.net
+        diag = [n for n in _s_names(self._nets()[0][1]) if n[1] == n[2]]
 
         m = re.search(r" \(Port (\d+)\)$", sel)
         pnum, base = (int(m.group(1)), sel[:m.start()]) if m else (None, sel)
@@ -2280,6 +2971,10 @@ class ResultsFrame(wx.Frame):
         elif sel.startswith(("E-Field", "H-Field")):
             ax.remove()
             self._plot_field(sel[0], pnum)
+        elif sel.startswith("Current on "):
+            ax.remove()
+            layer = base[len("Current on "):].split(" (f=")[0]
+            self._plot_field("J:" + layer, pnum)
         elif sel.startswith("Farfield"):
             ax.remove()
             ff = self._ff[pnum if pnum in self._ff else sorted(self._ff)[0]]
@@ -2289,59 +2984,344 @@ class ResultsFrame(wx.Frame):
                 self._plot_farfield(ff, tag, ptag)
             else:                            # only "(f=xx GHz)": a 3D balloon
                 self._plot_farfield3d(ff, ptag, pnum)
+        elif sel == PHASE_DIFF_VIEW:
+            self._plot_phase_diff(ax)
         elif sel.startswith("S-Parameters"):
             phase = sel.endswith("[Phase]")
-            for j in range(net.nports):
-                for k in range(net.nports):
-                    if not np.any(np.abs(net.s[:, j, k]) > 1e-9):
-                        continue  # port k is not excited: no data in column
-                    v = (np.degrees(np.angle(net.s[:, j, k])) if phase
-                         else net.s_db[:, j, k])
-                    ax.plot(f_ghz, v, label="S%d%d" % (j + 1, k + 1))
-            ax.set_title("S-Parameters [Phase]" if phase
-                         else "S-Parameters [Magnitude]")
-            ax.set_ylabel("°" if phase else "dB")
-            ax.legend()
+            for label, name, n, c in self._sweep(_s_names(self._nets()[0][1])):
+                j, k = int(name[1]) - 1, int(name[2]) - 1
+                v = (np.degrees(np.angle(n.s[:, j, k])) if phase
+                     else n.s_db[:, j, k])
+                ax.plot(n.f / 1e9, v, color=c, label=label)
+            ax.set_title(sel)
+            ax.set_ylabel("\N{DEGREE SIGN}" if phase else "dB")
+            _legend(ax)
         elif sel.startswith("Smith"):
             grid = True
-            for i in range(net.nports):
-                if not np.any(np.abs(net.s[:, i, i]) > 1e-9):
-                    continue  # port i is not excited: no data for S_ii
-                net.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid)
+            for label, name, n, c in self._sweep(diag):
+                i = int(name[1]) - 1
+                n.plot_s_smith(m=i, n=i, ax=ax, draw_labels=grid, color=c)
+                ax.get_lines()[-1].set_label(label)  # skrf: "name, S11"
                 grid = False
-            for ln in ax.get_lines():  # skrf writes "name, S11": use "S11"
-                if ", S" in ln.get_label():
-                    ln.set_label(ln.get_label().split(", ")[-1])
-            ax.legend()
+            if grid:  # the user hid each trace: only the chart
+                from skrf.plotting import smith
+                smith(ax=ax, draw_labels=True)
+            _legend(ax)
             ax.set_title("S-Parameters [Impedance View]")
         elif sel.startswith("VSWR"):
-            for i in range(net.nports):
-                s_ii = net.s[:, i, i]
-                if not np.any(np.abs(s_ii) > 1e-9):
-                    continue
-                mag = np.clip(np.abs(s_ii), 0, 0.999999)
-                ax.plot(f_ghz, (1 + mag) / (1 - mag),
-                        label="Port %d" % (i + 1))
+            for label, name, n, c in self._sweep(["Port " + d[1]
+                                                  for d in diag]):
+                i = int(name[5:]) - 1
+                mag = np.clip(np.abs(n.s[:, i, i]), 0, 0.999999)
+                ax.plot(n.f / 1e9, (1 + mag) / (1 - mag), color=c,
+                        label=label)
             ax.set_title("Voltage Standing Wave Ratio (VSWR)")
-            ax.set_ylim(1, min(20, ax.get_ylim()[1]))
-            ax.legend()
+            if ax.get_lines():
+                ax.set_ylim(1, min(20, ax.get_ylim()[1]))
+            _legend(ax)
         else:  # the group delay: all the pairs that have data, in one graph
-            for k in range(net.nports):
-                for j in range(net.nports):
-                    if j == k or not np.any(np.abs(net.s[:, j, k]) > 1e-9):
-                        continue
-                    phase = np.unwrap(np.angle(net.s[:, j, k]))
-                    gd = -np.gradient(phase, 2 * np.pi * net.f) * 1e9
-                    ax.plot(f_ghz, gd, label="S%d%d" % (j + 1, k + 1))
+            for label, name, n, c in self._sweep(
+                    [s for s in _s_names(self._nets()[0][1]) if s[1] != s[2]]):
+                j, k = int(name[1]) - 1, int(name[2]) - 1
+                phase = np.unwrap(np.angle(n.s[:, j, k]))
+                gd = -np.gradient(phase, 2 * np.pi * n.f) * 1e9
+                ax.plot(n.f / 1e9, gd, color=c, label=label)
             ax.set_title("Group delay")
             ax.set_ylabel("Group delay / ns")
-            ax.legend()
+            _legend(ax)
 
         if not sel.startswith(("Smith", "Board", "E-Field", "H-Field",
-                               "Farfield")):
+                               "Farfield", "Current on ")):
             ax.set_xlabel("Frequency / GHz")
             ax.grid(True, alpha=0.4)
+        states = bool(self._states) and sweep
+        self.state_box.Show(states)
+        if self._labels:
+            self._traces_h = self._fill(self.traces, self._labels,
+                                        self._hidden)
+            if states:
+                self._fill(self.state_box, self._states["names"],
+                           self._hidden_states)
+            self.side.Show()
+            self.Layout()
+            self.side.Layout()
         self.canvas.draw()
+
+    def _on_gif(self, evt):
+        """Ask for a file name, and save the animation of the view there."""
+        name = re.sub(r"[^\w.-]+", "_",
+                      self.choice.GetStringSelection()).strip("_") + ".gif"
+        with wx.FileDialog(self, "Export GIF", defaultDir=self.outdir,
+                           defaultFile=name, wildcard="GIF files (*.gif)|*.gif",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+        try:
+            with wx.BusyCursor():
+                self.save_gif(path)
+        except Exception as exc:
+            wx.MessageBox("The GIF was not saved:\n%s" % exc, "RFsim",
+                          wx.OK | wx.ICON_ERROR, self)
+
+    def save_gif(self, path):
+        """Save all the frames of the animation of the view, at the
+        dimensions and the speed of the window.
+
+        Each frame comes from the buffer of the canvas. The writers of
+        matplotlib calculate the width from the inches of the figure. That
+        width can be 1 pixel less than the width of the buffer. Each row then
+        moves 1 pixel, and the picture is not straight.
+        """
+        import numpy as np
+        from PIL import Image
+        from matplotlib import cm
+        step, frames = self._frame_step
+        # The first artist with a colour map is the field. Its axes also
+        # hold the ports and the copper outlines.
+        mesh = next(iter(self.figure.findobj(
+            lambda a: isinstance(a, cm.ScalarMappable))))
+        # When `antialiased` is True, an edge mixes its colour with the field
+        # below it. The field changes in each frame. Thus each frame must
+        # have new mixed colours, and the palette cannot hold them. The port
+        # boxes then changed to a grey colour from frame to frame. Thus, for
+        # the GIF, `antialiased` is False on the lines and the text on the
+        # field.
+        edges = [a for a in mesh.axes.get_children()
+                 if a is not mesh and hasattr(a, "set_antialiased")]
+        before = [a.get_antialiased() for a in edges]
+        rgb = []
+        try:
+            for a in edges:
+                a.set_antialiased(False)
+            for i in range(frames):
+                step(i)
+                self.canvas.draw()
+                rgb.append(
+                    np.asarray(self.canvas.buffer_rgba())[..., :3].copy())
+        finally:
+            for a, aa in zip(edges, before):
+                a.set_antialiased(aa)
+            self.canvas.draw_idle()
+
+        # A GIF frame has a palette of 256 colours. When each frame gets its
+        # own palette, the same value gets a different colour in each frame.
+        # The colours of the bar then change from frame to frame. Thus all
+        # frames use one palette. Dither is off, because dither noise also
+        # changes from frame to frame. A palette from only the pixels gives
+        # most colours to the large areas of low field. The red end of the
+        # colour bar then gets steps. Thus 224 colours come from the colour
+        # map at equal steps. Some pixels are not near the colour map: the
+        # white, the text, the lines and the port boxes. Of their colours,
+        # the 32 with the most pixels go into the palette. These pixels do
+        # not move, thus their colours are in all the frames.
+        px = np.stack(rgb).astype(np.uint32)
+        keys, inv, count = np.unique(
+            (px[..., 0] << 16 | px[..., 1] << 8 | px[..., 2]).ravel(),
+            return_inverse=True, return_counts=True)
+        cols = np.stack([keys >> 16, keys >> 8 & 255, keys & 255],
+                        axis=1).astype(float)
+
+        def nearest(pal):
+            """Give the index of the nearest palette colour for each colour,
+            and the square of the distance to it."""
+            idx = np.empty(len(cols), np.intp)
+            dist = np.empty(len(cols))
+            for s in range(0, len(cols), 4096):
+                d = ((cols[s:s + 4096, None, :] - pal[None]) ** 2).sum(-1)
+                idx[s:s + 4096] = d.argmin(axis=1)
+                dist[s:s + 4096] = d.min(axis=1)
+            return idx, dist
+
+        lut = mesh.get_cmap()(np.linspace(0.0, 1.0, 224))[:, :3] * 255.0
+        _, dist = nearest(lut)
+        # A colour more than 6 of 255 from the colour map is not on the map.
+        # The steps of the map are 5 of 255 or less.
+        off = np.nonzero(dist > 36.0)[0]
+        other = cols[off[np.argsort(-count[off], kind="stable")[:32]]]
+        pal = np.concatenate([lut, other])
+        idx, _ = nearest(pal)
+        index = idx[inv].reshape(px.shape[:3]).astype(np.uint8)
+        colours = np.round(pal).astype(np.uint8).ravel().tolist()
+        images = []
+        for a in index:
+            im = Image.fromarray(a)
+            im.putpalette(colours)
+            images.append(im)
+        images[0].save(path, save_all=True, append_images=images[1:],
+                       duration=FRAME_MS, loop=0)
+
+    def _on_state(self, evt):
+        """Show the views of a different state (F30). The view stays the same
+        when the other state has it. The views of the sweep show all the
+        states, thus they do not change."""
+        if self._anim:
+            self._anim.event_source.stop()
+            self._anim = None
+        name = self.choice.GetStringSelection()
+        plots = self._load(self._states["paths"][
+            self.state_choice.GetSelection()])
+        self.choice.Set(plots)
+        self.choice.SetSelection(plots.index(name) if name in plots else 0)
+        self.text.SetValue(self._decisions or "")
+        self._plot()
+
+    def _keep(self, name):
+        """Put the trace `name` in the check boxes of the view. Give its
+        colour, or None if the user hid it.
+
+        The colour comes from the position of the trace in the list, and not
+        from the traces that the graph shows. Thus a trace keeps its colour
+        when the user hides another one.
+        """
+        self._labels.append(name)
+        if name in self._hidden:
+            return None
+        return "C%d" % (len(self._labels) - 1)
+
+    def _place_traces(self, event=None):
+        """Put the top of the check boxes at the top of the graph, and not
+        at the top of the figure, where the title is.
+
+        Each draw calls it: a resize moves the frame of an axis with a
+        constant aspect, as the Smith chart.
+        """
+        axes = self.figure.get_axes()
+        if not self.side.IsShown() or not axes:
+            return
+        # The figure has pixels of the device, and the sizer has the
+        # logical pixels of wx: they are different on a screen with a scale.
+        fig_h = self.figure.bbox.height
+        top = ((fig_h - axes[0].bbox.y1) * self.canvas.GetSize().height
+               / fig_h)
+        top = max(int(round(top)), 0)
+        # A list that is higher than the space below the top of the graph
+        # gets a scroll bar. Thus it does not go out of the window. The list
+        # of the states, when it shows, stays below it.
+        below = 0
+        if self.state_box.IsShown():
+            below = self.state_box.GetMinSize().height + 12
+        h = max(min(self._traces_h,
+                    self.canvas.GetSize().height - top - below), 0)
+        if (self._gap.GetSpacer().height != top
+                or self.traces.GetMinSize().height != h):
+            self._gap.AssignSpacer((0, top))
+            self.traces.SetMinSize((-1, h))
+            self.side.Layout()
+
+    def _on_trace(self, event):
+        name = self.traces.GetString(event.GetInt())
+        if self.traces.IsChecked(event.GetInt()):
+            self._hidden.discard(name)
+        else:
+            self._hidden.add(name)
+        self._plot()
+
+    def _on_state_box(self, event):
+        name = self.state_box.GetString(event.GetInt())
+        if self.state_box.IsChecked(event.GetInt()):
+            self._hidden_states.discard(name)
+        else:
+            self._hidden_states.add(name)
+        self._plot()
+
+    def _fill(self, box, names, hidden):
+        """Put `names` in the check list `box`, with the box of each name
+        in `hidden` clear. Give the height of the rows, in pixels.
+
+        On Windows, wx gives a list box the height of 3 rows to 10 rows,
+        thus one trace got a box of 3 rows. The height of a row comes from
+        that rule. The best size includes the minimum size, thus clear it
+        first.
+        """
+        box.Set(names)
+        for i, name in enumerate(names):
+            box.Check(i, name not in hidden)
+        box.SetMinSize((-1, -1))
+        box.InvalidateBestSize()
+        border = box.GetWindowBorderSize().height
+        row = (box.GetBestSize().height - border) / min(max(len(names), 3), 10)
+        h = border + int(round(row * len(names)))
+        box.SetMinSize((-1, h))
+        return h
+
+    def _nets(self):
+        """Give [(the name of the state, the network)] of the views of the
+        sweep: all the states (F30), or [(None, the network)]."""
+        if self._states:
+            return list(zip(self._states["names"], self._states["nets"]))
+        return [(None, self.net)]
+
+    @staticmethod
+    def _trace_label(name, state):
+        """Give the label of a trace, as "S21 (State 1)", or "S21" when the
+        run has no states."""
+        return name if state is None else "%s (%s)" % (name, state)
+
+    def _combos(self, names):
+        """Give [(label, name, the index of the state)] of each name in
+        each state, in the order of `names`."""
+        return [(self._trace_label(name, state), name, i)
+                for name in names
+                for i, (state, _) in enumerate(self._nets())]
+
+    def _sweep(self, names, box=None):
+        """Give [(label, name, network, colour)] of the traces that the
+        view shows: each name of `names` in each state.
+
+        The check boxes of the traces get the names of `box` (default
+        `names`), and the check boxes of the states get the states. A trace
+        shows when the two boxes are set. The colour comes from the position
+        of the trace in all the traces. Thus a trace keeps its colour when
+        the user hides another one.
+        """
+        box = names if box is None else box
+        self._labels.extend(box)
+        nets = self._nets()
+        out = []
+        for i, (label, name, s) in enumerate(self._combos(names)):
+            state, net = nets[s]
+            if (name in box and name not in self._hidden
+                    and state not in self._hidden_states):
+                out.append((label, name, net, "C%d" % i))
+        return out
+
+    def _plot_phase_diff(self, ax):
+        """Show the phase of each trace less the phase of the reference
+        trace (the Reference choice). The reference is a flat line at 0.
+
+        The difference is continuous across the sweep, and in -180 to 180
+        degrees at "Define at". For a phase shifter, with S21 of State 1 as
+        the reference, the difference of each state is its shift. The
+        reference has no check box. With states, the name of the reference
+        keeps its box, because the other states of that name are traces.
+        """
+        import numpy as np
+        nets = self._nets()
+        names = _s_names(nets[0][1])
+        ref = self.ref_choice.GetStringSelection()
+        combos = self._combos(names)
+        idx = next(i for i, c in enumerate(combos) if c[0] == ref)
+        _, ref_name, s = combos[idx]
+        ref_net = nets[s][1]
+        rj, rk = int(ref_name[1]) - 1, int(ref_name[2]) - 1
+        ref_ph = np.unwrap(np.angle(ref_net.s[:, rj, rk]))
+        box = names if len(nets) > 1 else [n for n in names if n != ref_name]
+        f_at = _define_at(self.model) or float(np.mean(ref_net.f))
+        ax.plot(ref_net.f / 1e9, np.zeros(len(ref_net.f)),
+                color="C%d" % idx, label=ref)
+        for label, name, n, c in self._sweep(names, box):
+            if label == ref:
+                continue
+            j, k = int(name[1]) - 1, int(name[2]) - 1
+            y = np.degrees(np.unwrap(np.angle(n.s[:, j, k]))
+                           - np.interp(n.f, ref_net.f, ref_ph))
+            i = int(np.argmin(np.abs(n.f - f_at)))
+            y = y - 360.0 * np.round(y[i] / 360.0)
+            ax.plot(n.f / 1e9, y, color=c, label=label)
+        ax.set_title(PHASE_DIFF_VIEW)
+        ax.set_ylabel("\N{DEGREE SIGN}")
+        _legend(ax)
 
     def _plot_board(self, ax):
         """Show the top view of the model.
@@ -2372,32 +3352,34 @@ class ResultsFrame(wx.Frame):
         f_ghz = np.asarray(d["freq_hz"], float) / 1e9
         z_all = []
         nums = sorted(d["ports"], key=int)
-        for num in nums:
+        for n, num in enumerate(nums):
             p = d["ports"][num]
-            re, im = (np.asarray(p["Z0_real"], float),
-                      np.asarray(p["Z0_imag"], float))
-            z_all += [re, im]
             # One port does not have a tag in the legend, because the name
-            # of the port adds nothing.
+            # of the port adds nothing. Re and Im of a port share a colour.
             tag = " (Port %s)" % num if len(nums) > 1 else ""
-            ln, = ax.plot(f_ghz, re, label="Re(Z0)" + tag)
-            ax.plot(f_ghz, im, "--", lw=1.0, color=ln.get_color(),
-                    label="Im(Z0)" + tag)
+            for part, ls, lw in (("real", "-", None), ("imag", "--", 1.0)):
+                name = "%s(Z0)%s" % (part[:2].title(), tag)
+                if not self._keep(name):
+                    continue
+                z = np.asarray(p["Z0_" + part], float)
+                z_all.append(z)
+                ax.plot(f_ghz, z, ls, lw=lw, color="C%d" % n, label=name)
 
-        lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
-        pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
-        ax.set_ylim(lo - pad, hi + pad)
+        if z_all:
+            lo, hi = np.percentile(np.concatenate(z_all), [2, 98])
+            pad = max(0.2 * (hi - lo), 0.05 * max(abs(hi), 1.0))
+            ax.set_ylim(lo - pad, hi + pad)
         ax.set_ylabel("Impedance / ohm")
-        ax.legend(fontsize=8)
+        _legend(ax, fontsize=8)
         ax.set_title("Line Impedance")
 
     def _dump_z(self, port):
         """Give the z of the plane of the field dump, in mm.
 
-        `runner.build` puts the dump at the middle of the substrate between
-        the layer of the EXCITED port and the layer below it: `0.5 * (z_top
-        + z_ref)`. The title of the view names the value, because a field
-        picture with no plane is a picture of nothing.
+        `openems_runner.build` puts the dump at the middle of the substrate
+        between the layer of the EXCITED port and the layer below it. That
+        is `0.5 * (z_top + z_ref)`. The title of the view names the value,
+        because a field picture with no plane is a picture of nothing.
         """
         z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
         ports = self.model["ports"]
@@ -2406,7 +3388,8 @@ class ResultsFrame(wx.Frame):
 
     def _plot_field(self, kind, port=None):
         """Show an animation of the wave on the middle plane of the
-        substrate.
+        substrate, or of the current on a copper layer. A current view is
+        "J:" and the layer, in A/m: the current of the sheet.
 
         The picture is the magnitude of the field vector at one phase, in
         the style of CST. The scale goes from zero to the largest value of
@@ -2459,10 +3442,18 @@ class ResultsFrame(wx.Frame):
         # hides the dimension of a step.
         bar.ax.set_yticklabels(["%.3g" % t for t in ticks], fontsize=7)
 
-        top = self.model["ports"][0]["layer"]
+        # A current view (F4) shows the copper of its own layer.
+        current = kind.startswith("J:")
+        top = kind[2:] if current else self.model["ports"][0]["layer"]
+        # A pour with holes is ONE fractured outline, which goes to each hole
+        # along a slit with no width. When the code draws it with no change,
+        # the slit shows as a line from the edge of the pour to the hole.
         for poly in self.model["polygons"].get(top, []):
-            ax.plot([p[0] for p in poly] + [poly[0][0]],
-                    [p[1] for p in poly] + [poly[0][1]], color="0.2", lw=0.6)
+            outline, holes = solverenv.split_rings(poly)
+            for ring in [outline] + holes:
+                ax.plot([p[0] for p in ring] + [ring[0][0]],
+                        [p[1] for p in ring] + [ring[0][1]],
+                        color="0.2", lw=0.6)
         # **The ports, in the same lime as the Board layout view.** The
         # field views are the pictures that go out of the tool. A reviewer
         # on 2026-08-03 read the port at an incorrect position, because no
@@ -2475,21 +3466,34 @@ class ResultsFrame(wx.Frame):
             ax.annotate("P%d" % p["number"], (p["x"], p["y"]),
                         color="lime", fontsize=8, ha="center", va="center",
                         zorder=6)
+        # The frame is the area of the dump. The copper of a subregion (F20)
+        # goes into the absorber, out of the dump. Its outline then moved the
+        # limits of the axes out, and the view showed a white area with no
+        # field.
+        ax.set_xlim(float(x.min()), float(x.max()))
+        ax.set_ylim(float(y.min()), float(y.max()))
         ax.set_xlabel("x (mm)")
         ax.set_ylabel("y (mm)")
-        ax.set_title("%s-Field (f=%g GHz)%s"
-                     % (kind, f_hz / 1e9,
+        ax.set_title("%s (f=%g GHz)%s"
+                     % ("Current on %s" % top if current else
+                        "%s-Field" % kind, f_hz / 1e9,
                         " (Port %d)" % port if len(ports) > 1 else ""),
                      fontsize=10)
         ax.set_aspect("equal")
 
-        # The block of numbers at the left. The PLANE goes with them. It is
-        # the plane that `runner.build` dumps: the middle of the substrate
-        # between the layer of the excited port and the layer below it. A
-        # field picture with no plane shows nothing.
+        # The block of numbers at the left. The PLANE goes with them. It is the
+        # plane that `openems_runner.build` dumps: the middle of the substrate
+        # between the layer of the excited port and the layer below it. A field
+        # picture with no plane shows nothing.
         head = ("Frequency: %.2f GHz\n" % (f_hz / 1e9))
-        tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(substrate mid-plane)"
-                % (vmax, unit, self._dump_z(port)))
+        if current:
+            z_of = {c["name"]: c["z"] for c in self.model["copper_layers"]}
+            tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n(copper %s)"
+                    % (vmax, unit, z_of.get(top, 0.0), top))
+        else:
+            tail = ("\nMaximum: %.4g %s\nPlane: z=%.2f mm\n"
+                    "(substrate mid-plane)"
+                    % (vmax, unit, self._dump_z(port)))
         info = info_ax.text(0.0, 0.5, head + "Phase: 0\N{DEGREE SIGN}" + tail,
                             fontsize=9, va="center", ha="left",
                             linespacing=1.8)
@@ -2500,8 +3504,9 @@ class ResultsFrame(wx.Frame):
                           % round(360.0 * i / frames) + tail)
             return (mesh, info)
 
+        self._frame_step = (step, frames)
         self._anim = FuncAnimation(self.figure, step, frames=frames,
-                                   interval=60, blit=False,
+                                   interval=FRAME_MS, blit=False,
                                    cache_frame_data=False)
 
     def _plot_farfield3d(self, ff, ptag="", pnum=None):
@@ -2593,6 +3598,10 @@ class ResultsFrame(wx.Frame):
             if mis is not None:
                 lines.append("Tot. Effic. : %.4f dB" % (rad_db + mis))
         lines.append("Dir. : %.3f dBi" % float(D.max()))
+        # The XPD of the runner is at the largest D of this grid.
+        if ff.get("xpd_dB") is not None:
+            lines.append("XPD : %.1f dB" % ff["xpd_dB"])
+            lines.append("Ludwig 3 ref. : %g deg." % ff["ludwig3_ref_deg"])
         info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
                      va="center", ha="left", linespacing=1.8)
 
@@ -2615,13 +3624,18 @@ class ResultsFrame(wx.Frame):
     def _plot_farfield(self, ff, cut, ptag=""):
         """Show one polar cut of the directivity in absolute dBi.
 
-        The style is the style of CST.
+        The style is the style of CST. **A far field with the two parts of
+        Ludwig 3** (`solverenv.polarization`) shows three traces: Abs, Co
+        and Cross, each with a check box. The block of text then gives the
+        reference of Ludwig 3 and the XPD at the main lobe of the cut. A
+        previous far field has Abs only, with its previous title.
         """
         import numpy as np
         c = ff["cuts"][cut]
         ang_deg = np.asarray(c["angle_deg"], float)
         D = np.asarray(c["D_dBi"], float)
         phi_cut = cut.startswith("Phi")
+        pol = "D_co_dBi" in c and "D_cross_dBi" in c
 
         gs = self.figure.add_gridspec(1, 2, width_ratios=[2.4, 1.0])
         ax = self.figure.add_subplot(gs[0], projection="polar")
@@ -2630,7 +3644,19 @@ class ResultsFrame(wx.Frame):
 
         peak = float(D.max())
         rmin = peak - 40.0
-        ax.plot(np.radians(ang_deg), np.maximum(D, rmin), color="tab:red")
+        if not pol:
+            ax.plot(np.radians(ang_deg), np.maximum(D, rmin),
+                    color="tab:red")
+        else:
+            for name, key in (("Abs", "D_dBi"), ("Co", "D_co_dBi"),
+                              ("Cross", "D_cross_dBi")):
+                col = self._keep(name)
+                if col:
+                    ax.plot(np.radians(ang_deg),
+                            np.maximum(np.asarray(c[key], float), rmin),
+                            color=col, label=name)
+            _legend(ax, loc="lower left", bbox_to_anchor=(-0.18, -0.12),
+                    fontsize=8)
         ax.set_theta_zero_location("N")
         ax.set_thetagrids(range(0, 360, 30),
                           labels=[str(a) for a in range(0, 360, 30)])
@@ -2638,7 +3664,8 @@ class ResultsFrame(wx.Frame):
         ax.set_rlim(rmin, peak + 3)
         ax.set_rticks(np.arange(np.ceil(rmin / 10.0) * 10.0,
                                 peak + 3, 10.0))
-        ax.set_title("Farfield Directivity Abs (%s)%s" % (cut, ptag))
+        ax.set_title("Farfield Directivity %s(%s)%s"
+                     % ("" if pol else "Abs ", cut, ptag))
         ax.set_xlabel("%s / \N{DEGREE SIGN} vs. dBi"
                       % ("Theta" if phi_cut else "Phi"))
 
@@ -2649,5 +3676,13 @@ class ResultsFrame(wx.Frame):
                  "Angular width (3 dB) = %.1f deg." % st["width"]]
         if st["sll"] is not None:
             lines.append("Side lobe level = %.1f dB" % st["sll"])
+        if pol:
+            # The XPD at the main lobe of THIS cut: co-pol less cross-pol
+            # in the direction of the peak of Abs.
+            i0 = int(np.argmax(D))
+            lines.append("Ludwig 3 ref. = %g deg." % ff["ludwig3_ref_deg"])
+            lines.append("XPD (main lobe) = %.1f dB"
+                         % (float(c["D_co_dBi"][i0])
+                            - float(c["D_cross_dBi"][i0])))
         info_ax.text(0.0, 0.5, "\n".join(lines), fontsize=9,
                      va="center", ha="left", linespacing=1.8)

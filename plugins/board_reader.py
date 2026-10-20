@@ -7,17 +7,16 @@ KiCad. z=0 is at the bottom of the board. The module uses the pcbnew SWIG
 bindings of KiCad 10. The IPC API is not an alternative at this time: IPC
 has no function that makes polygons from tracks, arcs or text.
 """
-import math
 import os
 import re
 
 import pcbnew
 
-# The depth of the PML band. `extract` sets the dimension of the domain
-# with it, and `runner._mesh` puts the cells of the band in it. Thus the
-# two must read the same rule. `solverenv` imports only `math` and `os`.
-# The plugin loads this file as a module of a package, and the self-test
-# below runs it as a script. Thus the import has the two alternatives.
+# The depth of the PML band. `extract` sets the dimension of the domain with
+# it, and `openems_runner._mesh` puts the cells of the band in it. Thus the two
+# must read the same rule. `solverenv` imports only `math` and `os`. The plugin
+# loads this file as a module of a package, and the self-test below runs it as
+# a script. Thus the import has the two alternatives.
 try:
     from . import solverenv
 except ImportError:                      # run as a top-level module
@@ -44,7 +43,12 @@ except ImportError:                      # run as a top-level module
 #      version 2 puts a band of margin/8 at the edge of such a region.
 #      The absorber is then in an incorrect position, and the mesh is
 #      not the mesh of the numbers of the rigs.
-MODEL_VERSION = 3
+#   4  2026-10-06  a port of type "coax" (a through-hole pad, fed across
+#      the gap on one side of the board). A runner of version 3 reads it
+#      as a lumped port from the pad to the adjacent layer. That port
+#      drives the pad against its own ring on that layer, and the run
+#      gives a number with no message.
+MODEL_VERSION = 4
 
 # the default values if the board has no stackup: FR4
 DEF_EPSILON, DEF_LOSS_TAN, DEF_CU_T = 4.5, 0.02, 0.035
@@ -108,13 +112,24 @@ _AMBIGUOUS_PKG = {"0402": ("01005", None), "0603": ("0201", 0.20)}
 # a CPW on a PCB is usually 0.1 mm to 0.5 mm. Copper that is more distant
 # than this limit is not a coplanar ground.
 MAX_CPW_GAP = 2.0
+# The line port of openEMS is symmetric. A stripline strip is at the center
+# between its two planes, and a CPW has the same gap on its two sides. A
+# port with two sides that are different by more than this part,
+# |a - b| / (a + b), gets a warning.
+ASYM_WARN = 0.25
+# The largest gap of a coaxial feed: between a through-hole pad and the
+# copper around it, on the side of the connector. The port is a lumped
+# port across that gap, thus the gap must be small against the
+# wavelength. 3 mm is 0.13 of a wavelength in FR-4 at 6 GHz. The usual
+# clearance of an SMA pin is 0.2 mm to 1.5 mm.
+MAX_COAX_GAP = 3.0
 
 
 def _parse_value(text, kind):
     """Change '4k7', '4.7k', '100nF' or '3n3' into a float in SI units.
 
     The units are ohm, H or F. `kind` is 'R', 'L' or 'C'. The function
-    obeys the RKM convention, where a letter shows the position of the
+    obeys the RKM convention. In it, a letter shows the position of the
     decimal point (4R7 = 4.7 ohm, 3n3 = 3.3 nH or 3.3 nF). If the text is
     DNP, or if the function cannot read the text, it gives None.
 
@@ -129,12 +144,18 @@ def _parse_value(text, kind):
     tok = words[0] if words else ""            # this removes " 1%" and more
     # **The unit can be a word of its own**: "10 kOhm", "4.7 uF", "10 nH".
     # The first word is then a bare number, and the prefix goes away with
-    # NO message: "10 kOhm" gave 10 ohm and "4.7 uF" gave 4.7 F. Thus
+    # NO message. "10 kOhm" gave 10 ohm, and "4.7 uF" gave 4.7 F. Thus
     # attach the second word when it starts with a prefix or with a unit
     # letter. A tolerance starts with a DIGIT ("1%"), and a voltage rating
     # also starts with a digit ("25V"). Thus the code does not attach them.
     if len(words) > 1 and words[1][:1] in _PREFIX + "rRfFhHoO":
         tok += words[1]
+    # A rating can also attach with a slash: "10uF/16V", or "10uF/" when
+    # the rating field is empty. Remove all the text after the slash.
+    tok = tok.split("/", 1)[0]
+    # "meg" is the mega of SPICE: "1meg" and "1Meg". Without this line the
+    # 'm' is milli, and "1.eg" is not a number, thus the part had no value.
+    tok = re.sub("meg", "M", tok, flags=re.IGNORECASE)
     tok = tok.replace(",", ".").replace("Ω", "").replace("Ω", "")
     for u in ("ohm", "OHM", "Ohm"):
         tok = tok.replace(u, "")
@@ -297,7 +318,7 @@ def _stackup_from_text(text):
     if i < 0:
         return None
     depth, in_str, j = 0, False, i
-    while j < len(text):  # find the end parenthesis; ignore those in strings
+    while j < len(text):  # find the end parenthesis, not one in a string
         c = text[j]
         if c == '"':
             in_str = not in_str
@@ -410,7 +431,7 @@ def unsaved_stackup(board):
             % "\n".join("  - " + d for d in diffs))
     # `_stackup` uses the FR4 default values for a stackup that is missing,
     # or that has copper layers that are different from the board. Tell the
-    # user here, thus the FR-4 preset of the dialog is not a surprise.
+    # user here, thus the user expects the FR-4 preset of the dialog.
     for which, items in (("new", live), ("saved", saved)):
         if items is None or cu_names != [it["name"] for it in items
                                          if it["kind"] == "copper"]:
@@ -511,123 +532,36 @@ def _stackup(board, substrate=None, live=False):
     return copper, diel, source
 
 
-# The code below makes polygons from the tracks, the arcs, the via rings
-# and the graphic shapes with simple mathematics. This is a result of KiCad
-# 8. In KiCad 8, all the TransformShapeToPolygon functions but the function
-# of PAD used the ERROR_LOC enum, which SWIG did not wrap. KiCad 10 has
-# pcbnew.ERROR_INSIDE. Thus BOARD.ConvertBrdLayerToPolygonalContours can
-# replace all of this code, and it can also include the text.
-
 def _add_outline(ps, pts):
     ps.NewOutline()
     for x, y in pts:
         ps.Append(int(x), int(y))
 
 
-def _circle_pts(cx, cy, r, n=32):
-    return [(cx + r * math.cos(2 * math.pi * i / n),
-             cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
-
-
-def _stadium_pts(ax, ay, bx, by, w, n=8):
-    """Make the polygon of a track: a segment that has round ends."""
-    r = w / 2.0
-    if math.hypot(bx - ax, by - ay) < 1:
-        return _circle_pts(ax, ay, r)
-    th = math.atan2(by - ay, bx - ax)
-    pts = [(bx + r * math.cos(th - math.pi / 2 + math.pi * i / n),
-            by + r * math.sin(th - math.pi / 2 + math.pi * i / n))
-           for i in range(n + 1)]
-    pts += [(ax + r * math.cos(th + math.pi / 2 + math.pi * i / n),
-             ay + r * math.sin(th + math.pi / 2 + math.pi * i / n))
-            for i in range(n + 1)]
-    return pts
-
-
-def _add_arc(ps, c, r, a0, sweep, width):
-    n = max(2, int(abs(sweep) / math.radians(10)))
-    pts = [(c.x + r * math.cos(a0 + sweep * i / n),
-            c.y + r * math.sin(a0 + sweep * i / n)) for i in range(n + 1)]
-    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-        _add_outline(ps, _stadium_pts(ax, ay, bx, by, width))
-
-
-def _add_track(ps, t):
-    if isinstance(t, pcbnew.PCB_ARC):
-        c = t.GetCenter()
-        a0 = math.atan2(t.GetStart().y - c.y, t.GetStart().x - c.x)
-        _add_arc(ps, c, t.GetRadius(), a0,
-                 math.radians(t.GetAngle().AsDegrees()), t.GetWidth())
-    else:
-        a, b = t.GetStart(), t.GetEnd()
-        _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, t.GetWidth()))
-
-
-def _stroke(ps, pts, width):
-    """Make a closed outline from a chain of track polygons."""
-    for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]):
-        _add_outline(ps, _stadium_pts(ax, ay, bx, by, width))
-
-
-def _add_shape(ps, s):
-    """Add a graphic shape on a copper layer (an antenna, a logo, ...)."""
-    t = s.GetShape()
-    if t == pcbnew.SHAPE_T_POLY:
-        poly = s.GetPolyShape()
-        if s.IsSolidFill():
-            # ponytail: this code ignores the width of the outline around
-            # a filled polygon. Add the width if a simulation must agree
-            # with the fabrication data.
-            ps.BooleanAdd(poly)
-        else:
-            for i in range(poly.OutlineCount()):
-                ol = poly.Outline(i)
-                _stroke(ps, [(ol.CPoint(j).x, ol.CPoint(j).y)
-                             for j in range(ol.PointCount())], s.GetWidth())
-    elif t == pcbnew.SHAPE_T_RECT:
-        pts = [(c.x, c.y) for c in s.GetRectCorners()]
-        if s.IsSolidFill():
-            _add_outline(ps, pts)
-        else:
-            _stroke(ps, pts, s.GetWidth())
-    elif t == pcbnew.SHAPE_T_CIRCLE:
-        c, r, w = s.GetCenter(), s.GetRadius(), s.GetWidth()
-        if s.IsSolidFill():
-            _add_outline(ps, _circle_pts(c.x, c.y, r + w / 2.0))
-        else:  # a ring
-            ring = pcbnew.SHAPE_POLY_SET()
-            _add_outline(ring, _circle_pts(c.x, c.y, r + w / 2.0))
-            hole = pcbnew.SHAPE_POLY_SET()
-            _add_outline(hole, _circle_pts(c.x, c.y, max(r - w / 2.0, 0)))
-            ring.BooleanSubtract(hole)
-            ps.BooleanAdd(ring)
-    elif t == pcbnew.SHAPE_T_SEGMENT:
-        a, b = s.GetStart(), s.GetEnd()
-        _add_outline(ps, _stadium_pts(a.x, a.y, b.x, b.y, s.GetWidth()))
-    elif t == pcbnew.SHAPE_T_ARC:
-        c = s.GetCenter()
-        a0 = math.atan2(s.GetStart().y - c.y, s.GetStart().x - c.x)
-        _add_arc(ps, c, s.GetRadius(), a0,
-                 math.radians(s.GetArcAngle().AsDegrees()), s.GetWidth())
-    elif t == pcbnew.SHAPE_T_BEZIER:
-        s.RebuildBezierToSegmentsPointsList(5000)  # maximum error of 5 um
-        pts = [(p.x, p.y) for p in s.GetBezierPoints()]
-        if len(pts) >= 3 and s.IsSolidFill():
-            _add_outline(ps, pts)
-        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-            _add_outline(ps, _stadium_pts(ax, ay, bx, by, s.GetWidth()))
-    # This function makes no polygons from text. extract() gives a warning.
-
-
-def _copper_polys(board, layer_id, region, max_err):
+def _copper_polys(board, layer_id, region):
     """Give the copper of one layer in `region`: (polygons, n_clipped).
 
-    The function fractures the polygons. n_clipped is the number of items
-    that are not zones and that go across the boundary of the region. The
-    absorber is the end of their cut copper, as a matched load. Thus, if
-    the cut copper is the structure that you test, the S-parameters look
-    good but they are incorrect. This occurred with a meander antenna at
-    the default margin.
+    **KiCad makes the copper** (B3 F10 P9).
+    `BOARD.ConvertBrdLayerToPolygonalContours` gives each item of the layer
+    in C++, with the maximum error of the board. The items are the tracks,
+    arcs, vias, pads, footprint shapes, zones, board shapes and the text on
+    copper.
+    The code before it made the polygons itself. On the boards of the rigs
+    the two agree to 0.13%, and the curves of KiCad are more accurate. The
+    code before made a non-plated hole into copper (11% of the copper of a
+    board with 4 mounting holes). Also, it did not keep the outline of a
+    filled shape (2% of a filled rectangle). **`Simplify` must come after the
+    converter**: before it, a track and its pads overlap.
+
+    The converter has no filter for the region, thus the code clips its
+    result. It gives no data about each item, thus the count of the items
+    that the region cuts comes from their bounding boxes. n_clipped is the
+    number of items that are not zones and that go across the boundary of
+    the region. The absorber is the end of their cut copper, as a matched
+    load. Thus, if the cut copper is the structure that you test, the
+    S-parameters look good but they are incorrect. This occurred with a
+    meander antenna at the default margin. The function fractures the
+    polygons.
     """
     n_clipped = 0
 
@@ -637,46 +571,26 @@ def _copper_polys(board, layer_id, region, max_err):
                     and bb.GetTop() >= region.GetTop()
                     and bb.GetBottom() <= region.GetBottom())
 
-    ps = pcbnew.SHAPE_POLY_SET()
+    def count(item):
+        nonlocal n_clipped
+        bb = item.GetBoundingBox()
+        if item.IsOnLayer(layer_id) and bb.Intersects(region):
+            n_clipped += crosses(bb)
+
     for t in board.GetTracks():
-        if not (t.IsOnLayer(layer_id)
-                and t.GetBoundingBox().Intersects(region)):
-            continue
-        n_clipped += crosses(t.GetBoundingBox())
-        if isinstance(t, pcbnew.PCB_VIA):
-            try:
-                flashed = t.FlashLayer(int(layer_id))
-            except Exception:
-                flashed = True
-            if flashed:
-                # A via of KiCad 10 has one padstack for each layer. Thus
-                # you must get the annular ring layer by layer.
-                # PCB_VIA.GetWidth() without a layer also causes a debug
-                # assert.
-                pos = t.GetPosition()
-                _add_outline(ps, _circle_pts(pos.x, pos.y,
-                                             t.GetWidth(int(layer_id)) / 2.0))
-        else:
-            _add_track(ps, t)
+        count(t)
     for d in board.GetDrawings():
-        if (isinstance(d, pcbnew.PCB_SHAPE) and d.IsOnLayer(layer_id)
-                and d.GetBoundingBox().Intersects(region)):
-            n_clipped += crosses(d.GetBoundingBox())
-            _add_shape(ps, d)
+        if isinstance(d, pcbnew.PCB_SHAPE):
+            count(d)
     for fp in board.GetFootprints():
         for pad in fp.Pads():
-            if pad.IsOnLayer(layer_id) and pad.GetBoundingBox().Intersects(region):
-                n_clipped += crosses(pad.GetBoundingBox())
-                pad.TransformShapeToPolygon(ps, layer_id, 0, max_err)
+            count(pad)
         for it in fp.GraphicalItems():
-            if (isinstance(it, pcbnew.PCB_SHAPE) and it.IsOnLayer(layer_id)
-                    and it.GetBoundingBox().Intersects(region)):
-                n_clipped += crosses(it.GetBoundingBox())
-                _add_shape(ps, it)
-    for zn in board.Zones():
-        if zn.GetIsRuleArea() or not zn.IsOnLayer(layer_id) or not zn.IsFilled():
-            continue
-        ps.BooleanAdd(zn.GetFilledPolysList(layer_id))
+            if isinstance(it, pcbnew.PCB_SHAPE):
+                count(it)
+
+    ps = pcbnew.SHAPE_POLY_SET()
+    board.ConvertBrdLayerToPolygonalContours(layer_id, ps)
     ps.Simplify()
 
     rect = pcbnew.SHAPE_POLY_SET()
@@ -707,7 +621,7 @@ def _ray_hits(px, py, axis, sign, polys):
     direction of `sign`. The polygons are the copper of one layer. Thus
     they are fractured, and one polygon is not on top of a different one.
 
-    The function uses the half-open rule of the standard crossing test.
+    The function uses the half-open rule of the standard even-odd test.
     Thus a ray through a vertex gives one hit, and not two. The parity of
     the hits stays correct: an odd number of hits shows that the start
     point is in the copper.
@@ -728,7 +642,14 @@ def _ray_hits(px, py, axis, sign, polys):
     return sorted(hits)
 
 
-def _coplanar_gap(polys, x, y, direction):
+def _median(values):
+    """Give the median of `values`, rounded to 1e-5."""
+    v = sorted(values)
+    n = len(v)
+    return round(0.5 * (v[(n - 1) // 2] + v[n // 2]), 5)
+
+
+def _coplanar_gap(polys, x, y, direction, sides=False):
     """Measure the gap between a feed line and the copper at its sides.
 
     A CPW port must have this value. The function sends a ray to each side
@@ -738,16 +659,22 @@ def _coplanar_gap(polys, x, y, direction):
 
     The function gives None if the copper is not on the two sides, or if it
     is more distant than MAX_CPW_GAP. Then the structure is not a CPW.
+
+    With `sides`, it gives (the gap, the median gap of the +side, the median
+    gap of the -side), or three None. extract() gives a warning when the two
+    sides are not the same, because the CPW port has the same gap on its two
+    sides.
     """
+    none = (None, None, None) if sides else None
     if not direction or not polys:
-        return None
+        return none
     axis = 1 if direction[0] else 0  # the ray goes across the feed line
     dx, dy = direction
     # Get samples along the line and not at the pad. Frequently, a pad is
     # wider than the line. A sample that is not on copper gives a number of
-    # hits that is not odd, and the code ignores it. (The line stops before
-    # that point.)
-    gaps = []
+    # hits that is not odd, and the code does not use it. (The line stops
+    # before that point.)
+    side = {1: [], -1: []}
     for step in (0.4, 0.8, 1.2, 1.6, 2.0):
         px, py = x + dx * step, y + dy * step
         pair = []
@@ -757,14 +684,14 @@ def _coplanar_gap(polys, x, y, direction):
                 break
             if len(hits) < 2 or hits[1] - hits[0] > MAX_CPW_GAP:
                 break  # no copper at the side of the line: not a CPW
-            pair.append(hits[1] - hits[0])
+            pair.append((sign, hits[1] - hits[0]))
         if len(pair) == 2:
-            gaps += pair
-    if len(gaps) < 4:  # 2 sides at 2 positions or more
-        return None
-    gaps.sort()
-    n = len(gaps)
-    return round(0.5 * (gaps[(n - 1) // 2] + gaps[n // 2]), 5)
+            for sign, g in pair:
+                side[sign].append(g)
+    if len(side[1]) < 2:  # 2 sides at 2 positions or more
+        return none
+    gap = _median(side[1] + side[-1])
+    return (gap, _median(side[1]), _median(side[-1])) if sides else gap
 
 
 def copper_along(polys, x, y, direction):
@@ -802,7 +729,7 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
 
     The function moves along the direction in steps. It gives the distance
     to the LAST point that is on copper. An odd number of ray hits shows
-    that a point is in the copper, which is the standard crossing test. The
+    that a point is in the copper, which is the standard even-odd test. The
     steps are more reliable than one ray. `Fracture` divides the copper
     into polygons that share an edge, thus a single ray can give a hit
     where the copper does not end.
@@ -832,6 +759,135 @@ def copper_run(polys, x, y, direction, limit=60.0, step=0.5):
             return round(lo, 4)
         d += step
     return None
+
+
+def _is_through(pad):
+    """Tell if `pad` is a plated through-hole pad: a pad with a barrel."""
+    return pad.GetAttribute() == pcbnew.PAD_ATTRIB_PTH and pad.HasHole()
+
+
+def _barrels(board, region, z_top, z_bottom):
+    """Give the barrel of each plated through-hole pad in `region`, in the
+    format of a via: x, y, r, z0, z1.
+
+    **A plated hole is a barrel of copper from the top layer to the bottom
+    layer.** Before this, the model had the barrels of the vias only. The
+    rings of a through-hole pad were then pieces of copper on each layer
+    that touch nothing. Thus the pin of a connector did not connect its two
+    sides, and its ground pins did not connect the planes.
+
+    The barrel is a cylinder of the drill. A slot gets the smaller of its
+    two dimensions. The hole is at the position of the pad: the offset of
+    a pad moves its copper and not its hole.
+    """
+    out = []
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if not _is_through(pad):
+                continue
+            if not pad.GetBoundingBox().Intersects(region):
+                continue
+            drill = pad.GetDrillSize()
+            pos = pad.GetPosition()
+            out.append({
+                "x": _mm(pos.x), "y": -_mm(pos.y),
+                "r": _mm(min(drill.x, drill.y)) / 2.0,
+                "z0": z_bottom, "z1": z_top,
+            })
+    return out
+
+
+def _coax_gap(polys, x, y, direction, reach):
+    """Give (r_in, r_out) of the gap around a through-hole pad, or None.
+
+    The ray starts at the axis of the hole (x, y) and goes along
+    `direction`. r_in is where it goes out of the copper of the pad, and
+    r_out is where it gets to the next copper. That copper is the outer
+    conductor of the connector: a plane, a pour or a ground pad.
+
+    **The pad must end on this axis in `reach`**, which is half of the
+    pad on the axis. When the copper goes farther, the pad is a part of a
+    track, a patch or a pour on that layer. That is not a gap, thus a
+    connector cannot be on that axis. The gap must also be
+    `MAX_COAX_GAP` or less.
+
+    KiCad gives the copper of a pad with no hole in it. A layer that has
+    a hole at the axis is also correct: the first hit is then the edge of
+    the hole.
+    """
+    if not polys:
+        return None
+    axis = 0 if direction[0] else 1
+    sign = direction[0] or direction[1]
+    hits = _ray_hits(x, y, axis, sign, polys)
+    i = 0
+    if len(hits) % 2 == 0:  # the axis is not on copper: a hole
+        if not hits or hits[0] > reach:
+            return None
+        i = 1
+    if len(hits) < i + 2 or hits[i] > reach:
+        return None
+    r_in, r_out = hits[i], hits[i + 1]
+    if not 1e-6 < r_out - r_in <= MAX_COAX_GAP:
+        return None
+    return round(r_in, 5), round(r_out, 5)
+
+
+def _coax_sides(cx, cy, half, polygons, outer, centre):
+    """Give the coaxial feed of each outer layer of a through-hole pad:
+    {layer: {"dir", "r_in", "r_out", "cx", "cy"}}.
+
+    (cx, cy) is the axis of the hole, and `half` is half of the pad in x
+    and in y. `outer` has the names of the top and the bottom copper
+    layer, and `centre` is the centre of the board. On each layer, the
+    four directions of the axes get a gap from `_coax_gap`, and the
+    function selects the smallest gap. **Two gaps that are almost the same
+    (5%) are equal**, and the function then selects the direction AWAY
+    from the centre of the board. A round clearance gives four equal gaps. The
+    rule then gives the two feeds of a dual-polarized patch the same geometry
+    in their own axis.
+    """
+    out = {}
+    for layer in outer:
+        best = None
+        for d in ([1, 0], [-1, 0], [0, 1], [0, -1]):
+            axis = 0 if d[0] else 1
+            got = _coax_gap(polygons.get(layer, []), cx, cy, d,
+                            half[axis] + 0.05)
+            if not got:
+                continue
+            gap = got[1] - got[0]
+            away = (d[0] * (cx - centre[0]) + d[1] * (cy - centre[1])) > 0
+            key = (gap, not away)
+            if best is None or gap < 0.95 * best[0][0] or (
+                    gap <= 1.05 * best[0][0] and key[1] < best[0][1]):
+                best = (key, d, got)
+        if best:
+            out[layer] = {"dir": best[1], "r_in": best[2][0],
+                          "r_out": best[2][1], "cx": cx, "cy": cy}
+    return out
+
+
+def _reference_at_pad(p, names, polygons, box):
+    """Give (ref_layer, ref_layer2) of the port `p`, with a reference layer
+    that has copper at the pad.
+
+    `_port` reads only the stackup, thus the reference of a pad on an inner
+    layer is always the layer below it. When that layer has no copper at the
+    pad and the layer above has, the two change places. The ground plane of
+    such a board is above the strip. The layer below then becomes the second
+    plane of a stripline, and extract() tests it as it tests each second
+    plane. `names` are the copper layers from the top, and `box` is the box
+    of the pad.
+    """
+    i = names.index(p["layer"])
+    if not 0 < i < len(names) - 1:
+        return p["ref_layer"], p["ref_layer2"]
+    above, below = names[i - 1], p["ref_layer"]
+    if (not _touches(polygons.get(below, []), box)
+            and _touches(polygons.get(above, []), box)):
+        return above, (below if p["ref_layer2"] else None)
+    return p["ref_layer"], p["ref_layer2"]
 
 
 def _touches(polys, box):
@@ -960,12 +1016,12 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
 
     The result is (elements, warnings, notes). A warning is a problem
     that the user must see before the run. A note is a decision that the
-    run made by itself, and it goes to the Optimizations list of the run
+    run made by itself. It goes to the Optimizations list of the run
     and not into a message box. Each element is a box that bridges
     the gap between the two pads of the part. The box is parallel to the
     nearest Cartesian axis, because openEMS lets current flow along one
-    axis only. The function changes the values to SI units. It ignores the
-    parts in `skip_refs`, which have a port pad. It gives a warning for a
+    axis only. The function changes the values to SI units. It does not use
+    the parts in `skip_refs`, which have a port pad. It gives a warning for a
     part that has an unknown value, or that is not on one copper layer.
 
     A refdes that starts with R, L or C gives the TYPE of the part. The
@@ -986,7 +1042,7 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if ref in skip_refs:
             continue
         if not fp.GetBoundingBox().Intersects(region):
-            continue  # not in the simulated area: ignore it, with no warning
+            continue  # out of the simulated area: no element, no warning
         # The terminals are the pads that have a *number*. Many footprints
         # have more copper pads with no number, for mechanical strength or
         # for paste relief. These pads cannot hold a net, and they are not
@@ -999,10 +1055,10 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
         if len(pads) != 2:
             # Before, this code did not give messages. Thus a part that the
             # code did not find, with no message, was the problem that was
-            # the hardest to find. Give a warning only if the value is also
-            # correct. Then a default "REF**", or a connector with a name
-            # that starts with R, gives no message. But a 50-ohm part that
-            # has 3 terminals gives a warning.
+            # the most difficult to find. Give a warning only if the value is
+            # also correct. Then a default "REF**", or a connector with a name
+            # that starts with R, gives no message. But a 50-ohm part that has
+            # 3 terminals gives a warning.
             #
             # When the refdes does not give the type of a part, the part
             # gives no message here. A connector, a mounting hole or a
@@ -1017,10 +1073,13 @@ def _lumped_elements(board, region, copper_layers, skip_refs):
                     % (ref, fp.GetValue(), len(pads)))
             continue
         if any(p.GetAttribute() != pcbnew.PAD_ATTRIB_SMD for p in pads):
+            # The barrels of the pads are in the model (`_barrels`). But
+            # a lumped element is a box on ONE copper layer, between two
+            # pads on that layer.
             if kind:
                 warnings.append("%s: not an SMD part, thus RFsim does "
-                                "not model it (the model has no THT "
-                                "barrel)" % ref)
+                                "not model it (a lumped element is on one "
+                                "copper layer)" % ref)
             continue
         layer = _pad_layer(pads[0])
         if layer not in z_of or _pad_layer(pads[1]) != layer:
@@ -1154,11 +1213,18 @@ def _port(board, pad, number, copper_layers):
         "direction": direction,
         "track_width": track_w,
         "type": "lumped",  # the settings dialog writes a new value here
+        # A through-hole pad: the drill in mm, else None. extract() gives
+        # such a pad the gap of each side in "coax", and the side of its
+        # coaxial feed in "coax_side" (refer to `solverenv.coax_box`).
+        "drill": (_mm(min(pad.GetDrillSize().x, pad.GetDrillSize().y))
+                  if _is_through(pad) else None),
+        "coax": {},
+        "coax_side": None,
     }
 
 
 def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
-            f_stop=None, mesh=None):
+            f_stop=None, mesh=None, subregion=False):
     """Change a board into a dict: stackup, copper polygons, vias, ports.
 
     The function crops the geometry to the bounding box of the port pads
@@ -1176,10 +1242,13 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     runner puts the band in the area that this function kept for it. If one
     of the two is missing, the depth is `margin_mm`. That is the depth that
     the plugin made before 2026-09-20.
+
+    `subregion` (F20) makes the domain only the box of the port pads, and
+    not the full board. The copper, the vias and the R/L/C parts out of
+    it are not in the model, because each of them tests `region`.
     """
     copper_layers, diel_layers, stack_src = _stackup(board, substrate,
                                                      live_stackup)
-    max_err = int(getattr(board.GetDesignSettings(), "m_MaxError", 5000))
 
     first = pads[0].GetBoundingBox()
     region = pcbnew.BOX2I(first.GetPosition(), first.GetSize())
@@ -1189,8 +1258,13 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # the dimensions of the pad bbox cut the antennas. ponytail: the domain
     # is the full board. Use the bbox of the selection again if very large
     # boards make this operation too slow.
+    #
+    # **A subregion (F20) keeps the box of the port pads.** On a 4-layer
+    # board of GitHub PR #6 it decreased 564 polygons to 142, 258 vias to 98 and
+    # 44 parts to 12. The copper that its edge cuts ends in the absorber,
+    # as at the edge of the full domain.
     brd = board.GetBoardEdgesBoundingBox()
-    if brd.GetWidth() > 0 and brd.GetHeight() > 0:
+    if not subregion and brd.GetWidth() > 0 and brd.GetHeight() > 0:
         region.Merge(brd)
     # **The margin of clear air PLUS the depth of the PML band.** The inner
     # band is clear air and the outer band is the absorber. The code crops
@@ -1222,34 +1296,20 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     polygons = {}
     clipped = {}
     for c in copper_layers:
-        polys, n_clip = _copper_polys(board, c["id"], region, max_err)
+        polys, n_clip = _copper_polys(board, c["id"], region)
         if polys:
             polygons[c["name"]] = polys
         if n_clip:
             clipped[c["name"]] = n_clip
 
-    # _copper_polys does not model the text on copper. Give a warning; do
-    # not remove the copper with no message. KiCad 10 can correct this: it
-    # has ERROR_INSIDE, and ConvertBrdLayerToPolygonalContours includes
-    # the text.
     warnings = []
     if clipped:
         warnings.append(
             "Copper on %s goes across the edge of the simulation domain, "
             "and RFsim cuts it there. If this copper is a part of the "
-            "structure, increase the domain margin." % "/".join(clipped))
-    cu_ids = {c["id"] for c in copper_layers}
-    texts = list(board.GetDrawings())
-    for fp in board.GetFootprints():
-        texts += list(fp.GraphicalItems()) + [fp.Reference(), fp.Value()]
-    for it in texts:
-        if (isinstance(it, pcbnew.PCB_TEXT) and it.IsVisible()
-                and it.GetLayer() in cu_ids
-                and it.GetBoundingBox().Intersects(region)):
-            warnings.append(
-                "the text \"%s\" on %s is in the simulated area, but "
-                "RFsim does not model it as copper"
-                % (it.GetShownText(True), _lname(it.GetLayer())))
+            "structure, increase the domain margin%s."
+            % ("/".join(clipped), ", or use the full board" if subregion
+               else ""))
 
     z_of = {c["name"]: c["z"] for c in copper_layers}
     vias = []
@@ -1264,14 +1324,57 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 "z0": z_of.get(bot, 0.0),
                 "z1": z_of.get(top, copper_layers[0]["z"]),
             })
+    vias += _barrels(board, region, copper_layers[0]["z"],
+                     copper_layers[-1]["z"])
 
     ports = [_port(board, p, i + 1, copper_layers) for i, p in enumerate(pads)]
+    names = [c["name"] for c in copper_layers]
+    # **A through-hole pad is a coaxial feed** (`solverenv.coax_box`). Its
+    # port goes across the gap between the pad and the copper around it,
+    # on the side of the connector. The default side is the side of the
+    # footprint, when that side has a gap. The dialog lets the user select
+    # the other side.
+    brect = rect_mm(diel_box)
+    centre = (0.5 * (brect["x0"] + brect["x1"]),
+              0.5 * (brect["y0"] + brect["y1"]))
+    for p, pad in zip(ports, pads):
+        if not p["drill"]:
+            continue
+        pos, bb = pad.GetPosition(), pad.GetBoundingBox()
+        p["coax"] = _coax_sides(
+            _mm(pos.x), -_mm(pos.y),
+            (0.5 * _mm(bb.GetWidth()), 0.5 * _mm(bb.GetHeight())),
+            polygons, (names[0], names[-1]), centre)
+        own = names[-1] if pad.GetParentFootprint().IsFlipped() else names[0]
+        if p["coax"]:
+            p["coax_side"] = own if own in p["coax"] else next(
+                iter(p["coax"]))
+            p["type"] = "coax"
+        elif p["direction"]:
+            p["type"] = "msl"  # not "lumped": refer to the guard below
+    ref_notes = []
     # Measure the coplanar gap of each port. The copper of the layer must
     # be available first. Thus this operation comes after the extraction of
     # the polygons. A port that has a gap can use a CPW port.
     for p, pad in zip(ports, pads):
+        ref = p["ref_layer"]
+        p["ref_layer"], p["ref_layer2"] = _reference_at_pad(
+            p, names, polygons, _pad_box(pad))
+        if p["ref_layer"] != ref:
+            ref_notes.append(
+                "Port %d (%s): the reference layer is %s, above the pad, "
+                "because %s has no copper at the pad"
+                % (p["number"], p["label"], p["ref_layer"], ref))
         polys_l = polygons.get(p["layer"], [])
-        p["gap"] = _coplanar_gap(polys_l, p["x"], p["y"], p["direction"])
+        p["gap"], side_a, side_b = _coplanar_gap(
+            polys_l, p["x"], p["y"], p["direction"], sides=True)
+        if p["gap"] and abs(side_a - side_b) / (side_a + side_b) > ASYM_WARN:
+            warnings.append(
+                "Port %d (%s): the coplanar gap is %.3f mm on one side of "
+                "the line and %.3f mm on the other. A CPW port models the "
+                "same gap on the two sides, thus its Z0 is approximate."
+                % (p["number"], p["label"], min(side_a, side_b),
+                   max(side_a, side_b)))
         # How far the copper runs from the pad along the feed. The
         # runner caps the length of a de-embedded port with it: refer
         # to `copper_run`. None means "further than the limit", and the
@@ -1279,14 +1382,14 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         p["copper_run"] = copper_run(polys_l, p["x"], p["y"], p["direction"])
         # A stripline must have copper on the two planes. _port reads only
         # the stackup. Thus it gives a height for each strip on an inner
-        # layer, also when the second plane is empty above the pad. The
+        # layer, also when the second plane is empty at the pad. The
         # port then puts its voltage probes into open board. The guard
         # below tests the reference layer; this test is for the second
         # plane.
         if p["height"] and not _touches(polygons.get(p["ref_layer2"], []),
                                         _pad_box(pad)):
             warnings.append(
-                "Port %d (%s): there is no copper on %s above the pad, "
+                "Port %d (%s): there is no copper on %s at the pad, "
                 "thus this is not a stripline. The Stripline port type "
                 "is not available."
                 % (p["number"], p["label"], p["ref_layer2"]))
@@ -1294,11 +1397,11 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
         if not p["direction"]:
             # The gap of each candidate direction, for the manual feed
             # of the dialog. A drawn CPW has no track, and the dialog
-            # offers the CPW type only for a direction that has a gap.
+            # shows the CPW type only for a direction that has a gap.
             p["gaps"] = {key: _coplanar_gap(polys_l, p["x"], p["y"], d)
                          for key, d in (("+x", [1, 0]), ("-x", [-1, 0]),
                                         ("+y", [0, 1]), ("-y", [0, -1]))}
-        if p["height"] and p["asymmetry"] > 0.25:
+        if p["height"] and p["asymmetry"] > ASYM_WARN:
             warnings.append(
                 "Port %d (%s): the strip is not at the center between %s "
                 "and %s (%.0f%% off center). A Stripline port models a "
@@ -1310,9 +1413,29 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
     # touches a part of the pad. An antenna feed is at the edge of the
     # ground pour, thus a test on the *center* of the pad is too strict.
     # ponytail: this is a test of the bounding boxes. Change it to a
-    # point-in-polygon test if pours with unusual shapes give incorrect
-    # results.
+    # point-in-polygon test if pours with shapes that are not usual give
+    # incorrect results.
     for p, pad in zip(ports, pads):
+        if p["drill"]:
+            # **A through-hole pad has no port to the adjacent layer.** On
+            # that layer, the copper at the pad is the ring of the pad, and
+            # the barrel connects it to the pad. Thus the test above always
+            # finds copper, and a port there drives the pad against itself.
+            # The port is a coaxial feed, or a line port on a track.
+            if p["coax"] or p["direction"]:
+                continue
+            raise ValueError(
+                "Port %d (%s): a through-hole pad, and no side has a gap "
+                "for a coaxial feed.\nThe port of a through-hole pad goes "
+                "across the gap between the pad and the copper around it "
+                "(the ground), on %s or on %s. On these layers, no copper "
+                "is around the pad at %g mm or less, on the x axis or on "
+                "the y axis.\nAdd a ground plane or a pour with a "
+                "clearance around the pad on the side of the connector, "
+                "and run again. A pad with a track can also use a line "
+                "port."
+                % (p["number"], p["label"], names[0], names[-1],
+                   MAX_COAX_GAP))
         if not _touches(polygons.get(p["ref_layer"], []), _pad_box(pad)):
             # The return current of a CPW is on the coplanar ground of its
             # own layer. Thus a board with no plane below the pad is
@@ -1332,7 +1455,7 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                 continue
             raise ValueError(
                 "Port %d (%s): there is no copper on the reference layer "
-                "%s below the pad.\nThe port excites the pad against %s. "
+                "%s at the pad.\nThe port excites the pad against %s. "
                 "Thus a ground plane or a pour on %s must touch the edge "
                 "of the pad, or more. For a PCB antenna, the edge of the "
                 "pour is usually at the feed pad. Add or extend a filled "
@@ -1341,12 +1464,23 @@ def extract(board, pads, margin_mm, substrate=None, live_stackup=False,
                    p["ref_layer"]))
 
     # Model the SMD R/L/C parts as lumped elements. A part that holds a
-    # port pad is the port, not a different element. Thus ignore its
+    # port pad is the port, not a different element. Thus do not use its
     # footprint.
     port_refs = {pad.GetParentFootprint().GetReference() for pad in pads}
     lumped, le_warn, notes = _lumped_elements(board, region, copper_layers,
                                               port_refs)
     warnings += le_warn
+    notes = ref_notes + notes
+    if subregion:
+        n_vias = sum(1 for t in board.GetTracks()
+                     if isinstance(t, pcbnew.PCB_VIA))
+        n_fps = len(board.GetFootprints())
+        n_in = sum(1 for fp in board.GetFootprints()
+                   if fp.GetBoundingBox().Intersects(region))
+        notes.insert(0, "The domain is the area around the ports, and not "
+                        "the full board: %d of %d vias and %d of %d "
+                        "footprints are in it"
+                     % (len(vias), n_vias, n_in, n_fps))
 
     for c in copper_layers:
         c.pop("id")
@@ -1418,6 +1552,12 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         # a digit.
         ("4.7 1%", "R", 4.7), ("10u 25V", "C", 10e-6),
         ("4.7 kOhm 1%", "R", 4700.0), ("1 nF 50V", "C", 1e-9),
+        # A rating after a slash, and the mega of SPICE. Each one of these
+        # gave None before.
+        ("10uF/", "C", 10e-6), ("10uF/16V", "C", 10e-6),
+        ("1uF/25V X7R", "C", 1e-6), ("10 uF/16V", "C", 10e-6),
+        ("1meg", "R", 1e6), ("1Meg", "R", 1e6), ("2.2MEG", "R", 2.2e6),
+        ("1Megohm", "R", 1e6),
     ]
     for _t, _k, _want in _CASES:
         _got = _parse_value(_t, _k)
@@ -1566,6 +1706,40 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
         _ok = (_want is None and _got is None) or (
             _got is not None and abs(_got - _want) < 1e-6)
         assert _ok, "%s -> %r, want %r" % (_name, _got, _want)
+    # The two sides of a CPW (B66): 0.2 mm at +y and 0.6 mm at -y. The gap
+    # is the median of the two, and extract() gives a warning: |a - b| /
+    # (a + b) is 0.5, above ASYM_WARN.
+    _ASYM = [_STRIP, _rect(0.0, 0.7, 20.0, 5.0), _rect(0.0, -5.0, 20.0, -1.1)]
+    _got = _coplanar_gap(_ASYM, 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (0.4, 0.2, 0.6), _got
+    assert abs(_got[1] - _got[2]) / (_got[1] + _got[2]) > ASYM_WARN
+    _got = _coplanar_gap(_CPW, 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (0.2, 0.2, 0.2), _got
+    _got = _coplanar_gap([_STRIP], 0.0, 0.0, [1, 0], sides=True)
+    assert _got == (None, None, None), _got
+    # The reference layer of a pad on an inner layer (P23). The ground is
+    # on F.Cu above the pad, and In2.Cu below it has no copper there.
+    _NAMES = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    _PAD = (-0.5, -0.5, 0.5, 0.5)
+    _PLANE = [_rect(-5.0, -5.0, 5.0, 5.0)]
+    _AWAY = [_rect(10.0, 10.0, 12.0, 12.0)]
+    _in1 = {"layer": "In1.Cu", "ref_layer": "In2.Cu", "ref_layer2": "F.Cu"}
+    for _polys, _want in (
+            ({"F.Cu": _PLANE, "In2.Cu": _AWAY}, ("F.Cu", "In2.Cu")),
+            ({"F.Cu": _PLANE}, ("F.Cu", "In2.Cu")),
+            ({"F.Cu": _PLANE, "In2.Cu": _PLANE}, ("In2.Cu", "F.Cu")),
+            ({"In2.Cu": _PLANE}, ("In2.Cu", "F.Cu")),
+            ({}, ("In2.Cu", "F.Cu"))):  # no plane: the guard stops it
+        _got = _reference_at_pad(_in1, _NAMES, _polys, _PAD)
+        assert _got == _want, (_polys.keys(), _got, _want)
+    # With no stripline (ref_layer2 None), the port keeps no second plane.
+    _got = _reference_at_pad(dict(_in1, ref_layer2=None), _NAMES,
+                             {"F.Cu": _PLANE}, _PAD)
+    assert _got == ("F.Cu", None), _got
+    # A pad on an outer layer has one neighbour, and it does not change.
+    _got = _reference_at_pad({"layer": "B.Cu", "ref_layer": "In2.Cu",
+                              "ref_layer2": None}, _NAMES, {}, _PAD)
+    assert _got == ("In2.Cu", None), _got
     # A ray that goes through a vertex must give one hit only.
     assert len(_ray_hits(0.0, -0.5, 1, 1, [_STRIP])) == 1, "vertex counted 2x"
     # The copper test for a manual feed direction. The strip goes to +x
@@ -1573,14 +1747,73 @@ if __name__ == "__main__":  # self-test of the value parser: python board_reader
     assert copper_along([_STRIP], 0.0, 0.0, [1, 0]), "copper_along +x"
     assert not copper_along([_STRIP], 0.0, 0.0, [-1, 0]), "copper_along -x"
     assert not copper_along([_STRIP], 0.0, 0.0, None), "copper_along None"
-    print("geometry OK (%d cases)" % (len(_GEO) + 4))
+    print("geometry OK (%d cases)" % (len(_GEO) + 15))
+
+    # The gap of a coaxial feed. A round pad of r 2.143 (36 points) in a
+    # round clearance of r 3.5, in a plane of 20 x 20 mm. The plane is
+    # FRACTURED as KiCad gives it. The hole connects to the outline through
+    # a slit with no width, at y = 0 to the left. A ray along -x goes ON
+    # that slit.
+    import math
+
+    def _ring(r, start_deg, step_deg):
+        return [[r * math.cos(math.radians(start_deg + step_deg * i)),
+                 r * math.sin(math.radians(start_deg + step_deg * i))]
+                for i in range(36)]
+
+    _DISC = _ring(2.143, 0.0, 10.0)
+    _HOLE = _ring(3.5, 180.0, -10.0)       # the other direction: a hole
+    _PLANE_HOLE = ([[-10.0, 0.0], [-10.0, -10.0], [10.0, -10.0],
+                    [10.0, 10.0], [-10.0, 10.0], [-10.0, 0.0]]
+                   + _HOLE + [_HOLE[0]])
+    _SMA = [_DISC, _PLANE_HOLE]
+    for _d in ([1, 0], [-1, 0], [0, 1], [0, -1]):
+        _got = _coax_gap(_SMA, 0.0, 0.0, _d, 2.2)
+        assert _got and abs(_got[0] - 2.143) < 1e-4 \
+            and abs(_got[1] - 3.5) < 1e-4, (_d, _got)
+    # The pad is a part of a patch: no gap on this layer.
+    assert _coax_gap([_rect(-14.0, -14.0, 14.0, 14.0)], 0.0, 0.0, [1, 0],
+                     2.2) is None
+    # A pad with a track to +x, and ground at +y, -y and -x at 1 mm.
+    _TRACK = [_rect(-1.0, -1.0, 20.0, 1.0), _rect(-10.0, 2.0, 20.0, 10.0),
+              _rect(-10.0, -10.0, 20.0, -2.0), _rect(-10.0, -2.0, -2.0, 2.0)]
+    assert _coax_gap(_TRACK, 0.0, 0.0, [1, 0], 1.05) is None, "on the track"
+    assert _coax_gap(_TRACK, 0.0, 0.0, [0, 1], 1.05) == (1.0, 2.0)
+    assert _coax_gap(_TRACK, 0.0, 0.0, [-1, 0], 1.05) == (1.0, 2.0)
+    # A clearance that is too large, and a pad with no copper around it.
+    assert _coax_gap([_ring(1.0, 0.0, 10.0), _rect(5.0, -9.0, 9.0, 9.0)],
+                     0.0, 0.0, [1, 0], 1.1) is None, "gap of 4 mm"
+    assert _coax_gap([_DISC], 0.0, 0.0, [1, 0], 2.2) is None, "no ground"
+    # The sides of a dual-polarized patch: the pad at +x of the centre of
+    # the board gets +x on B.Cu. The four gaps are equal, and +x goes away
+    # from the centre. F.Cu is the patch, thus it has no side.
+    _shift = [[[x + 7.0, y] for x, y in q] for q in _SMA]
+    _sides = _coax_sides(7.0, 0.0, (2.143, 2.143),
+                         {"F.Cu": [_rect(-14.0, -14.0, 14.0, 14.0)],
+                          "B.Cu": _shift}, ("F.Cu", "B.Cu"), (0.0, 0.0))
+    assert list(_sides) == ["B.Cu"], _sides
+    assert _sides["B.Cu"]["dir"] == [1, 0], _sides
+    _shift = [[[x, y - 7.0] for x, y in q] for q in _SMA]
+    _sides = _coax_sides(0.0, -7.0, (2.143, 2.143), {"B.Cu": _shift},
+                         ("F.Cu", "B.Cu"), (0.0, 0.0))
+    assert _sides["B.Cu"]["dir"] == [0, -1], _sides
+    # Three gaps of 1 mm are equal, and -x goes away from the centre at +x.
+    # The function selects a smaller gap at +y before that direction.
+    _sides = _coax_sides(0.0, 0.0, (1.0, 1.0), {"F.Cu": _TRACK},
+                         ("F.Cu", "B.Cu"), (5.0, 0.0))
+    assert _sides["F.Cu"]["dir"] == [-1, 0], _sides
+    _NEAR = _TRACK[:1] + [_rect(-10.0, 1.5, 20.0, 10.0)] + _TRACK[2:]
+    _sides = _coax_sides(0.0, 0.0, (1.0, 1.0), {"F.Cu": _NEAR},
+                         ("F.Cu", "B.Cu"), (5.0, 0.0))
+    assert _sides["F.Cu"]["dir"] == [0, 1], _sides
+    print("coaxial feed OK (15 cases)")
 
     # (the name, the code, does it give a warning?). A name that has the
-    # metric code is not ambiguous, also when the imperial code is 0402 or
-    # 0603. A bare "C_0603" IS ambiguous. It can be an imperial 0603
+    # metric code has one meaning, also when the imperial code is 0402 or
+    # 0603. A bare "C_0603" has TWO meanings. It can be an imperial 0603
     # (0.35 nH), or a metric 0603, which is an imperial 0201 (0.20 nH). A
-    # bare code that is not also a metric dimension, such as 1206, is not
-    # ambiguous.
+    # bare code that is not also a metric dimension, such as 1206, has one
+    # meaning.
     _PKGS = [("R_0402_1005Metric", "0402", False),
              ("C_0603_1608Metric", "0603", False),
              ("R_0201_0603Metric", "0201", False),

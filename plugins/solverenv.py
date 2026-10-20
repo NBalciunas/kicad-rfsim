@@ -1,5 +1,7 @@
-"""The location of openEMS, the Python that must run the solver, and the
-timestep rule of a lumped inductor.
+"""The location of openEMS and EMerge, and the Python that must run each
+solver. Also the timestep rule of a lumped inductor. Also the rules that
+the two runners share: the version of model.json, the R, L and C of a
+part, and the Touchstone writer.
 
 Two processes import this module: the pcbnew plugin, and the runner in its
 own Python. Thus it must not import pcbnew, wx or numpy. Each value that
@@ -10,21 +12,21 @@ import os
 
 # The safety margin of the timestep rule for a lumped inductor. The largest
 # stable factor follows 1/sqrt(L[nH]). The bare law has no margin on the
-# worst geometry: a board of 6.4 mm with 100 nH is stable at 0.09, and the
+# worst geometry. A board of 6.4 mm with 100 nH is stable at 0.09, and the
 # bare law gives 0.10.
 #
-# **0.5 comes from the mesh that keeps ONE cell in series.** That mesh
-# moved the boundary of the worst geometry, a board of 6.4 mm. With 0.7,
-# that board kept 1.3x at 100 nH and 1.6x at 10 nH. The mesh of two cells
-# in series gave 2.3x or more on each geometry of the matrix of
-# `validation/run_stability.py`, and that file sets a limit of 1.35x. With
-# 0.5, the same geometry keeps 1.8x and 2.2x, and each other geometry keeps
-# 3.2x or more.
+# **0.5 comes from the mesh that keeps ONE cell in series.** That mesh moved
+# the boundary of the worst geometry, a board of 6.4 mm. With 0.7, that board
+# kept 1.3x at 100 nH and 1.6x at 10 nH. The mesh of two cells in series gave
+# 2.3x or more on each geometry of the matrix of
+# `validation/openems/run_stability_openems.py`. That file sets a limit of
+# 1.35x. With 0.5, the same geometry keeps 1.8x and 2.2x, and each other
+# geometry keeps 3.2x or more.
 #
 # It costs 1/0.5 = 2 times more timesteps on a board with a 1 nH inductor,
 # and 20 times on a board with 100 nH. It costs nothing on a board with no
 # inductance larger than 0.25 nH. The dialog shows that number before the
-# run. `validation/run_stability.py` measures the margin again.
+# run. `validation/openems/run_stability_openems.py` measures the margin again.
 LE_STAB_MARGIN = 0.5
 
 
@@ -45,11 +47,11 @@ def time_step_factor(l_nh):
     return min(1.0, LE_STAB_MARGIN / l_nh ** 0.5) if l_nh > 0 else 1.0
 
 
-# The constant of the timestep rule of a SERIES branch that has a
-# resistance. openEMS uses `Operator_Ext_LumpedRLC` for `LEtype` = 1. That
-# extension integrates the current of the branch, and a large resistance
-# makes the integrator diverge. The largest stable factor follows `k /
-# sqrt(R[ohm])`. `validation/run_cosim.py` measured k on 2026-09-22 at the
+# The constant of the timestep rule of a SERIES branch that has a resistance.
+# openEMS uses `Operator_Ext_LumpedRLC` for `LEtype` = 1. That extension
+# integrates the current of the branch, and a large resistance makes the
+# integrator diverge. The largest stable factor follows `k / sqrt(R[ohm])`.
+# `validation/openems/run_cosim_openems.py` measured k on 2026-09-22 at the
 # full Courant step:
 #
 #   | geometry             | 500 ohm | 1000 ohm | 2000 ohm |  k   |
@@ -63,12 +65,12 @@ def time_step_factor(l_nh):
 # is for the inductor rule. Thus 7.8 is the bare law.
 #
 # 5.8 gives the worst geometry a margin of 1.35. That is the margin that
-# `validation/run_stability.py` sets for the inductor rule, and it gives
-# the reference board 1.9. The USUAL case also costs nothing. A 0603
+# `validation/openems/run_stability_openems.py` sets for the inductor rule, and
+# it gives the reference board 1.9. The USUAL case also costs nothing. A 0603
 # resistor of 50 ohm gets 0.82 here and 0.707 from its own ESL. Thus the
 # inductor rule sets the factor, and the run time does not change. The rule
-# starts to cost at 100 ohm (1.2 times). It prevents the divergence of a
-# run at 150 ohm and more.
+# starts to cost at 100 ohm (1.2 times). It prevents the divergence of a run at
+# 150 ohm and more.
 LE_SERIES_R = 5.8
 
 
@@ -76,9 +78,9 @@ def series_r_factor(r_ohm):
     """Give the part of the Courant timestep that a SERIES branch with this
     resistance keeps stable.
 
-    `r_ohm` is the largest resistance in a branch with `LEtype` = 1, which
-    is a branch that has more than one component. A branch with ONE
-    resistance does not use that topology: refer to `runner._le_topology`.
+    `r_ohm` is the largest resistance in a branch with `LEtype` = 1, which is a
+    branch that has more than one component. A branch with ONE resistance does
+    not use that topology: refer to `openems_runner._le_topology`.
 
     The factor stops at 1.0, thus a resistance of 34 ohm or less costs
     nothing.
@@ -139,12 +141,13 @@ def is_open(r, l, c, f_start, f_stop, z0):
 # costs 0.09 dB, and 2% of |Z| is about 0.17 dB.
 #
 # **The rule is for the path and not for the parasitic.** A resistor or a
-# capacitor with a body is two components or more. Thus it uses the series
-# path of openEMS. That path changes S21 much more than the body does:
-# 1.67 dB at 200 ohm and 5.47 dB at 1 kohm. The ESL of an 0603 body changes
-# S21 by 0.017 dB and 0.0013 dB (`validation/run_cosim.py topology`). The
-# path also gets a timestep factor of 0.41 and 0.18. The same resistor with
-# no body uses the classic path, with no cost.
+# capacitor with a body is two components or more. Thus it uses the series path
+# of openEMS. That path changes S21 much more than the body does: 1.67 dB at
+# 200 ohm and 5.47 dB at 1 kohm. The ESL of an 0603 body changes S21 by
+# 0.017 dB and 0.0013 dB (`validation/openems/run_cosim_openems.py
+# topology`). The
+# path also gets a timestep factor of 0.41 and 0.18. The same resistor with no
+# body uses the classic path, with no cost.
 PARASITIC_MIN = 0.02
 
 
@@ -152,8 +155,9 @@ def parasitic_effect(comp, own, f_start, f_stop):
     """Give the largest change of |Z| in the sweep that the body causes.
 
     `comp` has the R, the L and the C of the branch in SI. `own` is the key
-    of the part itself: "R" or "C". The value is a part of |Z| of the part
-    ONLY, thus 0.02 is 2%.
+    of the part itself: "R", "L" or "C". The value is a part of |Z| of the
+    part ONLY, thus 0.02 is 2%. The DCR of an inductor changes |Z| most at
+    the start of the sweep, where wL is smallest.
 
     The value is accurate, and it uses no samples. The ratio of the two |Z|
     has its largest and smallest values at the edges of the sweep. For a
@@ -173,7 +177,7 @@ def parasitic_effect(comp, own, f_start, f_stop):
 
     def ratio(w):
         x = w * l - (1.0 / (w * c) if c else 0.0)
-        alone = comp[own] if own == "R" else 1.0 / (w * c)
+        alone = {"R": comp[own], "L": w * l}.get(own) or 1.0 / (w * c)
         return math.hypot(r, x) / alone
 
     ws = [2 * math.pi * f_start, 2 * math.pi * f_stop]
@@ -188,14 +192,33 @@ def parasitic_effect(comp, own, f_start, f_stop):
 def body_is_idle(comp, own, f_start, f_stop):
     """Give True when the body of a part can stay out of its element.
 
-    That is a resistor or a capacitor with a body that changes |Z| by
-    `PARASITIC_MIN` or less in all the sweep. The part is then ONE
-    component, thus it uses the classic path of openEMS. **All the body
-    goes out, or all the body stays**: a part that keeps one parasitic uses
-    the series path. The other parasitics then cost no more. An inductor
-    always uses the series path, thus its DCR always stays.
+    That is a part with a body that changes |Z| by `PARASITIC_MIN` or less
+    in all the sweep. The part is then ONE component. Thus a resistor uses
+    the classic path of openEMS, and a capacitor gets no timestep factor
+    from the ESL. **All the body goes out, or all the body stays**: a part
+    that keeps one parasitic uses the series path. The other parasitics
+    then cost no more.
+
+    **An inductor does not keep a DCR that changes nothing** (B82,
+    2026-10-14). An inductor always uses the series path, and the series
+    path of openEMS does not hold an L with a small R and no C. The board of
+    `rig_shunt two` has C 4.7 pF and L 2 nH in series to ground. At coarse,
+    at the factor of the inductor rule and 15 ns, `_diverged` gives:
+
+        the DCR of 2 nH    0      0.01   0.1         1 ohm
+        the result         stable stable DIVERGES    DIVERGES
+
+    With 0.1 ohm and 1e-4, the energy gets to -33.5 dB only and then goes
+    to inf at 33 ns. With 0.1 ohm the limit of the factor on that board is
+    near 0.33, against 0.354 of the rule. 0 ohm is stable at 0.5. The
+    same L with C1 as copper diverges. A C with its ESL and ESR, and a
+    resistor of 50 ohm with an ESL, are stable on the same board. The same
+    is true for 2 nH + 0.1 ohm on the one-part shunt board and in series
+    in a line (to 3 ohm). The DCR of 0.1 ohm changes |Z| of 2 nH by 0.01%
+    from 0.5 GHz, thus the run removes nothing that it can show. An
+    inductor with an EPC keeps its DCR (`components`).
     """
-    if own not in ("R", "C") or len(comp) < 2:
+    if own not in ("R", "L", "C") or len(comp) < 2:
         return False
     return parasitic_effect(comp, own, f_start, f_stop) <= PARASITIC_MIN
 
@@ -217,7 +240,7 @@ def mesh_res(f_stop, eps_max, mesh):
     `f_stop` is the top of the sweep in Hz, `eps_max` is the largest
     permittivity of the stackup and `mesh` is a key of `RES_DIV`. The
     wavelength is the one in the fastest dielectric, thus the step holds
-    everywhere on the board.
+    at all points on the board.
     """
     return C0 / f_stop / math.sqrt(eps_max) * 1e3 / RES_DIV[mesh]
 
@@ -252,6 +275,338 @@ def pml_depth(res):
     return PML_CELLS * res * (1.0 - 1e-6)
 
 
+# ------------------------------------------- the rules of the two runners
+# The newest version of model.json that the runners can read. It must
+# agree with `board_reader.MODEL_VERSION`. board_reader imports pcbnew,
+# thus it keeps its own copy.
+MODEL_VERSION = 4
+
+
+def parasitic_components(e):
+    """Give the parasitic components of the body of a part.
+
+    The engine puts the R, the L and the C of one element in series
+    (LEtype=1). Thus:
+
+    - A capacitor becomes ESR + ESL + C. This is the usual model of a
+      capacitor, and it puts the self-resonance at the correct frequency.
+    - A resistor becomes R + ESL.
+    - An inductor becomes DCR + L. A series element cannot make the
+      parallel capacitance of an inductor. Thus this model does not give
+      the self-resonance of an inductor.
+
+    The values are for the body of the part only. The mesh contains the
+    loop of the pads and the tracks.
+    """
+    out = {}
+    esl, esr = e.get("esl") or 0.0, e.get("esr") or 0.0
+    if e["type"] in ("R", "C") and esl > 0:
+        out["L"] = esl
+    if e["type"] in ("C", "L") and esr > 0:
+        out["R"] = esr
+    return out
+
+
+def components(e, para, s=None):
+    """Give the R, L and C that a runner puts in ONE element, in SI.
+
+    `para` tells if the package parasitics are on. The result is the
+    keyword arguments of `AddLumpedElement` in openEMS, and the Z(f) of
+    a `LumpedElement` in EMerge. `_le_topology` and
+    `_time_step_factor` read the same result. Thus the rule of the timestep
+    and the element of that rule always agree.
+
+    `s` is the settings of the run. With a sweep in it, **a body that does
+    not change its part stays out** (`body_is_idle`). The part is
+    then one R, one L or one C. A single R uses the classic path of openEMS,
+    and not the series path, which costs more than the body models. A single
+    C of 0.1 pF or more uses the series path (`openems_runner._le_topology`),
+    with no timestep factor.
+    `settings["keep_idle_body"]` = True keeps all bodies, for a rig that
+    must measure the series path itself. With no `s`, the body always
+    stays. `_decisions` compares against that result.
+
+    An element that `build` does not model gives {}.
+    """
+    if e.get("type") == "RLC":
+        return {k: float(e[k.lower()]) for k in "RLC" if e.get(k.lower())}
+    if not e.get("type") or e.get("value") is None:
+        return {}
+    # A 0 ohm part is a box of metal (a short). `build` models no body for
+    # it, thus its body sets no timestep.
+    if e["type"] == "R" and e["value"] == 0:
+        return {"R": 0.0}
+    comp = {e["type"]: e["value"]}
+    if para:
+        comp.update(parasitic_components(e))
+    # **The DCR of an inductor with an EPC stays**: it is the loss of the
+    # tank at the self-resonance. |Z| of the branch does not show that loss.
+    # A tank with no loss rings for hundreds of nanoseconds, and a window
+    # that cuts the ring gives more power out than in.
+    tank = e["type"] == "L" and para and e.get("epc")
+    if (s and not s.get("keep_idle_body") and not tank and s.get("f_start")
+            and s.get("f_stop") and body_is_idle(
+                comp, e["type"], s["f_start"], s["f_stop"])):
+        return {e["type"]: e["value"]}
+    return comp
+
+
+# ------------------------------------------------ the states of the parts
+# F30: the parts of the board get more than one set of values, for example
+# the states of a phase shifter. Each state is a run of its own in the
+# folder STATE_DIR % k of the output directory. STATES_FILE in the
+# output directory lists them. State 1 is the values of the rows of the
+# dialog.
+STATES_FILE = "states.json"
+STATE_DIR = "state_%d"
+
+
+def apply_state(model, state):
+    """Give a copy of `model` with the part values of `state`.
+
+    `state["parts"]` has an entry for each part that the state changes.
+    The entry is {"value": SI} for an R, an L or a C. It is {"r", "l", "c":
+    SI or None} for a Series RLC. **A state does not change the type of a part,
+    or its body**: the package parasitics of the row stay. The EPC of an
+    inductor comes from its SRF, thus it changes with the inductance:
+    EPC = 1 / ((2 pi SRF)^2 L), and the SRF stays.
+    """
+    import copy
+    out = copy.deepcopy(model)
+    parts = state.get("parts") or {}
+    for e in out.get("lumped_elements", []):
+        v = parts.get(e.get("ref"))
+        if not v:
+            continue
+        if e.get("type") == "RLC":
+            e.update(r=v.get("r"), l=v.get("l"), c=v.get("c"))
+            continue
+        old = e.get("value")
+        e["value"] = v["value"]
+        if e.get("type") == "L" and e.get("epc") and old and v["value"]:
+            e["epc"] = e["epc"] * old / v["value"]
+    return out
+
+
+# The name of a current view in each excN folder is this prefix, the copper
+# layer and ".h5" (F4). The view is the current of the sheet in A/m, in the
+# format of Ef.h5. The two runners write it, and the results window reads
+# it.
+CURRENT_PREFIX = "Jf_"
+
+
+def current_layers(p):
+    """Give the copper layers of the current views of the port `p`: its
+    layer and its reference planes, with no copy. The reference planes
+    have the return path. A coaxial feed adds the layer of its gap."""
+    side = p.get("coax_side") if p.get("type") == "coax" else None
+    return list(dict.fromkeys(
+        l for l in (p["layer"], p["ref_layer"], p.get("ref_layer2"), side)
+        if l))
+
+
+# ------------------------------------------------ the coaxial feed port
+def coax_box(p, z_of, surface=1.0):
+    """Give the geometry of the coaxial feed of the through-hole pad `p`.
+
+    A coaxial connector, for example an SMA, has its pin in the plated hole
+    of the pad. Its outer conductor touches the copper around the pad, on
+    the side of the board where the connector is. That side is
+    `p["coax_side"]`. **The port is a lumped port ACROSS the gap between
+    the pad and that copper**, flat on the layer of that side. Thus the
+    current goes from the copper around the pad into the pad, and then
+    through the barrel of the hole to the other layers. A port from the pad
+    to the adjacent layer cannot model this. On that layer, the copper
+    below the pad is the ring of the pad itself.
+
+    `board_reader` measures the gap on each outer layer (`p["coax"]`). The
+    box is on the axis of that measurement. It goes from the edge of the
+    pad (`r_in`) to the edge of the copper around it (`r_out`). It is
+    as wide as the hole, which is the pin. `surface` makes the width
+    smaller by a small quantity: openEMS gives it the factor that puts the
+    surface lines of a via in the barrel. Thus the box and the barrel share
+    those lines.
+
+    **A narrow gap makes the box narrower.** The corners of the box and of
+    the tab below must stay in the middle of the gap. That is r_in + gap / 2
+    or less. A pad of 1.7 mm in a clearance of r 1.1 mm has a gap of 0.25 mm.
+    A box as wide as its drill of 1.27 mm put the corner of the tab
+    0.04 mm from the ground. One cell of the mesh then connected the pin to
+    the ground, and the port read a short circuit.
+
+    **The start is on the copper around the pad, and the stop is on the
+    pad.** openEMS measures the voltage of a lumped port as V(stop) -
+    V(start). Thus the pad is positive against the copper around it. The
+    same is true for the lumped port of an SMD pad, which goes from the
+    reference plane up to the pad.
+
+    The result is None when the port has no gap on its side. Else it is a
+    dict with these keys:
+
+    - `start` and `stop`: x, y, z in mm.
+    - `exc`: "x" or "y".
+    - `sign`: +1 or -1, from the copper around the pad to the pad, along
+      `exc`.
+    - `tab`: x0, y0, x1, y1 of a strip of copper from the axis of the hole
+      to the box.
+    - `z`, `gap`, `width`, `r_in` and `r_out`.
+    - `centre`: the axis of the hole.
+
+    **The tab makes the edge of the pad straight at the box.** A round pad
+    touches the face of the box at ONE point. At the corners of the box,
+    the edge of the pad is a small distance nearer to the axis. The tab is
+    copper from the axis to the face, as wide as the box, thus the box touches
+    the pad along all its face. The tab adds 0.1 mm or less of copper at the
+    corners of a pad of 4.3 mm.
+    """
+    side = p.get("coax_side")
+    geo = (p.get("coax") or {}).get(side)
+    if not geo or not p.get("drill"):
+        return None
+    dx, dy = geo["dir"]
+    k = 0 if dx else 1                 # the axis of the box
+    sign = dx or dy
+    c = (geo["cx"], geo["cy"])         # the axis of the hole
+    gap = geo["r_out"] - geo["r_in"]
+    hw = min(0.5 * p["drill"],
+             math.sqrt(gap * geo["r_in"] + 0.25 * gap * gap)) * surface
+    z = z_of[side]
+    pad = c[k] + sign * geo["r_in"]    # the face on the pad
+    gnd = c[k] + sign * geo["r_out"]   # the face on the copper around it
+    lo, hi = c[1 - k] - hw, c[1 - k] + hw
+
+    def xy(along, across):
+        return [along, across] if k == 0 else [across, along]
+
+    tab = xy(c[k], lo) + xy(pad, hi)
+    return {"start": xy(gnd, lo) + [z], "stop": xy(pad, hi) + [z],
+            "exc": "xy"[k], "sign": -sign,
+            "tab": (min(tab[0], tab[2]), min(tab[1], tab[3]),
+                    max(tab[0], tab[2]), max(tab[1], tab[3])),
+            "z": z, "gap": gap, "width": 2.0 * hw, "centre": c,
+            "r_in": geo["r_in"], "r_out": geo["r_out"]}
+
+
+# ------------------------------------------------ the polarization
+def ludwig3_ref(e_theta, e_phi, phi_deg):
+    """Give the reference angle of Ludwig 3 for the field at one direction.
+
+    The field (`e_theta`, `e_phi`, complex) is the field at the main lobe.
+    The major axis of its ellipse is the polarization of the antenna. The
+    reference is the axis or the diagonal that is nearest to it: 0, 45, 90
+    or 135 degrees from +x. **It is not the major axis itself.** A patch
+    with a feed that also excites the orthogonal mode has a TILTED
+    polarization. A reference on the tilt gives no cross-pol, and the
+    reference of the design (x or y) shows it. A design on a different angle
+    gets the nearest of the four, and the side block of the view names it.
+    """
+    a, b = complex(e_theta), complex(e_phi)
+    # |a cos(t) - b sin(t)|^2 has its largest value at this t.
+    t = 0.5 * math.atan2(-2.0 * (a * b.conjugate()).real,
+                         abs(a) ** 2 - abs(b) ** 2)
+    psi = phi_deg - math.degrees(t)
+    return (round(psi / 45.0) * 45.0) % 180.0
+
+
+def ludwig3(e_theta, e_phi, phi_deg, ref_deg):
+    """Give (co, cross) of Ludwig 3, with the reference `ref_deg` from +x.
+
+    The arrays have the same shape, or they broadcast. With a reference
+    of 0, co is the x component of the field at the main lobe, and cross
+    is the y component. |co|^2 + |cross|^2 = |E_theta|^2 + |E_phi|^2. Only
+    the runners call it, and they have numpy.
+    """
+    import numpy as np
+    t = np.radians(np.asarray(phi_deg, float) - ref_deg)
+    c, s = np.cos(t), np.sin(t)
+    return e_theta * c - e_phi * s, e_theta * s + e_phi * c
+
+
+def pol_split(d_dbi, co, cross):
+    """Give (D_co, D_cross) in dBi from the total directivity `d_dbi` and
+    the two components of Ludwig 3. Each one is a part of the total, thus
+    each one has the floor of the total."""
+    import numpy as np
+    tot = np.abs(co) ** 2 + np.abs(cross) ** 2
+    tot = np.where(tot > 0, tot, 1.0)
+    d = np.asarray(d_dbi, float)
+    return (d + 10.0 * np.log10(np.maximum(np.abs(co) ** 2 / tot, 1e-12)),
+            d + 10.0 * np.log10(np.maximum(np.abs(cross) ** 2 / tot, 1e-12)))
+
+
+def complex_json(a, scale=1.0):
+    """Give a complex array as {"re": [...], "im": [...]} for a JSON file."""
+    import numpy as np
+    a = np.asarray(a) * scale
+    return {"re": a.real.tolist(), "im": a.imag.tolist()}
+
+
+def polarization(grid, cuts, phi3, scale):
+    """Add the co-pol and the cross-pol of Ludwig 3 to a far field, in
+    place.
+
+    `grid` (the 3D grid) and each cut are the dicts of farfield_pN.json.
+    Each one holds the complex E_theta and E_phi in "_et" and "_ep", and
+    the phi of its points in "_phi". `phi3` is the phi of the columns of
+    the 3D grid. The reference comes from the field at the largest D of
+    the 3D grid (`ludwig3_ref`). Each dict gets D_co_dBi and D_cross_dBi,
+    and E_theta and E_phi times `scale`. The function gives (the
+    reference in degrees, the XPD at that direction in dB, its theta, its
+    phi).
+
+    **The two runners give the far field of each port the scale of its
+    field views**. That is rE in V, for a wave of 1 sqrt(W) peak (0.5 W)
+    incident at the port. Thus the complex fields of two ports add. A
+    feed of the two in phase, or with 90 degrees between them, is possible
+    with no new run.
+    """
+    import numpy as np
+    d3 = np.asarray(grid["D_dBi"], float)
+    i, j = np.unravel_index(int(np.argmax(d3)), d3.shape)
+    ref = ludwig3_ref(grid["_et"][i, j], grid["_ep"][i, j], float(phi3[j]))
+    for g in [grid] + list(cuts.values()):
+        et, ep = g.pop("_et"), g.pop("_ep")
+        co, cross = ludwig3(et, ep, g.pop("_phi"), ref)
+        d_co, d_cross = pol_split(g["D_dBi"], co, cross)
+        g["D_co_dBi"] = d_co.tolist()
+        g["D_cross_dBi"] = d_cross.tolist()
+        g["E_theta"] = complex_json(et, scale)
+        g["E_phi"] = complex_json(ep, scale)
+    xpd = float(np.asarray(grid["D_co_dBi"])[i, j]
+                - np.asarray(grid["D_cross_dBi"])[i, j])
+    return ref, xpd, float(grid["theta_deg"][i]), float(phi3[j])
+
+
+def write_touchstone(path, freq, S, z0):
+    """Write a Touchstone v1 file.
+
+    A file for 1 or 2 ports has one line for each frequency. The columns of
+    a 2-port file are in the usual sequence S11 S21 S12 S22. A file for 3
+    ports or more is in the sequence of the rows, with a maximum of 4 pairs
+    on a line.
+    """
+    n = S.shape[1]
+    with open(path, "w") as fh:
+        fh.write("! rfsim (KiCad + openEMS)\n# HZ S RI R %g\n" % z0)
+        for i, f in enumerate(freq):
+            if n <= 2:
+                vals = ([S[i, 0, 0]] if n == 1 else
+                        [S[i, 0, 0], S[i, 1, 0], S[i, 0, 1], S[i, 1, 1]])
+                fh.write("%.6e %s\n" % (f, " ".join(
+                    "%.9e %.9e" % (v.real, v.imag) for v in vals)))
+                continue
+            fh.write("%.6e" % f)
+            for j in range(n):
+                if j:
+                    fh.write("\n           ")  # one line for each matrix row
+                for k in range(n):
+                    if k and k % 4 == 0:
+                        fh.write("\n           ")  # start a line after 4 pairs
+                    v = S[i, j, k]
+                    fh.write(" %.9e %.9e" % (v.real, v.imag))
+            fh.write("\n")
+
+
 def openems_dirs():
     """Give the possible openEMS install directories, the best one first.
 
@@ -266,10 +621,33 @@ def openems_dirs():
     ) if d]
 
 
-def solver_python():
-    """Give the interpreter that must run runner.py, or give None.
+def emerge_python():
+    """Give the interpreter that must run emerge_runner.py, or give None.
 
-    runner.py imports only numpy, h5py, CSXCAD and openEMS. It does not
+    EMerge supplies wheels for Python 3.10 to 3.13 only, thus it cannot
+    use the venv of openEMS (3.14). The function looks in this sequence:
+
+      1. $RFSIM_EMERGE_PYTHON
+      2. `venv` in $EMERGE_PATH, then in C:\\emerge
+    """
+    cfg = os.environ.get("RFSIM_EMERGE_PYTHON")
+    if cfg:
+        return cfg
+    for d in (os.environ.get("EMERGE_PATH"), r"C:\emerge"):
+        if not d:
+            continue
+        for sub in (("venv", "Scripts", "python.exe"),
+                    ("venv", "bin", "python")):
+            cand = os.path.join(d, *sub)
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def solver_python():
+    """Give the interpreter that must run openems_runner.py, or give None.
+
+    openems_runner.py imports only numpy, h5py, CSXCAD and openEMS. It does not
     import pcbnew or wx. Thus it can run in a different Python than the
     Python of KiCad. openEMS v0.37 and after make this necessary: they
     supply cp313 and cp314 wheels only, but KiCad 8, 9 and 10 all contain
@@ -291,3 +669,67 @@ def solver_python():
             if os.path.isfile(cand):
                 return cand
     return None
+
+
+# **The solvers of the plugin**, in the sequence of the dialog. Each one has
+# the name that the dialog shows, its runner in this folder and the modules
+# that the runner imports. It also has the function that finds its Python
+# (None: the Python of KiCad). The plugin must have one of them, not all:
+# the dialog disables a solver if its Python does not have its modules. A
+# new solver is one more entry here, and a runner that reads model.json and
+# writes results.sNp. A model with no "solver" key uses openEMS.
+SOLVER_INFO = {
+    "openems": {"name": "openEMS (FDTD)",
+                "runner": "openems_runner.py",
+                "modules": ("numpy", "h5py", "CSXCAD", "openEMS"),
+                "python": solver_python},
+    "emerge": {"name": "EMerge (FEM)",
+               "runner": "emerge_runner.py",
+               "modules": ("numpy", "h5py", "emerge"),
+               "python": emerge_python},
+}
+SOLVERS = tuple(SOLVER_INFO)
+
+
+def ring_area(ring):
+    """Give the signed area of a ring (the shoelace formula)."""
+    n = len(ring)
+    return 0.5 * sum(ring[i][0] * ring[(i + 1) % n][1]
+                     - ring[(i + 1) % n][0] * ring[i][1] for i in range(n))
+
+
+def split_rings(poly):
+    """Give (the outline, the holes) of a fractured polygon.
+
+    **KiCad keeps a pour with holes as ONE outline** (`Fracture`). The
+    outline goes into each hole along a slit with no width, and it comes
+    back along the same slit. openEMS rasterizes such a polygon correctly.
+    gmsh makes a surface of it. A slit with no width makes that surface
+    degenerate. A ground zone with the clearances of three vias
+    gave S11 = 0 dB and S21 = -51 dB: the plane was not in the model.
+
+    A slit shows as a point that the outline visits two times. The
+    shortest loop between two visits is a hole or a spike of the slit. A
+    loop with an area is a hole, and a loop with no area is a spike. The
+    code removes the loop from the outline each time, until no point
+    repeats.
+    """
+    pts = [(round(x, 6), round(y, 6)) for x, y in poly]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    loops = []
+    while True:
+        seen, best = {}, None
+        for j, q in enumerate(pts):
+            if q in seen and (best is None
+                              or j - seen[q] < best[1] - best[0]):
+                best = (seen[q], j)
+            seen[q] = j
+        if best is None:
+            break
+        i, j = best
+        loop = pts[i:j]
+        if len(loop) >= 3 and abs(ring_area(loop)) > 1e-9:
+            loops.append(loop)
+        pts = pts[:i] + pts[j:]
+    return pts, loops

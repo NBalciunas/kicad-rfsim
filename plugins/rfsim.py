@@ -1,5 +1,5 @@
 """The RFsim plugin of KiCad: it simulates the S-parameters of the selected
-pads with openEMS."""
+pads with openEMS or EMerge (`solverenv.SOLVER_INFO`)."""
 import importlib.util
 import json
 import os
@@ -27,24 +27,55 @@ def _kicad_python():
     return "python"
 
 
-def _solver_missing(exe):
-    """Give the modules that are necessary for runner.py and that `exe`
-    does not have.
+def _solver_env(solver):
+    """Give the interpreter of `solver`, the runner script and its
+    modules (`solverenv.SOLVER_INFO`)."""
+    info = solverenv.SOLVER_INFO[solver]
+    exe = info["python"]() or _kicad_python()
+    return exe, info["runner"], info["modules"]
 
-    The subprocess uses find_spec, which does not import the extensions.
-    Thus a missing openEMS DLL does not look like a missing package.
+
+def _solver_state():
+    """Give {solver: None when it can run, or the cause when it cannot}.
+
+    The plugin must have one solver and not all, thus the dialog disables a
+    solver with a cause. A subprocess for each solver uses find_spec, which
+    does not import the extensions: a missing openEMS DLL does not look like
+    a missing package. The subprocesses run at the same time, thus the
+    dialog waits for the slowest one and not for all of them.
     """
-    code = ("import importlib.util as u\n"
-            "print(','.join(m for m in ('numpy', 'h5py', 'CSXCAD', 'openEMS')\n"
-            "               if u.find_spec(m) is None))")
-    try:
-        r = subprocess.run([exe, "-c", code], capture_output=True, text=True,
-                           timeout=60, creationflags=NO_WINDOW)
-    except Exception as e:
-        return ["(cannot run %s: %s)" % (exe, e)]
-    if r.returncode != 0:
-        return ["(probe failed: %s)" % (r.stderr or "").strip()[-200:]]
-    return [m for m in r.stdout.strip().split(",") if m]
+    probes = {}
+    for key in solverenv.SOLVERS:
+        exe, _, mods = _solver_env(key)
+        code = ("import importlib.util as u\n"
+                "print(','.join(m for m in %r\n"
+                "               if u.find_spec(m) is None))" % (tuple(mods),))
+        try:
+            probes[key] = (exe, subprocess.Popen(
+                [exe, "-c", code], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, creationflags=NO_WINDOW))
+        except Exception as e:
+            probes[key] = (exe, "cannot run %s: %s" % (exe, e))
+    state = {}
+    for key, (exe, p) in probes.items():
+        if isinstance(p, str):
+            state[key] = p
+            continue
+        try:
+            out, err = p.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            state[key] = "%s did not answer in 60 s" % exe
+            continue
+        missing = [m for m in out.strip().split(",") if m]
+        if p.returncode != 0:
+            state[key] = "the probe of %s failed: %s" % (
+                exe, (err or "").strip()[-200:])
+        elif missing:
+            state[key] = "%s has no %s" % (exe, ", ".join(missing))
+        else:
+            state[key] = None
+    return state
 
 
 class RFSimPlugin(pcbnew.ActionPlugin):
@@ -52,7 +83,7 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         self.name = "RFsim"
         self.category = "RF tools"
         self.description = ("Simulate S-parameters of the selected pad(s) "
-                            "with openEMS.")
+                            "with openEMS or EMerge.")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__),
                                            "assets", "icon.png")
@@ -67,25 +98,18 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(traceback.format_exc(), "RFsim", wx.ICON_ERROR)
 
     def _run(self):
-        # The results window runs in the Python of KiCad. The solver runs
+        # The results window runs in the Python of KiCad. Each solver runs
         # in its own interpreter, because openEMS v0.37 and after have no
-        # cp311 wheel. Thus the code examines the two sets of packages one
-        # after the other.
-        solver_py = solverenv.solver_python() or _kicad_python()
+        # cp311 wheel and EMerge has no cp314 wheel. Thus the code examines
+        # the packages of KiCad here, and those of each solver before the
+        # dialog, which disables a solver that cannot run.
         gui_missing = [m for m in ("skrf", "matplotlib", "h5py")
                        if importlib.util.find_spec(m) is None]
-        solver_missing = _solver_missing(solver_py)
-        if gui_missing or solver_missing:
-            msg = []
-            if gui_missing:
-                msg.append("Missing in KiCad's Python (results window): %s"
-                           % ", ".join(gui_missing))
-            if solver_missing:
-                msg.append("Missing in the solver Python\n%s\n%s"
-                           % (solver_py, ", ".join(solver_missing)))
-            wx.MessageBox("\n\n".join(msg)
-                          + "\n\nSee the plugin README for install "
-                            "instructions.", "RFsim", wx.ICON_ERROR)
+        if gui_missing:
+            wx.MessageBox("Missing in KiCad's Python (results window): %s"
+                          "\n\nSee the plugin README for install "
+                          "instructions." % ", ".join(gui_missing),
+                          "RFsim", wx.ICON_ERROR)
             return
 
         board = pcbnew.GetBoard()
@@ -94,6 +118,16 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             wx.MessageBox(
                 "Select at least one pad to run a simulation.",
                 "RFsim", wx.ICON_INFORMATION)
+            return
+
+        solvers = _solver_state()
+        if all(solvers.values()):
+            wx.MessageBox(
+                "No solver is installed. RFsim needs one of them:\n\n%s\n\n"
+                "See the plugin README for install instructions." % "\n".join(
+                    "%s: %s" % (solverenv.SOLVER_INFO[k]["name"], why)
+                    for k, why in solvers.items()),
+                "RFsim", wx.ICON_ERROR)
             return
 
         # The stackup comes from the saved file or from the board in
@@ -122,12 +156,16 @@ class RFSimPlugin(pcbnew.ActionPlugin):
                                  preview.get("lumped_elements", []),
                                  preview=preview,
                                  packages=board_reader.package_presets(),
-                                 esr=board_reader.esr_presets())
+                                 esr=board_reader.esr_presets(),
+                                 solvers=solvers)
         if dlg.ShowModal() != wx.ID_OK:
             dlg.Destroy()
             return
         settings = dlg.get_settings()
         dlg.Destroy()
+
+        # The dialog accepts only a solver that can run.
+        solver_py, script, _ = _solver_env(settings["solver"])
 
         port_types = settings.pop("port_types")
         port_feed = settings.pop("port_feed")
@@ -160,7 +198,9 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         model = board_reader.extract(board, pads, settings["margin_mm"],
                                      substrate, live_stackup=live,
                                      f_stop=settings["f_stop"],
-                                     mesh=settings["mesh"])
+                                     mesh=settings["mesh"],
+                                     subregion=settings.get("subregion",
+                                                            False))
         for e in model["lumped_elements"]:
             v = para.get(e["ref"])
             if v:
@@ -192,7 +232,11 @@ class RFSimPlugin(pcbnew.ActionPlugin):
             and e.get("type")
             and (e.get("value") is not None or e["type"] == "RLC")]
         for p, t, f in zip(model["ports"], port_types, port_feed):
+            # A coaxial feed gives its side in the value: "coax:B.Cu".
+            t, _, side = t.partition(":")
             p["type"] = t
+            if side:
+                p["coax_side"] = side
             if f and not p["direction"]:
                 # The manual feed of the dialog: the pad has no track. The
                 # user gave the direction and the width of a line that the
@@ -224,21 +268,44 @@ class RFSimPlugin(pcbnew.ActionPlugin):
         if model["warnings"]:
             wx.MessageBox("\n\n".join(model["warnings"]),
                           "RFsim", wx.ICON_WARNING)
+        states = settings.pop("states", None)
         model["settings"] = settings
 
         os.makedirs(outdir, exist_ok=True)
-        model_path = os.path.join(outdir, "model.json")
-        with open(model_path, "w") as fh:
-            json.dump(model, fh, indent=1)
-
-        runner = os.path.join(os.path.dirname(__file__), "runner.py")
-        cmd = [solver_py, runner, model_path, outdir]
+        runner = os.path.join(os.path.dirname(__file__), script)
+        if states:
+            # **F30: one run for each state, each in a folder of its own.**
+            # A state changes the values of some parts, and nothing else
+            # (`solverenv.apply_state`). STATES_FILE lists the folders for
+            # the results window, State 1 first: the reference.
+            cmd, listed = [], []
+            for k, st in enumerate(states, 1):
+                folder = solverenv.STATE_DIR % k
+                sdir = os.path.join(outdir, folder)
+                os.makedirs(sdir, exist_ok=True)
+                path = os.path.join(sdir, "model.json")
+                with open(path, "w") as fh:
+                    json.dump(solverenv.apply_state(model, st), fh, indent=1)
+                cmd.append(("State %d of %d: %s" % (k, len(states),
+                                                    st["name"]),
+                            [solver_py, runner, path, sdir]))
+                listed.append({"name": st["name"], "dir": folder,
+                               "parts": st["parts"]})
+            with open(os.path.join(outdir, solverenv.STATES_FILE), "w") as fh:
+                json.dump({"states": listed}, fh, indent=1)
+            first = os.path.join(outdir, solverenv.STATE_DIR % 1)
+        else:
+            model_path = os.path.join(outdir, "model.json")
+            with open(model_path, "w") as fh:
+                json.dump(model, fh, indent=1)
+            cmd = [solver_py, runner, model_path, outdir]
+            first = outdir
         # run.log keeps all the text that the window shows, because the
-        # window closes immediately when a run succeeds.
+        # window closes immediately when a run ends with no error.
         run = gui.RunDialog(None, cmd,
                             log_path=os.path.join(outdir, "run.log"))
         ok = run.ShowModal() == wx.ID_OK
         run.Destroy()
         if ok:
-            s2p = os.path.join(outdir, "results.s%dp" % len(pads))
+            s2p = os.path.join(first, "results.s%dp" % len(pads))
             gui.ResultsFrame(None, s2p).Show()
