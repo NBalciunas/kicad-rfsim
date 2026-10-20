@@ -119,14 +119,15 @@ _LE_CELLS = int(os.environ.get("RFSIM_LE_CELLS", "0"))
 if _LE_CELLS:
     _le_mesh = _mesh
 
-    def _mesh(model, ports, res):
+    def _mesh(model, ports, res, *args, **kwargs):
         """Give the mesh, then force N cells in series at every element.
 
         The box keeps its faces and `tol` keeps its value, thus the
         board outside the box does not move. Only the lines strictly
-        inside the box change.
+        inside the box change. The other arguments go to the mesh of the
+        plugin with no change: `build()` gives it `notes`.
         """
-        out = list(_le_mesh(model, ports, res))
+        out = list(_le_mesh(model, ports, res, *args, **kwargs))
         for e in model.get("lumped_elements", []):
             axis = 0 if e["ny"] == "x" else 1
             lo, hi = sorted((e["start"][axis], e["stop"][axis]))
@@ -148,11 +149,12 @@ def make_copy():
     path = os.path.join(COPY, "openems_runner.py")
     with open(path, "r", newline="") as fh:
         text = fh.read()
-    # `caps=True` is at the two `AddLumpedElement` calls of `build()`: the
-    # series RLC part and all the other types. The hook changes the two.
-    # Thus a board of the two types obeys RFSIM_LE_CAPS.
-    if text.count("caps=True") != 2:
-        raise SystemExit("openems_runner.py holds %d 'caps=True', expected 2"
+    # `caps=True` is at the four `AddLumpedElement` calls of `build()`: the
+    # EPC of an open part, the series RLC part, all the other types, and
+    # the EPC on the other half of a land. The hook changes the four. Thus
+    # each element obeys RFSIM_LE_CAPS.
+    if text.count("caps=True") != 4:
+        raise SystemExit("openems_runner.py holds %d 'caps=True', expected 4"
                          % text.count("caps=True"))
     text = text.replace(
         "caps=True",
@@ -178,13 +180,15 @@ def selftest():
 
     A hook that does nothing gives a full matrix of equal rows, and such
     a matrix reads as a measurement. Thus the file checks the hook first.
+    It calls `_mesh` with `notes`, as `build()` does. Thus a hook that
+    refuses an argument of `build()` also stops here.
     """
     code = (
         "import json,os,sys;import numpy as np;import openems_runner as R\n"
         "m=json.load(open(sys.argv[1]));s=m['settings']\n"
         "res=(R.C0/s['f_stop']/np.sqrt(max(d['epsilon'] for d in "
         "m['dielectric_layers']))*1e3)/R.RES_DIV[s['mesh']]\n"
-        "g=R._port_geometry(m,res);xs=R._mesh(m,g,res)[0]\n"
+        "g=R._port_geometry(m,res);xs=R._mesh(m,g,res,[])[0]\n"
         "e=m['lumped_elements'][0];a=0 if e['ny']=='x' else 1\n"
         "lo,hi=sorted((e['start'][a],e['stop'][a]))\n"
         "print(len([v for v in xs if lo-1e-9<v<hi+1e-9])-1)\n")
@@ -284,7 +288,17 @@ def verdict(ladder):
     also has the fast mode when its trace turns at a short time AND
     increases fast after the turn. The decision uses three rows: 2 cells
     have the mode, and 1 cell and the mesh of the plugin do not.
+
+    **A row that the runner stopped with an error measures nothing.** It
+    has no trace, thus it is not a row with no fast mode. Before this
+    test, five such rows gave "NO row grew fast".
     """
+    failed = [n for n, cause, _, _ in ladder if cause == "failed"]
+    if failed:
+        raise SystemExit(
+            "FAIL: the runner stopped with an error on the row(s) %s, thus "
+            "those rows measure nothing. Run one of them by hand to see "
+            "the error." % ", ".join(str(n) for n in failed))
     fast = [n for n, cause, turn, slope in ladder
             if cause == "growth"
             or (turn == turn and turn < FAST_TURN_NS

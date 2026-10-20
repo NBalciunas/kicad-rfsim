@@ -235,6 +235,7 @@ The 3D radiation pattern, which you can rotate:
 
 The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory.
 [validation/README.md](validation/README.md) lists the tests and tells how to run them.
+All the tests pass on the current version with openEMS and with EMerge, and [the results](validation/README.md#results) give the numbers.
 
 ## License
 
