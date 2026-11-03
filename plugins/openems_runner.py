@@ -300,6 +300,30 @@ def _strip_cells(port_type):
     return MSL_STRIP_CELLS if port_type == "msl" else CPW_STRIP_CELLS
 
 
+def _strip_lines(across, c, width, cells, res, grade=None):
+    """Add the lines across a strip of `width` with its centre at `c`.
+
+    `cells` is the number of cells across the strip. The lines then grade
+    outward from each edge of the strip, as the CPW branch of `_mesh`
+    grades outward from the gap. Each line of the grade goes into `grade`
+    as (the line, its step) when the call gives it, and into `across` when
+    it does not.
+    """
+    hw = 0.5 * width
+    half = max(1, cells // 2)
+    for side in (-1, 1):
+        for i in range(1, half + 1):
+            across.add(c + side * hw * i / half)
+        pos, step = c + side * hw, hw / half
+        while step < res:
+            pos += side * step
+            if grade is None:
+                across.add(pos)
+            else:
+                grade.add((pos, step))
+            step *= 1.4
+
+
 def _has_lumped_rlc():
     """Tell if this CSXCAD can do lumped inductors and series RLC.
 
@@ -310,6 +334,20 @@ def _has_lumped_rlc():
     """
     from CSXCAD import CSProperties
     return hasattr(CSProperties.CSPropLumpedElement, "SetLEtype")
+
+
+def _cpw_exc_dir(prop_dir):
+    """Give the `exc_dir` of a CPW port on the board, for this openEMS.
+
+    **openEMS v0.37.0-rc3 and after use `exc_dir` of a CPW port as the axis
+    across the gaps**: the other axis of the board. v0.37.0-rc1 and rc2 use
+    it as the normal of the plane of the strip: z. Each version refuses the
+    value of the other version.
+    """
+    import openEMS
+    if getattr(openEMS, "__version__", "") in ("0.37.0rc1", "0.37.0rc2"):
+        return "z"
+    return "y" if prop_dir == "x" else "x"
 
 
 def _element_ports(model):
@@ -748,6 +786,34 @@ def _cell_count(fdtd):
     for axis in "xyz":
         n *= grid.GetQtyLines(axis)
     return n
+
+
+def _pulse_steps(model, grid):
+    """Give (the timesteps of the excitation pulse, the timestep in s).
+
+    openEMS makes the Gaussian pulse 9 / (pi fc) long, and fc is half the
+    sweep. The timestep comes from the smallest cell of each axis, and not
+    from the frequency. Thus a sweep in the MHz band on a board with mm
+    cells needs millions of timesteps for the pulse alone.
+
+    This is the Courant step of the smallest cells, times the factor of
+    `_time_step_factor`. openEMS uses a rule for each node, and a large
+    ratio between adjacent cells makes its step SMALLER. On the microstrip
+    of `rig_headless`, its step was 0.91 of this one at a 2.4 mm mesh step
+    and 0.52 at a 10 mm step. Thus this count is equal or LOW, and a stop
+    on it is never incorrect. A pulse that is longer than this count but
+    that this count does not find stops at the step limit, and
+    `_report_end` then tells the user.
+    """
+    s = model["settings"]
+    fc = 0.5 * (s["f_stop"] - s["f_start"])
+    inv = sum(1.0 / (np.diff(np.asarray(grid.GetLines(a))).min() * 1e-3) ** 2
+              for a in "xyz")
+    dt = 1.0 / (C0 * math.sqrt(inv))
+    tsf = _time_step_factor(model)
+    if tsf and tsf < 1.0:
+        dt *= tsf
+    return int(9.0 / (math.pi * fc) / dt), dt
 
 
 def _threads(s, cells):
@@ -1256,6 +1322,33 @@ def _port_geometry(model, res, quiet=False):
             g["type"] = "lumped"
             g["start"] = [p["x"] - p["length"] / 2, p["y"] - p["width"] / 2, z_ref]
             g["stop"] = [p["x"] + p["length"] / 2, p["y"] + p["width"] / 2, z_top]
+            # **The track of a lumped port gets cells and a grade**, as the
+            # strip of a line port does. With 2 cells and no grade, the next
+            # cell of the track is the full step, and the track reads low.
+            # This table gives Z0 at 550 MHz, from the difference of lines of
+            # 30 mm and 60 mm, on 1.53 mm of er 4.5, with a step of 3 mm:
+            #
+            #   track   closed form   no grade   this rule   one run
+            #   2.9 mm     49.8 ohm   42.2 ohm    45.6 ohm    25 s to 19 s
+            #   1.5 mm     71.1 ohm   55.0 ohm    61.9 ohm    27 s to 28 s
+            #   1.0 mm     85.1 ohm   59.0 ohm    74.7 ohm    28 s to 27 s
+            #   0.5 mm    109.8 ohm   66.8 ohm    95.2 ohm    50 s to 55 s
+            #   0.2 mm    142.9 ohm   66.6 ohm   116.2 ohm    19 s to 210 s
+            #
+            # EMerge gives 48.3 ohm for 2.9 mm. S11 of the 2.9 mm line at
+            # 100 MHz went from -31.4 dB to -34.8 dB (EMerge: -45.8 dB).
+            # A cell that is smaller than the step through the substrate
+            # makes the timestep shorter. Thus only a track that keeps its
+            # cells at or above that step gets MSL_STRIP_CELLS. 4 cells on a
+            # track of 0.2 mm cost 504 s and read 117.3 ohm.
+            if p.get("direction") and p.get("track_width"):
+                g["track_axis"] = "y" if p["direction"][0] else "x"
+                z_step = 0.25 * min(d["z_top"] - d["z_bottom"]
+                                    for d in model["dielectric_layers"])
+                g["track_cells"] = (
+                    MSL_STRIP_CELLS
+                    if p["track_width"] / MSL_STRIP_CELLS >= z_step
+                    else POLY_FEATURE_CELLS)
         ports.append(g)
     return ports
 
@@ -1501,6 +1594,7 @@ def _mesh(model, ports, res, notes=None):
                   (v["x"] + r, RANK_VIA_SURFACE)]
         via_y += [(v["y"] - r, RANK_VIA_SURFACE), (v["y"], RANK_VIA_CENTRE),
                   (v["y"] + r, RANK_VIA_SURFACE)]
+    track_grade = {"x": set(), "y": set()}
     for g in ports:
         xs.update((g["start"][0], g["stop"][0], g["x"]))
         ys.update((g["start"][1], g["stop"][1], g["y"]))
@@ -1556,18 +1650,13 @@ def _mesh(model, ports, res, notes=None):
             # away, and the rule must do that.
             across = ys if g["prop_dir"] == "x" else xs
             c = g["y"] if g["prop_dir"] == "x" else g["x"]
-            hw = 0.5 * g["msl_width"]
-            half = max(1, _strip_cells(g["type"]) // 2)
-            for side in (-1, 1):
-                for i in range(1, half + 1):
-                    across.add(c + side * hw * i / half)
-                # Grade outward from the edge of the strip, as the CPW
-                # branch grades outward from the gap.
-                pos, step = c + side * hw, hw / half
-                while step < res:
-                    pos += side * step
-                    across.add(pos)
-                    step *= 1.4
+            _strip_lines(across, c, g["msl_width"], _strip_cells(g["type"]),
+                         res)
+        elif g.get("track_cells"):
+            across = ys if g["track_axis"] == "y" else xs
+            c = g["y"] if g["track_axis"] == "y" else g["x"]
+            _strip_lines(across, c, g["track_width"], g["track_cells"], res,
+                         track_grade[g["track_axis"]])
         elif g.get("coax"):
             # **The gap of a coaxial feed is a ring, and the mesh must hold
             # it on the two axes.** openEMS makes an edge copper when the
@@ -1664,6 +1753,8 @@ def _mesh(model, ports, res, notes=None):
     # them again, as it can remove the lines of a CPW gap.
     strips = [g["msl_width"] / _strip_cells(g["type"]) for g in ports
               if g["type"] in ("stripline", "msl") and g.get("msl_width")]
+    strips += [g["track_width"] / g["track_cells"] for g in ports
+               if g.get("track_cells")]
     if strips:
         tol = min(tol, 0.25 * min(strips))
     gaps = [g["gap"] for g in ports if g["type"] == "cpw" and g["gap"]]
@@ -1793,6 +1884,15 @@ def _mesh(model, ports, res, notes=None):
                 + [(v, RANK_FACE) for v in th_x])
     anchor_y = ([(v, RANK_FACE) for v in le_y] + via_y
                 + [(v, RANK_FACE) for v in th_y])
+    # The `tol` of a thin track is small, because it must keep the lines of
+    # that track. Thus it does not remove a line of the grade that lands
+    # near a line of the board. On a track of 0.2 mm, that made a cell of
+    # 0.026 mm at the edge of the board. Thus a line of the grade must be
+    # half of its step from each other line.
+    for lines, axis in ((xs, "x"), (ys, "y")):
+        for v, step in sorted(track_grade[axis]):
+            if all(abs(v - u) >= 0.5 * step for u in lines):
+                lines.add(v)
     out = [_merge_close(xs, tol, anchor_x), _merge_close(ys, tol, anchor_y),
            _merge_close(zs, tol_z)]
     # A short line port gets its cells last, because only the lines of all
@@ -2182,10 +2282,11 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
         excite = (i == excite_idx)
         note = ""
         if g["type"] in TL_PORTS:
-            # exc_dir is "z" for all three types. A microstrip port uses it
-            # as the direction from the strip to the plane. A CPW port and
-            # a stripline port use it only to find the plane of the strip.
-            # Their probes go across the gaps, or up and down.
+            # exc_dir is "z" for a microstrip port and a stripline port. A
+            # microstrip port uses it as the direction from the strip to the
+            # plane. A stripline port uses it only to find the plane of the
+            # strip, and its probes go up and down. A CPW port gets the axis
+            # across its gaps from `_cpw_exc_dir`.
             feed, plane, moved = _port_planes(
                 g, np.asarray(grid.GetLines(g["prop_dir"])), res)
             kw = dict(excite=(-1 if g["type"] == "msl" else 1) if excite else 0,
@@ -2197,7 +2298,8 @@ def build(model, excite_idx, res, want_ff=False, quiet=False):
             if g["type"] == "msl":
                 ports.append(fdtd.AddMSLPort(*args, **kw))
             elif g["type"] == "cpw":
-                ports.append(fdtd.AddCPWPort(*args, g["gap"], **kw))
+                ports.append(fdtd.AddCPWPort(
+                    *args[:5], _cpw_exc_dir(g["prop_dir"]), g["gap"], **kw))
                 note = ", gap %.3f mm" % g["gap"]
             else:
                 ports.append(fdtd.AddStripLinePort(*args, g["height"], **kw))
@@ -2634,8 +2736,48 @@ def main(model_path, outdir):
                                        _has_lumped_rlc()):
                 print("[rfsim] optimization: %s" % line, flush=True)
                 keep(line)
+            # **A pulse that is longer than the step limit gives an
+            # incorrect result.** openEMS cuts the pulse, and the run then
+            # stops at the limit with energy in the domain. A sweep of 1 to
+            # 21 MHz needed 2 M timesteps for its pulse, and the limit was
+            # 300 k. EMerge solves in the frequency domain, thus it has no
+            # pulse.
+            pulse, dt = _pulse_steps(model, fdtd.GetCSX().GetGrid())
+            nrts = _max_timesteps(model)
+            if pulse > nrts:
+                # "Max steps" for 3 pulses, as openEMS asks. The count of
+                # the pulse is low (`_pulse_steps`), thus the value is a
+                # minimum. The step limit is "Max steps" divided by the
+                # timestep factor, thus multiply by it.
+                tsf = _time_step_factor(model)
+                need = 3 * pulse * (tsf if tsf and tsf < 1.0 else 1.0)
+                need = int(math.ceil(need / 1e5)) * 100000
+                raise SystemExit(
+                    "[rfsim] ERROR: the sweep of %s to %s needs an "
+                    "excitation pulse of %s. With the timestep of %s on "
+                    "this mesh, that is about %d timesteps, and the step "
+                    "limit is %d. openEMS then cuts the pulse, and the "
+                    "S-parameters are incorrect. Use the EMerge solver for "
+                    "this sweep, make the band wider, or set \"Max steps\" "
+                    "to %d or more (a long run)."
+                    % (_si(s["f_start"], "Hz"), _si(s["f_stop"], "Hz"),
+                       _si(pulse * dt, "s"), _si(dt, "s"), pulse, nrts,
+                       need))
+            if 3 * pulse > nrts:
+                line = ("The excitation pulse is about %d of the %d "
+                        "timesteps of the step limit. The field must decay "
+                        "after the pulse, thus the run can stop at the "
+                        "limit. EMerge has no pulse, and it is faster for "
+                        "this sweep." % (pulse, nrts))
+                print("[rfsim] WARNING: %s" % line, flush=True)
+                keep(line)
+        # `settings["exact_end"]` = True is for a rig that compares two
+        # runs. openEMS then tests the end criteria at each Nyquist
+        # period, and not at intervals of wall time. Thus the same model
+        # stops at the same timestep on each run. It needs openEMS v0.37.0.
         fdtd.Run(sim_path, cleanup=True, engine="multithreaded",
-                 numThreads=threads)
+                 numThreads=threads,
+                 **({"exact_endcriteria": True} if s.get("exact_end") else {}))
         end = _report_end(sim_path, _max_timesteps(model),
                           s["end_criteria"], _dc_inductors(model))
         if end:

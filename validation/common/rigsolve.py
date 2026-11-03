@@ -68,13 +68,15 @@ def python():
                      % solverenv.SOLVER_INFO[SOLVER]["name"])
 
 
-def run(model, outdir, tag, runner=None, keep=KEEP):
+def run(model, outdir, tag, runner=None, keep=KEEP, expect=None):
     """Write model.json into `outdir`, run the solver, and give its log.
 
     `runner` is the path of a different openEMS runner, for a rig that
     measures a changed rule (`rig_feature`). The log is the text of stdout
     and stderr together. The lines that hold a word of `keep` go to the
-    console.
+    console. `expect` is a text that a run that stops with an error must
+    hold, for a rig that tests a stop. Such a run then gives its log, and
+    the rig continues.
     """
     if runner and SOLVER != "openems":
         raise SystemExit("a changed runner is for openEMS only")
@@ -92,6 +94,8 @@ def run(model, outdir, tag, runner=None, keep=KEEP):
     # Read the BYTES. openEMS writes characters that are not UTF-8 on this
     # console, and `text=True` then gives a truncated log.
     text = (log.stdout + log.stderr).decode("utf-8", "replace")
+    if log.returncode != 0 and expect and expect in text:
+        return text
     if log.returncode != 0:
         print(text[-3000:])
         raise SystemExit("the %s run of %s stopped with an error"

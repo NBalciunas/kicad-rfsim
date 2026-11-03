@@ -339,6 +339,45 @@ def test_strip_cells():
               % (kind, len(inside), len(out)))
 
 
+def test_track_of_a_lumped_port():
+    """The track of a lumped port must have cells and a grade.
+
+    With 2 cells and no grade, a track of 2.9 mm read 42.2 ohm and a track
+    of 0.2 mm read 66.6 ohm, against 49.8 and 142.9 ohm from the closed
+    form. A cell below the step through the substrate makes the timestep
+    shorter, thus a thin track keeps 2 cells. A line of the grade must not
+    make a thin cell with a line of the board: a track of 0.2 mm made a cell
+    of 0.026 mm at the edge of the board.
+    """
+    res = 3.0
+    for w, cells in ((2.9, 4), (0.2, 2)):
+        m = model("lumped", track_width=w, width=w, length=w)
+        m["polygons"] = {"In1.Cu": [[[5.0 - w / 2, -10.0 - w / 2],
+                                     [35.0 + w / 2, -10.0 - w / 2],
+                                     [35.0 + w / 2, -10.0 + w / 2],
+                                     [5.0 - w / 2, -10.0 + w / 2]]]}
+        _, ys, _ = runner._mesh(m, runner._port_geometry(m, res), res)
+        c, hw = -10.0, 0.5 * w
+        inside = [y for y in ys if c - hw - 1e-9 <= y <= c + hw + 1e-9]
+        assert len(inside) == cells + 1, \
+            "%g mm: %d lines across the track, want %d" \
+            % (w, len(inside), cells + 1)
+        out = sorted(y for y in ys if c + hw < y < c + hw + 4.0 * res)
+        steps = [b - a for a, b in zip([c + hw] + out, out)]
+        assert steps and steps[0] < res and steps[0] < 2.0 * w / cells, \
+            "%g mm: the mesh jumps at the edge of the track" % w
+        # A cell of the PML band of this model is 0.5 mm.
+        assert min(np.diff(ys)) > 0.99 * min(0.5, w / cells), \
+            "%g mm: a cell of %.3f mm" % (w, min(np.diff(ys)))
+        print("track of %g mm OK (%d cells, %d graded outward)"
+              % (w, cells, len(out)))
+    # A port with no track gets no lines.
+    m = model("lumped", direction=None, track_width=None)
+    _, ys, _ = runner._mesh(m, runner._port_geometry(m, res), res)
+    assert not [y for y in ys if -10.3 < y < -10.0 or -10.0 < y < -9.7], \
+        "a port with no track got lines across a track"
+
+
 def test_cpw_z_cells():
     """A CPW port must have cells ABOVE and BELOW the plane of the line.
 
@@ -1285,6 +1324,7 @@ if __name__ == "__main__":
     test_port_length_uses_list_position()
     test_port_length_is_capped_by_the_copper_run()
     test_strip_cells()
+    test_track_of_a_lumped_port()
     test_cpw_z_cells()
     test_lumped_element_keeps_its_cells()
     test_one_cell_in_series_across_a_lumped_element()

@@ -42,10 +42,16 @@ The resonance (the largest Re(Z)) against the closed form: EMerge -5.0% to
 -4.2%. openEMS read -9.3% to -8.3% at coarse and -8.0% to -6.6% at medium
 before the 1/3 - 2/3 rule at a long copper edge (`openems_runner.EDGE_THIRDS`).
 A line ON the radiating edge made the patch electrically longer. With the
-rule it reads -4.5% to -3.7% at coarse, -4.4% to -3.4% at medium and -4.6%
-to -3.5% at fine. The resistances above are from before the rule. At
-coarse, the rule makes them 7% to 11% larger (the probe 74.8 ohm, the
-small feed 92.6 ohm). The ratio of the small feed to the probe stays 1.24.
+rule it reads -4.4% to -3.5% at coarse, -4.4% to -3.4% at medium and -4.6%
+to -3.5% at fine. The sweep of the rig stops at 3 GHz. Thus the mesh cap
+of 3 mm (`solverenv.MAX_RES_MM`) makes the coarse step 3 mm, and not
+4.7 mm. The resistances above are from before the rule and the cap. At
+coarse, the two make them 10% to 15% larger (the probe 77.4 ohm, the small
+feed 94.4 ohm). The ratio of the small feed to the probe is 1.22.
+
+The Dmax of the `dual` stage changes with the mesh, and the rig does not
+test it. Coarse gave 5.63 dBi at a step of 4.7 mm, 5.76 dBi at 3 mm and
+5.16 dBi at 2.5 mm. Medium gave 5.17 dBi.
 
 The stages:
 

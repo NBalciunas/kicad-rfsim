@@ -228,6 +228,37 @@ C0 = 299792458.0
 # The step of the mesh is the wavelength in the fastest dielectric,
 # divided by this number for each preset.
 RES_DIV = {"coarse": 10.0, "medium": 20.0, "fine": 40.0, "ultrafine": 80.0}
+# The largest step of the mesh in mm, for all presets.
+#
+# **A sweep in the MHz band must not make a domain of many metres.** The
+# PML band is 8 steps deep, thus at 100 MHz the coarse step of 145 mm made
+# a band of 1.2 m on each side. The box of the region in pcbnew holds
+# 32-bit nm, thus 2147 mm is its largest width. A wider box became empty,
+# and the run stopped with "no copper on the reference layer". At 10 MHz
+# the band was 12 m.
+#
+# Below some hundreds of MHz, a board is much smaller than the wavelength.
+# The near field then has the dimensions of the board, and not of the
+# wavelength. Thus a band of 8 x 3 mm is sufficient.
+#
+# **A cap of 10 mm gave incorrect results.** Adjacent cells changed by up
+# to 8.5 times between the fine lines of the copper and the 10 mm cells.
+# On the microstrip of `rig_headless` at coarse, a sweep of 100 MHz to
+# 1 GHz gave S11 -3.2 dB at 1 GHz, and the sweep of 1 to 6 GHz gave
+# -13.3 dB there. With 3 mm it gave -14.6 dB. At 100 MHz, S11 went from
+# -17.7 dB to -31.7 dB. openEMS also used a timestep that was 1.7 times
+# longer, thus the run was faster. The mesh of the track of a lumped port
+# then moved these two values to -18.5 dB and -35.3 dB (EMerge: -28.8 dB
+# and -45.8 dB).
+#
+# **A cap of 2.5 mm changed the rigs at 5 GHz.** The coarse step of
+# `rig_shunt` went from 2.83 mm to 2.5 mm. Then the current of a lumped
+# inductor of 2 nH increased after the pulse, and `run_shunt two` read
+# +20.2% and not +3.4%. 3 mm is above the coarse step at 5 GHz on FR-4.
+# Thus the rigs at 5 GHz and 6 GHz keep their mesh. On FR-4 the cap
+# starts below 4.71 GHz at coarse, 2.36 GHz at medium, 1.18 GHz at fine
+# and 0.59 GHz at ultrafine.
+MAX_RES_MM = 3.0
 # The cells of each PML band. openEMS grades the conductivity across the
 # cells of the band. Thus the band is 8 cells for all cell dimensions, and
 # it costs 8 cells on each of the 6 faces.
@@ -240,9 +271,10 @@ def mesh_res(f_stop, eps_max, mesh):
     `f_stop` is the top of the sweep in Hz, `eps_max` is the largest
     permittivity of the stackup and `mesh` is a key of `RES_DIV`. The
     wavelength is the one in the fastest dielectric, thus the step holds
-    at all points on the board.
+    at all points on the board. The step stops at `MAX_RES_MM`.
     """
-    return C0 / f_stop / math.sqrt(eps_max) * 1e3 / RES_DIV[mesh]
+    return min(MAX_RES_MM,
+               C0 / f_stop / math.sqrt(eps_max) * 1e3 / RES_DIV[mesh])
 
 
 def pml_depth(res):

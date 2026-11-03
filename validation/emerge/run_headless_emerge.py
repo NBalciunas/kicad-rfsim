@@ -7,7 +7,7 @@ same rig. This file selects EMerge, and its results go into
 
 Start it with the python of KiCad 10. It uses pcbnew, and it starts
 the solver itself:
-    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_headless_emerge.py [coarse|medium|fine] [msl|lumped]
+    "%LOCALAPPDATA%\\Programs\\KiCad\\10.0\\bin\\python.exe" run_headless_emerge.py [coarse|medium|fine] [msl|lumped] [ghz|vhf|hf|mhz]
 """
 import os
 import sys

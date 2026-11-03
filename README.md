@@ -43,7 +43,9 @@ The geometry goes from the native board objects of KiCad to the model of the sol
    C:\openEMS\venv\Scripts\python.exe -c "import os; os.add_dll_directory('C:/openEMS'); import CSXCAD, openEMS; print('ok')"
    ```
 
-   > The last command must print `ok`. A warning about the version of HDF5 is not a problem. For a different folder, set `OPENEMS_PATH`.
+   > The last command must print `ok`. For a different folder, set `OPENEMS_PATH`.
+
+   > openEMS supplies wheels for Python 3.13 and 3.14 only, and KiCad contains Python 3.11. Thus do not install openEMS into the Python of KiCad. The plugin runs openEMS in this venv. Python 3.13 is also correct: use `py -3.13` in the first command.
 
 7) (optional) Install EMerge. See the [EMerge releases](https://github.com/FennisRobert/EMerge/releases) for the newest version. Make its venv with the Python of KiCad:
 
@@ -61,7 +63,7 @@ The geometry goes from the native board objects of KiCad to the model of the sol
 | Software | Version                        |
 |----------|--------------------------------|
 | KiCad    | 10.0.5                         |
-| openEMS  | v0.37.0-rc1, CSXCAD v0.7.0-rc1 |
+| openEMS  | v0.37.0, CSXCAD v0.7.0         |
 | EMerge   | 2.8.9                          |
 
 ## Usage
@@ -146,12 +148,17 @@ The mesh preset sets the cells for each wavelength, at the shortest wavelength o
 | Fine      | 40                   | 0.59 mm                      |
 | Ultrafine | 80                   | 0.29 mm                      |
 
-The preset sets only this step.
+The preset sets only this step, and the step is never more than 3 mm.
 The cells across the strip of a port, in the gap of a CPW and through the substrate are the same at each preset.
 
 The coarse preset is for a first look, and a small lumped element reads too large there.
+Through a lumped port, a track reads a low impedance: with a step of 3 mm on 1.53 mm of FR-4, tracks of 0.2 to 2.9 mm read 8% to 19% below the closed form.
 Use medium or fine when a number is important.
 For the solver itself, refer to the [openEMS documentation](https://docs.openems.de).
+
+**Use EMerge for a sweep in the MHz band**, for example a DC-DC converter.
+Below about 10 MHz, openEMS stops before the run and gives the "Max steps" that the sweep needs.
+On a small board at 1 to 10 MHz, EMerge takes ~3 minutes and openEMS ~24 minutes.
 
 ### Lumped elements
 
@@ -239,7 +246,7 @@ The 3D radiation pattern, which you can rotate:
 
 The `validation/` folder makes its own test boards, runs the solver and compares the result against closed-form theory.
 [validation/README.md](validation/README.md) lists the tests and tells how to run them.
-All the tests pass on the current version with openEMS and with EMerge, and [the results](validation/README.md#results) give the numbers.
+All the tests pass on the current version with openEMS v0.37.0 and with EMerge 2.8.9, and [the results](validation/README.md#results) give the numbers.
 
 ## License
 

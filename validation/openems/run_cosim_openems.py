@@ -646,15 +646,18 @@ def case_body():
              "the steps"))
     ok = True
     for r in (50.0, 200.0, 1000.0):
-        # **ONE thread.** With 4 threads, the same model ended two times at
-        # 2336 and at 2272 steps, and it read 0.16 dB apart. One thread
-        # also stops some tens of steps apart, because openEMS tests its
-        # end criteria at intervals of wall time. That is `BODY_NOISE_DB`.
+        # **The exact end test, on ONE thread.** openEMS tests its end
+        # criteria at intervals of wall time by default. Thus the same
+        # model stopped at 2070 and at 2346 steps on one thread, and read
+        # 0.0148 dB apart. With 4 threads it stopped at 2336 and at 2272
+        # steps, 0.16 dB apart. `exact_end` tests at each Nyquist period,
+        # thus the same model stops at the same step, and the two runs
+        # give the same bits. `BODY_NOISE_DB` is a margin over that.
         bare = variant("R", r)
-        bare["settings"]["threads"] = 1
+        bare["settings"].update(threads=1, exact_end=True)
         bare_path, _ = solve(bare, "body_bare%g" % r)
         m = variant("R", r, parasitics=True)
-        m["settings"]["threads"] = 1
+        m["settings"].update(threads=1, exact_end=True)
         m["lumped_elements"][0].update(esl=0.5e-9, package="0603")
         now_path, now_mesh = solve(m, "body_now%g" % r)
         now_steps = LAST_STEPS
