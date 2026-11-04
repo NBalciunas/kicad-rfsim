@@ -70,6 +70,8 @@ The self-resonance of an inductor on an 0402 land. The |S21| notch must be at 1/
 A series capacitor of 1, 0.5 and 2 pF as three states. The S21 phase difference to the first state must be within 3° of the closed form.
 * **`run_probe_*.py [mesh] [all|single|dual]`**  
 A patch fed from below through a plated hole (coaxial feed port). One feed must give the resonance within 6% of the closed form, and the resistance of a probe from the plane to the patch. Two feeds must give 15 dB or more of isolation and XPD.
+* **`run_ifa_*.py [mesh] [all|nominal|pins]`**  
+The antenna of TI SWRA117D against the measurement of TI. The S11 dip must be within 8% of 2.48 GHz and −15 dB or less. The polarization, the nulls and the effect of the test pins must agree with TI. The two solvers read the dip 5.5 to 7.9% low, and the cause is not known.
 
 ## openEMS tests (`openems\`)
 
@@ -103,15 +105,15 @@ All the tests pass on the current version, with openEMS v0.37.0 (CSXCAD v0.7.0) 
 
 | Test                      | openEMS v0.37.0                                                  | EMerge 2.8.9                                             |
 |---------------------------|------------------------------------------------------------------|----------------------------------------------------------|
-| `run_headless`            | S11 −11.0 dB or less, S21 −0.2 dB or more                        | S11 −26.9 dB or less, S21 −0.7 dB or more                |
-| `run_headless lumped vhf` | S11 −18.5 dB, S21 −0.16 dB                                       | S11 −28.8 dB, S21 −0.14 dB                               |
-| `run_headless lumped hf`  | S11 −35.3 dB, S21 −0.01 dB                                       | S11 −45.8 dB, S21 −0.02 dB                               |
+| `run_headless`            | S11 −11.3 dB or less, S21 −0.3 dB or more                        | S11 −26.9 dB or less, S21 −0.7 dB or more                |
+| `run_headless lumped vhf` | S11 −20.5 dB, S21 −0.11 dB                                       | S11 −28.8 dB, S21 −0.14 dB                               |
+| `run_headless lumped hf`  | S11 −37.2 dB, S21 −0.01 dB                                       | S11 −45.8 dB, S21 −0.02 dB                               |
 | `run_headless lumped mhz` | stops before the run, as it must                                 | S11 −68.5 dB, S21 0.00 dB                                |
 | `run_cpw cpw`             | eps_eff +1%, Z0 −5%                                              | eps_eff −1%, Z0 −2%                                      |
 | `run_cpw stripline`       | eps_eff +1%, Z0 +1%                                              | eps_eff 0%, Z0 +3%                                       |
 | `run_atten`               | 0.97 times the closed form                                       | 1.04 times                                               |
 | `run_feature`             | 0.4 mm stub +2.5%, 0.3 mm stub at medium −1.3%                   | 0.4 mm stub −0.2%                                        |
-| `run_zone_holes`          | S11 step +7.4 dB                                                 | +22.2 dB                                                 |
+| `run_zone_holes`          | S11 step +7.6 dB                                                 | +22.2 dB                                                 |
 | `run_via`                 | −16%, +13%, +19%, +17%; medium +8% to +20%                       | +19% to +27%                                             |
 | `run_rlc`                 | R 62.0 Ω, L 12.3 nH, C 0.95 pF at 1.5 GHz                        | R 57.7 Ω, L 11.6 nH, C 0.95 pF at 1.5 GHz                |
 | `run_lumped`              | S11 −10.4 dB, S21 −4.3 dB (medium)                               | S11 −9.4 dB, S21 −4.1 dB                                 |
@@ -121,6 +123,7 @@ All the tests pass on the current version, with openEMS v0.37.0 (CSXCAD v0.7.0) 
 | `run_epc`                 | +8.4%                                                            | −6.2%                                                    |
 | `run_states`              | −1.7° to +2.3°                                                   | −2.5° to +1.4°                                           |
 | `run_probe`               | patch −4.4% to −3.5%, S21 −19.2 dB, XPD 27.1 dB                  | patch −5.0% to −4.2%, S21 −20.5 dB, XPD 28.2 and 30.0 dB |
+| `run_ifa`                 | dip −6.4%, −19.0 dB, Dmax 2.9 dBi; fine −6.8%                    | dip −6.8%, −32.3 dB, Dmax 2.3 dBi                        |
 | `run_boards`              |                                                                  | 6 boards; the patch dip is at 2.370 GHz, 7.0 dBi         |
 | `run_stability fast`      | smallest margin 2.2x (limit 1.35x)                               |                                                          |
 | `run_stability slow`      | smallest margin 2.8x (limit 2.0x)                                |                                                          |

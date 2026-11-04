@@ -97,6 +97,13 @@ CPW_STRIP_CELLS = 8
 # function of a mesh rule. Increase this to 8 for a more accurate
 # microstrip only on a board that has no lumped element.
 MSL_STRIP_CELLS = 4
+# **A board with no lumped element has no such error**, thus its wide line gets
+# 8 cells. The cells of such a line are near the step through the substrate,
+# thus the run keeps its timestep. On 1.53 mm of er 4.5, a line of 50 ohm (2.9
+# mm) has cells of 0.36 mm, and the step is 0.38 mm. Thus the limit is 0.9 of
+# the step. A thinner line keeps MSL_STRIP_CELLS.
+MSL_FINE_CELLS = 8
+MSL_FINE_STEP = 0.9
 # The tolerance that makes an edge of a polygon STRAIGHT. `board_reader`
 # rounds each coordinate to 1e-5 mm. Thus the two ends of a straight edge
 # are FULLY equal, and all values below that grid are satisfactory.
@@ -298,6 +305,16 @@ MODEL_VERSION = solverenv.MODEL_VERSION
 def _strip_cells(port_type):
     """Give the number of mesh cells across the strip of a line port."""
     return MSL_STRIP_CELLS if port_type == "msl" else CPW_STRIP_CELLS
+
+
+def _line_cells(model, width):
+    """Give the number of mesh cells across a microstrip of `width`."""
+    z_step = 0.25 * min(d["z_top"] - d["z_bottom"]
+                        for d in model["dielectric_layers"])
+    if (not model.get("lumped_elements")
+            and width / MSL_FINE_CELLS >= MSL_FINE_STEP * z_step):
+        return MSL_FINE_CELLS
+    return MSL_STRIP_CELLS
 
 
 def _strip_lines(across, c, width, cells, res, grade=None):
@@ -1346,7 +1363,7 @@ def _port_geometry(model, res, quiet=False):
                 z_step = 0.25 * min(d["z_top"] - d["z_bottom"]
                                     for d in model["dielectric_layers"])
                 g["track_cells"] = (
-                    MSL_STRIP_CELLS
+                    _line_cells(model, p["track_width"])
                     if p["track_width"] / MSL_STRIP_CELLS >= z_step
                     else POLY_FEATURE_CELLS)
         ports.append(g)
@@ -1394,7 +1411,60 @@ def _clear_for(polys, x, y, axis, sign, metal, length):
     return True
 
 
-def _edge_thirds(model, xs, ys, res, ports, tol):
+def _long_tracks(model, res, lines):
+    """Give (the axis, the centre, the width) of each long track with no line.
+
+    A track with no port and no line in it has 2 cells, its two edges and a
+    line at the middle. `SmoothMeshLines` grades out from those cells, thus a
+    thin track has a grade with no rule. A wide track does not: its cells are
+    near `res`. Z0 at 250 MHz, with a step of 3 mm, on 1.53 mm of er 4.5, of a
+    leg of 100 mm that no port is on, and of a line with the rule of a port:
+
+        track   closed form   the leg   the line
+        2.9 mm     49.8 ohm   41.0 ohm  45.4 ohm
+        1.5 mm     71.1 ohm   59.9 ohm  61.7 ohm
+        1.0 mm     85.1 ohm   72.6 ohm  74.5 ohm
+        0.5 mm    109.8 ohm   93.3 ohm  94.5 ohm
+
+    With this rule, the leg of 2.9 mm reads 44.8 ohm (EMerge: 47.4 ohm). Thus
+    only a track that can hold MSL_STRIP_CELLS cells gets the rule. The
+    length is 2 cells of `res` or more, thus a land is not a track. `lines`
+    has the lines of each axis. A track with a line in it keeps that line.
+    """
+    z_step = 0.25 * min(d["z_top"] - d["z_bottom"]
+                        for d in model["dielectric_layers"])
+    out = set()
+    for polys in model["polygons"].values():
+        for axis in (0, 1):
+            rise, fall = [], []
+            for poly in polys:
+                for a, b in zip(poly, poly[1:] + poly[:1]):
+                    if (abs(a[axis] - b[axis]) >= FLAT_MM
+                            or abs(a[1 - axis] - b[1 - axis]) < 2.0 * res):
+                        continue
+                    lo = min(a[1 - axis], b[1 - axis])
+                    hi = max(a[1 - axis], b[1 - axis])
+
+                    def at(o):
+                        p = (a[axis] + o, 0.5 * (lo + hi))
+                        return p if axis == 0 else p[::-1]
+                    low, high = _inside(polys, *at(-1e-4)), _inside(polys, *at(1e-4))
+                    if high and not low:
+                        rise.append((a[axis], lo, hi))
+                    elif low and not high:
+                        fall.append((a[axis], lo, hi))
+            for c0, lo0, hi0 in rise:
+                for c1, lo1, hi1 in fall:
+                    w = c1 - c0
+                    if (z_step * MSL_STRIP_CELLS <= w <= res
+                            and min(hi0, hi1) - max(lo0, lo1) >= 2.0 * res
+                            and not any(c0 + FLAT_MM < v < c1 - FLAT_MM
+                                        for v in lines[axis])):
+                        out.add((axis, 0.5 * (c0 + c1), w))
+    return sorted(out)
+
+
+def _edge_thirds(model, xs, ys, res, ports, tol, layers):
     """Put the lines of each LONG copper edge at 1/3 and 2/3 of a cell
     (F8), and not one line on the edge. Give the new lines of each
     axis, which `_mesh` makes anchors.
@@ -1426,8 +1496,23 @@ def _edge_thirds(model, xs, ys, res, ports, tol):
     cells of a board by 44%. On the microstrip of `run_headless_openems.py`,
     it made the timestep 20% smaller: the lines at the edges of the board
     are graded to `res`.
+
+    **The two lines must not land on a narrow feature of a different layer.**
+    `layers` has the edges of each layer, for each axis. The two lines are
+    anchors, thus the merge removes each plain line near them. An antenna of
+    TI (`rig_ifa`) has a stub of 0.5 mm on F.Cu, and the edge of the ground
+    on In1.Cu is in that stub. At medium, the rule removed each line in the
+    stub. No current went along it, and the dip of S11 moved from about 2.3 GHz
+    to 2.61 GHz. Such an edge keeps its line on the edge.
     """
     d = EDGE_THIRDS * res
+    narrow = {0: set(), 1: set()}
+    for axis in (0, 1):
+        for found in layers[axis].values():
+            found = sorted(found)
+            for a, b in zip(found, found[1:]):
+                if tol <= b - a <= res:
+                    narrow[axis].update((a, b))
     br = model["board_rect"]
     keep = {0: set(), 1: set()}
     spans = {0: [], 1: []}
@@ -1495,6 +1580,9 @@ def _edge_thirds(model, xs, ys, res, ports, tol):
             if not ok or side is None or total < res:
                 continue
             new = (c + side * d / 3.0, c - side * 2.0 * d / 3.0)
+            if any(abs(q - c) >= FLAT_MM and abs(q - v) < tol
+                   for q in narrow[axis] for v in new):
+                continue
             lines.discard(c)
             lines.update(new)
             added[axis] += new
@@ -1650,7 +1738,9 @@ def _mesh(model, ports, res, notes=None):
             # away, and the rule must do that.
             across = ys if g["prop_dir"] == "x" else xs
             c = g["y"] if g["prop_dir"] == "x" else g["x"]
-            _strip_lines(across, c, g["msl_width"], _strip_cells(g["type"]),
+            _strip_lines(across, c, g["msl_width"],
+                         _line_cells(model, g["msl_width"])
+                         if g["type"] == "msl" else _strip_cells(g["type"]),
                          res)
         elif g.get("track_cells"):
             across = ys if g["track_axis"] == "y" else xs
@@ -1814,6 +1904,10 @@ def _mesh(model, ports, res, notes=None):
     # code has no rule for the cell count. Only the two FACES are
     # important, and the anchors above hold them.
 
+    for axis, c, w in _long_tracks(model, res, (xs, ys)):
+        _strip_lines(xs if axis == 0 else ys, c, w, MSL_STRIP_CELLS, res,
+                     track_grade["x" if axis == 0 else "y"])
+
     # The lines IN the narrow copper come last, for two causes. The rule
     # does not divide a feature that a port, a via or a lumped element
     # divides. Thus it must see all the other lines first. It also uses
@@ -1879,7 +1973,8 @@ def _mesh(model, ports, res, notes=None):
     # The two lines of the rule are anchors. Without them, a merge to the
     # mean of an adjacent line can put the edge back on a line. It can also
     # make one line out of the copper (EDGE_THIRDS).
-    th_x, th_y = _edge_thirds(model, xs, ys, res, ports, tol)
+    th_x, th_y = _edge_thirds(model, xs, ys, res, ports, tol,
+                              (layer_x, layer_y))
     anchor_x = ([(v, RANK_FACE) for v in le_x] + via_x
                 + [(v, RANK_FACE) for v in th_x])
     anchor_y = ([(v, RANK_FACE) for v in le_y] + via_y

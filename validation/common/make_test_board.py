@@ -408,6 +408,151 @@ def make_stripline(path, length=X1 - X0):
     return board, pads
 
 
+# The meander inverted-F antenna of TI SWRA117D (AN043), Table 1, in mm. The
+# figure of the note gives the meaning of each letter.
+IFA_L1, IFA_L2, IFA_L3 = 3.94, 2.70, 5.00
+IFA_L4, IFA_L5, IFA_L6 = 2.64, 2.00, 4.90
+IFA_W1, IFA_W2 = 0.90, 0.50
+IFA_D1, IFA_D2, IFA_D3, IFA_D4, IFA_D5, IFA_D6 = 0.5, 0.3, 0.3, 0.5, 1.4, 1.7
+# The stackup of the readme of the CC2511 dongle: FR4, 4 layers, and 35 um of
+# copper. The note puts the ground on layer 2. The readme gives no loss
+# tangent, thus 0.02 is the usual value of FR4.
+IFA_STACK = (0.25, 0.50, 0.25)
+IFA_ER, IFA_TAND, IFA_CU = 4.5, 0.02, 0.035
+# The note does not give the via. The diameter and the drill fit in the 0.5 mm
+# of the short past the ground, thus the land makes no sliver of copper.
+IFA_VIA = (0.46, 0.2)
+
+
+def ifa_outline():
+    """Give the copper of the antenna as one polygon, from Table 1 of the
+    note. x goes along the board from the left edge of the short, and y
+    goes up from the edge of the ground. Table 1 gives 15.2 x 5.7 mm with
+    the margins, and the two stubs go IFA_D4 past the edge of the ground.
+    """
+    w, y0 = IFA_W2, -IFA_D4
+    low = IFA_L6 - IFA_D4               # the bottom edge of the top bars
+    top = low + w
+    foot = low - IFA_L4                 # the bottom edge of the meander
+    x1 = IFA_W1 + IFA_D5                # the left edge of the feed
+    x2 = x1 + w + IFA_D6                # the left edge of the first meander
+    x3 = x2 + w + IFA_L5                # the left edge of the second vertical
+    x4 = x3 + IFA_L2 - w                # the left edge of the second meander
+    x5 = x4 + w + IFA_L5
+    x6 = x5 + IFA_L2                    # the right edge of the antenna
+    return [(0.0, y0), (IFA_W1, y0), (IFA_W1, low), (x1, low), (x1, y0),
+            (x1 + w, y0), (x1 + w, low), (x2, low), (x2, foot),
+            (x3 + w, foot), (x3 + w, low), (x4, low), (x4, foot),
+            (x5 + w, foot), (x5 + w, low), (x6 - w, low),
+            (x6 - w, low - IFA_L1), (x6, low - IFA_L1), (x6, top),
+            (x5, top), (x5, foot + w), (x4 + w, foot + w), (x4 + w, top),
+            (x3, top), (x3, foot + w), (x2 + w, foot + w), (x2 + w, top),
+            (0.0, top)]
+
+
+# The dongle as the Gerber files of TI give it, in the mm of the files.
+GB_X, GB_Y = 45.5, 92.66    # the left edge of the short, and the ground edge
+GB_BOARD = (37.73, 57.53, 60.24, 97.82)
+GB_BOARD_NO_PINS = (44.82, 57.53, 60.24, 97.82)
+GB_GROUND = (44.82, 58.15, 59.63, 92.66)    # layer 2
+GB_STUB_END = 92.07         # the ends of the short and of the feed
+# The two pours of layer 1 adjacent to the antenna, with a simple outline. The
+# holes and the parts below 81.4 mm are not in them.
+GB_POURS = (
+    ((45.1, 92.2), (47.2, 92.2), (47.2, 90.9), (49.3, 90.9), (49.3, 87.6),
+     (51.1, 85.7), (50.3, 85.3), (50.4, 81.4), (45.1, 81.4)),
+    ((50.75, 92.4), (58.8, 92.4), (58.8, 85.6), (52.2, 85.9), (50.3, 87.6),
+     (50.3, 90.9), (50.75, 91.4)))
+# The vias between the pours and layer 2. The files have more of them, and the
+# rig does not put each one in the model, because each one adds mesh lines.
+GB_VIAS = ((45.6, 91.6), (45.6, 86.0), (47.0, 82.0), (49.0, 90.5),
+           (51.0, 92.0), (55.0, 92.0), (58.4, 92.0), (58.4, 86.2),
+           (54.0, 86.3))
+
+
+def _poly(board, pts, layer):
+    shape = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_POLY)
+    outline = pcbnew.SHAPE_POLY_SET()
+    outline.NewOutline()
+    for x, y in pts:
+        outline.Append(FromMM(x), FromMM(y))
+    shape.SetPolyShape(outline)
+    shape.SetFilled(True)
+    shape.SetWidth(0)
+    shape.SetLayer(layer)
+    board.Add(shape)
+
+
+def make_ifa(path, pins=True):
+    """Make the board of the antenna from the Gerber files of the dongle.
+
+    The copper of the antenna is the one of Table 1 of the note. The Gerber
+    file gives the same copper to 0.01 mm. The ground, the board and the two
+    pours come from the files. `pins` adds the part of the board with the test
+    pins. The port is at the end of the feed stub. The layers below the ground
+    are not in the model.
+    """
+    board = pcbnew.NewBoard(path)
+    board.SetCopperLayerCount(4)
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    rf = pcbnew.NETINFO_ITEM(board, "RF")
+    board.Add(gnd)
+    board.Add(rf)
+    # KiCad has y down, and the files have y up.
+
+    def at(x, y):
+        return x, 120.0 - y
+
+    shift = GB_STUB_END - GB_Y - min(y for _, y in ifa_outline())
+    _poly(board, [at(x + GB_X, y + GB_Y + shift) for x, y in ifa_outline()],
+          pcbnew.F_Cu)
+    for pts in GB_POURS:
+        _poly(board, [at(x, y) for x, y in pts], pcbnew.F_Cu)
+
+    fx, fy = at(GB_X + IFA_W1 + IFA_D5 + IFA_W2 / 2,
+                GB_STUB_END + IFA_W2 / 2)
+    pad = _pad_fp(board, "J1", fx, fy, rf, size=IFA_W2)
+
+    for x, y in ((GB_X + IFA_W1 / 2, GB_STUB_END + IFA_D4 / 2),) + GB_VIAS:
+        via = pcbnew.PCB_VIA(board)
+        vx, vy = at(x, y)
+        via.SetPosition(VECTOR2I(FromMM(vx), FromMM(vy)))
+        via.SetWidth(FromMM(IFA_VIA[0]))
+        via.SetDrill(FromMM(IFA_VIA[1]))
+        via.SetNetCode(gnd.GetNetCode())
+        board.Add(via)
+
+    x0, y0, x1, y1 = GB_GROUND
+    _zone(board, pcbnew.In1_Cu, gnd,
+          [at(x0, y1), at(x1, y1), at(x1, y0), at(x0, y0)])
+    x0, y0, x1, y1 = GB_BOARD if pins else GB_BOARD_NO_PINS
+    _edge_cuts(board, [at(x0, y1), at(x1, y1), at(x1, y0), at(x0, y0)])
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    pcbnew.SaveBoard(path, board)
+    _write_stackup(path, IFA_STACK, IFA_ER, IFA_TAND, IFA_CU)
+    board.SetFileName(path)  # extract() reads the stackup from this file
+    return board, [pad]
+
+
+def _write_stackup(path, stack, er, tand, cu):
+    """Put a (stackup ...) block into a saved board file. SWIG has no type
+    for the stackup, thus the text of the file is the only path."""
+    names = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    rows = []
+    for i, name in enumerate(names):
+        rows.append('(layer "%s" (type "copper") (thickness %g))' % (name, cu))
+        if i < len(stack):
+            rows.append('(layer "dielectric %d" (type "core") (thickness %g) '
+                        '(material "FR4") (epsilon_r %g) (loss_tangent %g))'
+                        % (i + 1, stack[i], er, tand))
+    block = "(stackup %s)" % " ".join(rows)
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    start = text.index("(setup") + len("(setup")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text[:start] + " " + block + text[start:])
+
+
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else \
         os.path.join(os.path.dirname(__file__), "microstrip_50ohm.kicad_pcb")

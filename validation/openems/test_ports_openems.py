@@ -339,6 +339,19 @@ def test_strip_cells():
               % (kind, len(inside), len(out)))
 
 
+def test_a_wide_line_with_no_element_gets_more_cells():
+    """A wide microstrip gets 8 cells only on a board with no lumped element.
+    On a board with an element, 8 cells move the value of the element."""
+    m = model("msl")
+    m["dielectric_layers"] = [{"z_top": 1.53, "z_bottom": 0.0}]
+    m["lumped_elements"] = []
+    assert runner._line_cells(m, 2.9) == 8, "a wide line with no element"
+    assert runner._line_cells(m, 1.0) == 4, "a thin line keeps its timestep"
+    m["lumped_elements"] = [{"ref": "C1"}]
+    assert runner._line_cells(m, 2.9) == 4, "a wide line with an element"
+    print("a wide line with no element gets more cells OK")
+
+
 def test_track_of_a_lumped_port():
     """The track of a lumped port must have cells and a grade.
 
@@ -350,7 +363,7 @@ def test_track_of_a_lumped_port():
     of 0.026 mm at the edge of the board.
     """
     res = 3.0
-    for w, cells in ((2.9, 4), (0.2, 2)):
+    for w, cells in ((2.9, 8), (0.2, 2)):
         m = model("lumped", track_width=w, width=w, length=w)
         m["polygons"] = {"In1.Cu": [[[5.0 - w / 2, -10.0 - w / 2],
                                      [35.0 + w / 2, -10.0 - w / 2],
@@ -1282,6 +1295,47 @@ def test_a_long_edge_gets_the_thirds():
           "keeps its edges)" % (d / 3.0, 2.0 * d / 3.0))
 
 
+def test_thirds_keep_a_strip_of_a_different_layer():
+    """The two lines of the rule are anchors. Thus they must not land on a
+    narrow feature of a different layer, or the merge removes its lines."""
+    res = 2.4
+    m = {"board_rect": {"x0": 0.0, "x1": 60.0, "y0": -60.0, "y1": 0.0},
+         "region": {"x0": -5.0, "x1": 65.0, "y0": -65.0, "y1": 5.0},
+         "vias": [],
+         "polygons": {"In1.Cu": [[[5.0, -50.0], [30.0, -50.0],
+                                  [30.0, -10.0], [5.0, -10.0]]]}}
+    for edges, added in (((), True), ((30.2, 30.7), False)):
+        xs, ys = {30.0}, set()
+        new, _ = runner._edge_thirds(m, xs, ys, res, [], 0.3,
+                                     ({"F.Cu": set(edges)}, {"F.Cu": set()}))
+        assert bool([v for v in new if abs(v - 30.0) < 1.0]) == added, \
+            "the rule at the edge 30 with the features %s" % (edges,)
+        assert near(xs, 30.0) != added, "the line on the edge"
+    print("the thirds keep a strip of a different layer OK")
+
+
+def test_a_long_track_gets_its_cells():
+    """A long track that can hold the cells of a port, and that has no line
+    in it, gets them. A land, a thin track and a wide track do not."""
+    res = 3.0
+    base = {"dielectric_layers": [{"z_top": 1.53, "z_bottom": 0.0}]}
+
+    def tracks(w, length, lines=()):
+        poly = [[10.0, -length], [10.0 + w, -length], [10.0 + w, 0.0],
+                [10.0, 0.0]]
+        return runner._long_tracks(dict(base, polygons={"F.Cu": [poly]}), res,
+                                   (set(lines), set()))
+    found = tracks(2.9, 100.0)
+    assert len(found) == 1 and found[0][0] == 0 \
+        and abs(found[0][1] - 11.45) < 1e-6 and abs(found[0][2] - 2.9) < 1e-6, \
+        "a long track: %s" % (found,)
+    assert not tracks(2.9, 3.0), "a land is not a track"
+    assert not tracks(1.0, 100.0), "a thin track grades with no rule"
+    assert not tracks(4.0, 100.0), "a wide track has its cells"
+    assert not tracks(2.9, 100.0, (11.0,)), "a track keeps the line in it"
+    print("a long track gets its cells OK")
+
+
 def test_a_state_changes_the_values():
     """F30: `solverenv.apply_state` gives a copy of the model with the
     values of a state, and the model itself does not change. A state keeps
@@ -1339,4 +1393,7 @@ if __name__ == "__main__":
     test_a_body_that_changes_nothing_stays_out()
     test_the_warnings_name_the_inductors()
     test_the_mesh_says_what_it_chose()
+    test_thirds_keep_a_strip_of_a_different_layer()
+    test_a_long_track_gets_its_cells()
+    test_a_wide_line_with_no_element_gets_more_cells()
     print("PASS")
